@@ -135,6 +135,14 @@ pub fn card_frame(t: &CustomThemeConfig) -> egui::Frame {
         .inner_margin(Margin::same(14))
 }
 
+pub fn compact_card(t: &CustomThemeConfig) -> egui::Frame {
+    egui::Frame::NONE
+        .fill(rgb(t.card_bg))
+        .stroke(Stroke::new(1.0_f32, rgb(t.card_border)))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(11, 9))
+}
+
 pub fn section_title(ui: &mut egui::Ui, text: impl Into<String>, t: &CustomThemeConfig) {
     ui.label(
         egui::RichText::new(text.into())
@@ -143,10 +151,13 @@ pub fn section_title(ui: &mut egui::Ui, text: impl Into<String>, t: &CustomTheme
     );
 }
 
-pub fn sidebar_tab_button(
+/// Tactile segmented tile button inspired by G-Helper's rounded mode tiles.
+pub fn tile_button(
     ui: &mut egui::Ui,
     label: &str,
     selected: bool,
+    width: f32,
+    height: f32,
     t: &CustomThemeConfig,
 ) -> egui::Response {
     let accent = accent_color(t);
@@ -156,16 +167,24 @@ pub fn sidebar_tab_button(
                 accent.r(),
                 accent.g(),
                 accent.b(),
-                if t.dark_base { 48 } else { 34 },
+                if t.dark_base { 54 } else { 38 },
             ),
-            Stroke::new(1.0_f32, accent),
+            Stroke::new(1.3_f32, accent),
             if t.dark_base { Color32::WHITE } else { accent },
         )
     } else {
-        (Color32::TRANSPARENT, Stroke::NONE, rgb(t.text_primary))
+        (
+            if t.dark_base {
+                shift_color(t.card_bg, 8)
+            } else {
+                shift_color(t.card_bg, -12)
+            },
+            Stroke::new(1.0_f32, rgb(t.card_border)),
+            rgb(t.text_primary),
+        )
     };
 
-    let mut rt = egui::RichText::new(label).size(14.5).color(text_color);
+    let mut rt = egui::RichText::new(label).size(13.0).color(text_color);
     if selected {
         rt = rt.strong();
     }
@@ -174,7 +193,7 @@ pub fn sidebar_tab_button(
         .fill(fill)
         .stroke(stroke)
         .corner_radius(CornerRadius::same(8));
-    ui.add_sized([190.0, 34.0], btn)
+    ui.add_sized([width, height], btn)
 }
 
 pub fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
