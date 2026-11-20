@@ -150,17 +150,22 @@ pub enum BatteryChargeMode {
     Hold,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct BatteryStatus {
     pub present: bool,
     pub ac_connected: bool,
     pub charging: bool,
     pub charge_percent: u8,
     pub charge_rate_w: Option<f32>,
+    pub voltage_v: Option<f32>,
+    pub remaining_capacity_mwh: Option<u32>,
+    pub time_remaining_min: Option<u32>,
     pub design_capacity_mwh: Option<u32>,
     pub full_charge_capacity_mwh: Option<u32>,
     pub wear_percent: Option<f32>,
     pub current_mode: BatteryChargeMode,
+    pub raw_mode_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -231,22 +236,38 @@ pub struct ConflictServiceInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct TelemetrySnapshot {
     pub timestamp: Option<DateTime<Utc>>,
     pub cpu_temp_c: Option<f32>,
     pub cpu_usage_pct: Option<f32>,
     pub cpu_clock_mhz: Option<u32>,
+    pub cpu_power_w: Option<f32>,
     pub gpu_name: Option<String>,
     pub gpu_temp_c: Option<f32>,
     pub gpu_usage_pct: Option<f32>,
     pub gpu_power_w: Option<f32>,
+    pub gpu_power_limit_w: Option<f32>,
     pub gpu_clock_mhz: Option<u32>,
+    pub gpu_mem_clock_mhz: Option<u32>,
+    pub gpu_mem_used_mb: Option<u32>,
+    pub gpu_mem_total_mb: Option<u32>,
+    pub gpu_pstate: Option<String>,
+    pub gpu_throttle_reason: Option<String>,
     pub ram_used_gb: Option<f32>,
     pub ram_total_gb: Option<f32>,
     pub fan_rpms: Vec<u32>,
+    pub fan_max_rpms: Vec<u32>,
     pub ac_connected: Option<bool>,
     pub battery_pct: Option<u8>,
     pub battery_rate_w: Option<f32>,
+    pub battery_voltage_v: Option<f32>,
+    pub battery_remaining_mwh: Option<u32>,
+    pub battery_time_remaining_min: Option<u32>,
+    pub disk_read_mb_s: Option<f32>,
+    pub disk_write_mb_s: Option<f32>,
+    pub net_rx_mb_s: Option<f32>,
+    pub net_tx_mb_s: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
