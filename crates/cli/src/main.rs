@@ -1,11 +1,12 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use omvix_core::{
-    AppConfig, DiagnosticReport, DiagnosticsBackend, FanMode, LogLevel, PerformanceMode,
-    TelemetryBackend, TelemetrySnapshot, ThermalFanBackend, init_logging, list_log_files,
-    total_log_bytes,
+    AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryStatus, DiagnosticReport,
+    DiagnosticsBackend, FanMode, LogLevel, PerformanceMode, TelemetryBackend, TelemetrySnapshot,
+    ThermalFanBackend, init_logging, list_log_files, total_log_bytes,
 };
 use omvix_windows::{
-    WindowsDiagnosticsBackend, WindowsTelemetryBackend, WindowsThermalFanBackend,
+    WindowsBatteryBackend, WindowsDiagnosticsBackend, WindowsTelemetryBackend,
+    WindowsThermalFanBackend,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -50,6 +51,39 @@ enum Commands {
         #[command(subcommand)]
         action: FanAction,
     },
+    /// Battery health and WMI 0x2B charge limiting controls.
+    Battery {
+        #[command(subcommand)]
+        action: BatteryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum BatteryAction {
+    /// Show battery level, capacity, wear, charge rate, and active charge mode.
+    Status,
+    /// Set battery charge-limiting mode (requires Administrator).
+    SetMode {
+        #[arg(value_enum)]
+        mode: CliBatteryMode,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CliBatteryMode {
+    Auto,
+    Inhibit,
+    Hold,
+}
+
+impl From<CliBatteryMode> for BatteryChargeMode {
+    fn from(value: CliBatteryMode) -> Self {
+        match value {
+            CliBatteryMode::Auto => Self::Auto,
+            CliBatteryMode::Inhibit => Self::Inhibit,
+            CliBatteryMode::Hold => Self::Hold,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -225,7 +259,69 @@ fn main() -> ExitCode {
                 }
             }
         },
+        Commands::Battery { action } => match action {
+            BatteryAction::Status => match WindowsBatteryBackend::new().get_battery_status() {
+                Ok(st) => {
+                    print_battery_status(&st);
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    tracing::error!("Failed to read battery status: {err}");
+                    eprintln!("Error: {err}");
+                    ExitCode::FAILURE
+                }
+            },
+            BatteryAction::SetMode { mode } => {
+                let target: BatteryChargeMode = mode.into();
+                match WindowsBatteryBackend::new().set_charge_mode(target) {
+                    Ok(()) => {
+                        println!("Applied battery charge mode: {target:?}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        tracing::error!("Failed to set battery charge mode: {err}");
+                        eprintln!("Error: {err}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        },
     }
+}
+
+fn print_battery_status(b: &BatteryStatus) {
+    println!("============================================================");
+    println!(" Omvix Hub Battery Care Status");
+    println!("============================================================");
+    println!("Present        : {}", b.present);
+    println!("AC Connected   : {}", b.ac_connected);
+    println!("Charging       : {}", b.charging);
+    println!("Charge Level   : {}%", b.charge_percent);
+    println!(
+        "Power Rate     : {}",
+        b.charge_rate_w
+            .map(|w| format!("{w:+.2} W"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "Design Cap     : {}",
+        b.design_capacity_mwh
+            .map(|m| format!("{m} mWh"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "Full Charge    : {}",
+        b.full_charge_capacity_mwh
+            .map(|m| format!("{m} mWh"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "Battery Wear   : {}",
+        b.wear_percent
+            .map(|w| format!("{w:.1}%"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!("Firmware Mode  : {:?}", b.current_mode);
 }
 
 fn print_telemetry(t: &TelemetrySnapshot) {
