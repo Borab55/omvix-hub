@@ -1,0 +1,28 @@
+[package]
+name = "omvix-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+omvix-core = { path = "../core" }
+eframe.workspace = true
+egui.workspace = true
+egui_plot.workspace = true
+tray-icon.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+omvix-windows = { path = "../backend-windows" }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+omvix-linux = { path = "../backend-linux" }

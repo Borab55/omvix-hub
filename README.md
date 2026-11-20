@@ -6,15 +6,15 @@
 
 ---
 
-## Key Goals / Temel Hedefler
+## Key Features / Özellikler
 
 - **Zero OGH Dependency / OGH Bağımsızlığı:** Communicates directly with HP ACPI/WMI firmware (`root\WMI\hpqBIntM`, `hpqBEvnt`) without Microsoft Store apps, background telemetry, or HP HSA services.
-- **Victus & OMEN Support / Victus ve OMEN Desteği:** Auto-detects board ID (`Win32_BaseBoard.Product`, e.g., Victus 16 `8C99`) and selects the appropriate thermal profile protocol (`V0`, `V1`, `Victus`, `Victus-S`).
-- **Battery Care / Batarya Sağlığı:** Native WMI `0x2B` charge limiting (`Auto`, `Inhibit`, `Hold`), custom upper/lower thresholds, one-time 100% travel charge, wattage and wear reporting (inspired by `hp-charge-limit-rs` & `hp-charge-limiter`).
-- **Thermal & Fan Control:** Performance mode switching, Auto/Max/Manual/Custom curve with hysteresis and anti-2-minute-reset keep-alive loop.
-- **Display, Lighting, GPU & CPU Tuning:** 1-zone/4-zone RGB & white backlight control, MUX switch (`Hybrid`/`Discrete`), refresh rate (`Hz`) switcher, AC/Battery auto-profiles, CPU boost & PL1/PL2/TCC/Undervolt tuning (with automatic VBS/HVCI lock detection), Omen key capture & global hotkeys.
-- **Clean Architecture / Temiz Mimari:** Windows-first Cargo workspace with OS-agnostic `omvix-core` traits and a Linux backend scaffold (`omvix-linux` targeting `hp-wmi`, `hwmon`, `acpi_call`).
-- **Observability & i18n:** Ring-rotating timestamped logging strictly capped at **20 MB** (`4 x 5 MB`), plus **English & Turkish** localization ready for community language packs.
+- **Victus & OMEN Support / Victus ve OMEN Desteği:** Auto-detects board ID (`Win32_BaseBoard.Product`, e.g., Victus 16 `8C99`) and selects the appropriate thermal profile protocol (`OmenV0`, `OmenV1`, `Victus`, `VictusS`).
+- **Thermal & Fan Control:** Performance mode switching (`Eco`, `Quiet`, `Balanced`, `Performance`), `Auto`/`Max`/`Manual` speed, interactive `CustomCurve` with downward hysteresis, and a 2-minute keep-alive guard preventing Victus/OMEN BIOS timeout resets.
+- **Battery Care / Batarya Sağlığı:** Native WMI `0x2B` charge limiting (`Auto`, `Inhibit`, `Hold`), custom upper/lower thresholds, **one-time 100% travel charge**, wear %, capacity, and charge/discharge wattage (inspired by `hp-charge-limit-rs` & `hp-charge-limiter`).
+- **Display, Lighting, GPU & CPU Tuning:** 1-zone/4-zone RGB & white backlight control, GPU MUX switch (`Hybrid`/`Discrete`/`Optimus`), display refresh rate (`Hz`) switcher, AC/Battery auto-profiles, CPU Turbo Boost, PL1/PL2/TCC/Undervolt controls (with automatic VBS/HVCI lock detection).
+- **Hotkeys & System Tray:** Dedicated OMEN key capture (`hpqBEvnt`) with custom action/command assignment, global toggle shortcut (`Ctrl+Shift+O`), minimize-to-tray on close, and tray quick actions.
+- **i18n & Diagnostics:** Instant **Türkçe / English** switching (extensible JSON packs under `locales/`), companion/conflict service detector, JSON diagnostic export, and timestamped ring-rotating file logger capped at **20 MB** (`4 x 5 MB`).
 
 ---
 
@@ -23,29 +23,56 @@
 ```text
 hp-omen-hub-lite/
 ├── crates/
-│   ├── core/              # omvix-core: OS-agnostic models, traits, fan curve engine, board DB, config, i18n, 20 MB rotating logger
-│   ├── backend-windows/   # omvix-windows: Native COM/WMI hpqBIntM client, system diagnostics, NVML, Win32, optional PawnIO bridge
-│   ├── backend-linux/     # omvix-linux: Linux sysfs/ACPI trait scaffold (hp-wmi, platform_profile, hwmon, acpi_call SBCC)
-│   ├── cli/               # omvix-cli: Safe hardware probe, diagnostic JSON export, and CLI testing tool
-│   └── app/               # omvix-hub: Pure Rust desktop GUI (egui/eframe) + System Tray
-├── locales/               # en.json, tr.json (extensible JSON localization files)
-├── docs/                  # Architecture notes, WMI protocol reference, board compatibility matrix
+│   ├── core/              # omvix-core: OS-agnostic models, traits, fan curve, battery care, auto-profile, i18n, 20 MB logger
+│   ├── backend-windows/   # omvix-windows: COM/WMI hpqBIntM & hpqBEvnt, NVML, sysinfo, Win32 Power/GDI/Registry
+│   ├── backend-linux/     # omvix-linux: Linux sysfs/ACPI trait scaffold (hp-wmi, platform_profile, hwmon, acpi_call)
+│   ├── cli/               # omvix-cli: Hardware probe, telemetry, display, battery, thermal/fan CLI
+│   └── app/               # omvix-hub: Pure Rust desktop GUI (egui/eframe + egui_plot + tray-icon)
+├── locales/               # en.json, tr.json
+├── docs/                  # Architecture & protocol notes
 └── CHANGELOG.md
 ```
 
 ---
 
-## Quick Start (Development)
+## Build & Run
 
 ```powershell
-# Run workspace tests
+# Run all workspace unit tests
 cargo test --workspace
 
-# Run read-only hardware diagnostics on an HP laptop (run in elevated terminal for root\WMI access)
-cargo run -p omvix-cli -- probe --verbose
+# Build optimized standalone release binaries (~7.6 MB GUI, ~2.7 MB CLI)
+cargo build --release --workspace
 
-# Export JSON diagnostic snapshot
-cargo run -p omvix-cli -- export-diagnostics --out diagnostics.json
+# Launch Omvix Hub GUI (click "Restart as Administrator" inside Dashboard for WMI BIOS writes)
+.\target\release\omvix-hub.exe
+
+# Run smoke test
+.\target\release\omvix-hub.exe --smoke-test
 ```
 
-> **Note:** On Windows, accessing `root\WMI\hpqBIntM` requires Administrator privileges.
+### CLI Examples (`omvix-cli.exe`)
+
+```powershell
+# Read-only hardware & WMI probe (run as Administrator to inspect hpqBIntM hex responses)
+.\target\release\omvix-cli.exe probe --verbose
+
+# Export JSON diagnostic report
+.\target\release\omvix-cli.exe export-diagnostics --out diagnostics.json
+
+# Live telemetry, battery health, display modes, CPU boost/VBS status
+.\target\release\omvix-cli.exe telemetry
+.\target\release\omvix-cli.exe battery status
+.\target\release\omvix-cli.exe display list
+.\target\release\omvix-cli.exe tuning status
+.\target\release\omvix-cli.exe logs-path
+
+# Elevated control commands (Administrator terminal)
+.\target\release\omvix-cli.exe thermal set performance
+.\target\release\omvix-cli.exe fan set manual --speed 65
+.\target\release\omvix-cli.exe battery set-mode inhibit
+```
+
+### Paths (Windows)
+- **Config:** `%APPDATA%\OmvixHub\config.toml`
+- **Rotating Logs (20 MB cap):** `%LOCALAPPDATA%\OmvixHub\logs\omvix.log`
