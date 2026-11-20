@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const COMPACT_SIZE: [f32; 2] = [468.0, 680.0];
-const EXPANDED_SIZE: [f32; 2] = [1080.0, 680.0];
+const COMPACT_SIZE: [f32; 2] = [468.0, 712.0];
+const EXPANDED_SIZE: [f32; 2] = [1080.0, 712.0];
 
 #[cfg(windows)]
 use omvix_windows::hotkeys::{ListenerHandle, spawn_global_hotkey_listener, spawn_omen_key_listener};
@@ -338,6 +338,11 @@ fn main() {
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
                 eframe::egui_wgpu::WgpuSetupCreateNew {
+                    #[cfg(windows)]
+                    instance_descriptor: eframe::wgpu::InstanceDescriptor {
+                        backends: eframe::wgpu::Backends::DX12,
+                        ..Default::default()
+                    },
                     power_preference: eframe::wgpu::PowerPreference::LowPower,
                     ..Default::default()
                 },

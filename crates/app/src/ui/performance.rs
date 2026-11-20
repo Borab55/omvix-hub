@@ -241,6 +241,13 @@ pub fn render(
 
         if cfg.thermal_fan.fan_mode == FanMode::CustomCurve {
             ui.add_space(8.0);
+            if st.telemetry.cpu_temp_c.is_none() {
+                ui.colored_label(
+                    crate::theme::STATUS_WARN,
+                    i18n.t("fan.no_cpu_sensor_notice"),
+                );
+                ui.add_space(4.0);
+            }
             cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
 
             let line_pts: PlotPoints<'_> = cfg
@@ -266,6 +273,9 @@ pub fn render(
                 .include_y(105.0)
                 .allow_zoom(false)
                 .allow_drag(false)
+                .allow_scroll(false)
+                .allow_boxed_zoom(false)
+                .allow_double_click_reset(false)
                 .show(ui, |plot_ui| {
                     plot_ui.line(Line::new(line_pts).color(accent).width(2.0_f32));
                     plot_ui.points(
