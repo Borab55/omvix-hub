@@ -1,4 +1,6 @@
-use crate::theme::{STATUS_OK, STATUS_WARN, accent_color, card_frame, section_title, status_badge};
+use crate::theme::{
+    STATUS_OK, STATUS_WARN, accent_color, card_frame, pill_button, section_title, status_badge,
+};
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
@@ -159,10 +161,7 @@ pub fn render(
                 };
                 let selected = is_profile_active(cfg, &preset);
                 col.vertical(|ui| {
-                    if ui
-                        .selectable_label(selected, RichText::new(i18n.t(title_key)).strong())
-                        .clicked()
-                    {
+                    if pill_button(ui, &i18n.t(title_key), selected, t).clicked() {
                         apply_battery_profile(cfg, &preset);
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -191,10 +190,7 @@ pub fn render(
             for (idx, prof) in cfg.battery.custom_profiles.iter().enumerate() {
                 let is_active = cfg.battery.active_profile_id.as_deref() == Some(&prof.id);
                 ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .selectable_label(is_active, RichText::new(&prof.name).strong())
-                        .clicked()
-                    {
+                    if pill_button(ui, &prof.name, is_active, t).clicked() {
                         apply_profile = Some(prof.clone());
                     }
                     ui.weak(format!(
@@ -249,7 +245,9 @@ pub fn render(
                 (BatteryChargeMode::Hold, "battery.mode_hold"),
                 (BatteryChargeMode::Auto, "battery.mode_auto"),
             ] {
-                ui.selectable_value(&mut draft.mode, m, i18n.t(key));
+                if pill_button(ui, &i18n.t(key), draft.mode == m, t).clicked() {
+                    draft.mode = m;
+                }
             }
         });
         if ui
@@ -324,10 +322,7 @@ pub fn render(
                 (BatteryChargeMode::Hold, "battery.mode_hold"),
                 (BatteryChargeMode::Auto, "battery.mode_auto"),
             ] {
-                if ui
-                    .selectable_label(cfg.battery.mode == m, i18n.t(key))
-                    .clicked()
-                {
+                if pill_button(ui, &i18n.t(key), cfg.battery.mode == m, t).clicked() {
                     cfg.battery.mode = m;
                     cfg.battery.active_profile_id = None;
                 }
@@ -374,10 +369,7 @@ pub fn render(
             } else {
                 i18n.t("battery.one_time_full_charge")
             };
-            if ui
-                .selectable_label(cfg.battery.one_time_full_charge, travel_btn_label)
-                .clicked()
-            {
+            if pill_button(ui, &travel_btn_label, cfg.battery.one_time_full_charge, t).clicked() {
                 cfg.battery.one_time_full_charge = !cfg.battery.one_time_full_charge;
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));

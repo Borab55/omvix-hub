@@ -3,6 +3,22 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.3.2] - 2026-11-20
+
+### Fixed & Added (Critical Thermal Safety, Sensor Clarity & UI Polish)
+- **Critical Fan Stall Fix (`thermal_fan.rs`, `telemetry.rs`, `wmi_bios.rs`, `core/thermal.rs`):**
+  - Removed the dangerous `0x20008, 0x2E [0, 0]` write on `FanMode::Auto` (on HP Victus `8C99` / OMEN firmware, writing level `0` stops the fans completely at `0 RPM` for 120 seconds instead of restoring BIOS control). `FanMode::Auto` now clears Max Fan (`0x27 [0]`) and re-applies the active performance profile via `0x1A` with `byBios = 0x01`.
+  - Stopped passive telemetry/diagnostics from calling `0x20008, 0x10` (`FanCount`), which was arming the firmware's 120-second user-defined fan timer even in Auto mode. Telemetry now discovers fan count from `FanTableGet (0x2F)`.
+  - Added `MIN_SAFE_FAN_LEVEL = 18` (~1800 RPM floor) in `safe_manual_wmi_level` and added `ThermalSafetyGuard` (`CPU >= 90°C`, `GPU >= 86°C`, `Chassis >= 54°C`, or `0 RPM` under load for 2 consecutive EC polls -> emergency `FanMode::Max` with hysteresis release).
+- **True CPU Die vs. EC Chassis Sensor Separation + PawnIO `IntelMSR` Reader (`pawnio.rs`, `telemetry.rs`, `monitor.rs`, `cockpit.rs`):**
+  - Stopped mislabeling HP EC `0x20008, 0x23` (chassis/IR sensor, e.g. `46°C`) as CPU die temperature. `0x23` is now stored separately in `TelemetrySnapshot::chassis_temp_c`.
+  - Added optional zero-dependency Win32 `DeviceIoControl` client for signed **PawnIO** + `IntelMSR.bin` (`MSR_IA32_TEMPERATURE_TARGET` `0x1A2` + `MSR_IA32_PACKAGE_THERM_STATUS` `0x1B1` with median-of-3 filtering) to read true CPU package die temperature even under Win11 VBS/HVCI.
+  - Added `effective_fan_curve_temp_c` so `CustomCurve` safely bridges GPU temp, conservative chassis mapping, and EMI CPU package power when PawnIO is not installed.
+- **UI & Graphics Improvements (`battery.rs`, `cockpit.rs`, `monitor.rs`, `performance.rs`, `main.rs`, `logging.rs`):**
+  - Added `pill_button` borders to all built-in/custom battery profiles, hold-mode buttons, and travel toggles.
+  - Disabled plot mouse-wheel interception (`.allow_scroll(false)`, `.allow_boxed_zoom(false)`, `.allow_double_click_reset(false)`) on all `Monitor` and `Performance & Fans` charts so outer page scrolling works smoothly.
+  - Increased window height slightly (`468 × 712` <-> `1080 × 712`) so custom battery profiles don't crowd Card A, switched Windows `wgpu` backend to `Backends::DX12`, and silenced noisy `wgpu_hal` warnings in `omvix.log`.
+
 ## [0.3.1] - 2026-11-20
 
 ### Fixed & Improved

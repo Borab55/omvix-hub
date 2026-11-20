@@ -342,7 +342,10 @@ impl LogHandle {
 pub fn init_logging(config: &LogConfig, log_to_stderr: bool) -> Result<LogHandle> {
     let dir = config.resolved_dir();
     let writer = SizeRotatingWriter::from_config(config)?;
-    let filter_str = format!("{},wgpu=warn,eframe=warn,egui=warn", config.level.as_filter_str());
+    let filter_str = format!(
+        "{},wgpu=warn,wgpu_hal=error,wgpu_core=warn,eframe=warn,egui=warn",
+        config.level.as_filter_str()
+    );
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter_str));
 
     let file_layer = tracing_subscriber::fmt::layer()

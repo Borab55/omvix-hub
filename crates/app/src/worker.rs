@@ -1,5 +1,8 @@
 use omvix_core::auto_profile::AutoProfileEngine;
 use omvix_core::battery_care::BatteryCareEngine;
+use omvix_core::thermal::{
+    ThermalGuardDecision, ThermalSafetyGuard, effective_fan_curve_temp_c,
+};
 use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryStatus, ConflictServiceInfo,
     CpuBoostMode, CpuTuningBackend, DiagnosticReport, DiagnosticsBackend, DisplayBackend,
@@ -83,6 +86,7 @@ pub struct SharedState {
     pub gpu_load_history: VecDeque<(f64, f32)>,
     pub ram_usage_history: VecDeque<(f64, f32)>,
     pub cpu_temp_history: VecDeque<(f64, f32)>,
+    pub chassis_temp_history: VecDeque<(f64, f32)>,
     pub gpu_temp_history: VecDeque<(f64, f32)>,
     pub cpu_power_history: VecDeque<(f64, f32)>,
     pub gpu_power_history: VecDeque<(f64, f32)>,
@@ -94,6 +98,7 @@ pub struct SharedState {
     pub cpu_usage_stats: MetricStats,
     pub gpu_usage_stats: MetricStats,
     pub telemetry_paused: bool,
+    pub thermal_guard_active: bool,
     pub battery_status: Option<BatteryStatus>,
     pub display_mode: Option<DisplayModeInfo>,
     pub diagnostics: Option<DiagnosticReport>,
@@ -114,6 +119,7 @@ impl Default for SharedState {
             gpu_load_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
             ram_usage_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
             cpu_temp_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
+            chassis_temp_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
             gpu_temp_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
             cpu_power_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
             gpu_power_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
@@ -125,6 +131,7 @@ impl Default for SharedState {
             cpu_usage_stats: MetricStats::new(),
             gpu_usage_stats: MetricStats::new(),
             telemetry_paused: false,
+            thermal_guard_active: false,
             battery_status: None,
             display_mode: None,
             diagnostics: None,
@@ -155,6 +162,7 @@ impl SharedState {
         self.gpu_load_history.clear();
         self.ram_usage_history.clear();
         self.cpu_temp_history.clear();
+        self.chassis_temp_history.clear();
         self.gpu_temp_history.clear();
         self.cpu_power_history.clear();
         self.gpu_power_history.clear();
@@ -348,11 +356,13 @@ fn run_worker_loop(
 
     let mut last_telemetry = Instant::now();
     let mut last_battery = Instant::now();
+    let mut last_guard_eval = Instant::now();
     let mut last_curve_eval = Instant::now();
     let mut last_keep_alive = Instant::now();
     let mut prev_curve_temp: f32 = 45.0;
     let mut prev_curve_speed: u8 = 40;
     let mut last_applied_bat_mode: Option<BatteryChargeMode> = None;
+    let mut thermal_guard = ThermalSafetyGuard::new();
 
     loop {
         let interval_ms = cfg.general.telemetry_interval_ms.clamp(100, 10_000);
@@ -430,16 +440,51 @@ fn run_worker_loop(
                     }
                 }
 
-                // Evaluate custom fan curve (every 2s)
-                if cfg.thermal_fan.fan_mode == FanMode::CustomCurve
+                // Evaluate thermal safety guard at >= 1s intervals (matching EC poll rate)
+                if last_guard_eval.elapsed() >= Duration::from_millis(950) {
+                    last_guard_eval = Instant::now();
+                    match thermal_guard.evaluate(
+                        snap.cpu_temp_c,
+                        snap.gpu_temp_c,
+                        snap.chassis_temp_c,
+                        snap.cpu_power_w,
+                        &snap.fan_rpms,
+                    ) {
+                        ThermalGuardDecision::EngageEmergencyMax(reason) => {
+                            tracing::warn!(%reason, "Thermal safety guard engaging emergency Max Fan");
+                            let _ = thermal_be.set_fan_mode(FanMode::Max, None);
+                            if let Ok(mut st) = state.lock() {
+                                st.thermal_guard_active = true;
+                                st.set_toast(format!("Thermal Guard: {reason} -> Max Fan"), true);
+                            }
+                        }
+                        ThermalGuardDecision::ReleaseEmergency => {
+                            tracing::info!("Thermal safety guard releasing emergency Max Fan");
+                            let _ = thermal_be.set_fan_mode(
+                                cfg.thermal_fan.fan_mode,
+                                Some(cfg.thermal_fan.manual_speed_pct),
+                            );
+                            if let Ok(mut st) = state.lock() {
+                                st.thermal_guard_active = false;
+                                st.set_toast("Thermal Guard released", false);
+                            }
+                        }
+                        ThermalGuardDecision::NoChange => {}
+                    }
+                }
+
+                // Evaluate custom fan curve (every 2s) when emergency guard is not overriding
+                if !thermal_guard.is_active()
+                    && cfg.thermal_fan.fan_mode == FanMode::CustomCurve
                     && last_curve_eval.elapsed() >= Duration::from_secs(2)
                 {
                     last_curve_eval = Instant::now();
-                    let temp = snap
-                        .cpu_temp_c
-                        .unwrap_or(0.0)
-                        .max(snap.gpu_temp_c.unwrap_or(0.0));
-                    if temp > 10.0 {
+                    if let Some(temp) = effective_fan_curve_temp_c(
+                        snap.cpu_temp_c,
+                        snap.gpu_temp_c,
+                        snap.chassis_temp_c,
+                        snap.cpu_power_w,
+                    ) {
                         let target_pct = cfg.thermal_fan.custom_curve.evaluate(
                             temp,
                             prev_curve_temp,
@@ -515,6 +560,9 @@ fn record_snapshot(st: &mut SharedState, snap: &TelemetrySnapshot, t: f64) {
     if let Some(ct) = snap.cpu_temp_c {
         push_sample(&mut st.cpu_temp_history, t, ct);
         st.cpu_temp_stats.record(ct);
+    }
+    if let Some(ch) = snap.chassis_temp_c {
+        push_sample(&mut st.chassis_temp_history, t, ch);
     }
     if let Some(gt) = snap.gpu_temp_c {
         push_sample(&mut st.gpu_temp_history, t, gt);

@@ -240,6 +240,7 @@ pub struct ConflictServiceInfo {
 pub struct TelemetrySnapshot {
     pub timestamp: Option<DateTime<Utc>>,
     pub cpu_temp_c: Option<f32>,
+    pub chassis_temp_c: Option<f32>,
     pub cpu_usage_pct: Option<f32>,
     pub cpu_clock_mhz: Option<u32>,
     pub cpu_power_w: Option<f32>,

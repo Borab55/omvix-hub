@@ -201,6 +201,53 @@ pub fn tile_button(
     .inner
 }
 
+/// Compact pill-shaped button with crisp border for profile chips and mode toggles.
+pub fn pill_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    t: &CustomThemeConfig,
+) -> egui::Response {
+    let accent = accent_color(t);
+    let (fill, stroke, text_color) = if selected {
+        (
+            Color32::from_rgba_unmultiplied(
+                accent.r(),
+                accent.g(),
+                accent.b(),
+                if t.dark_base { 54 } else { 38 },
+            ),
+            Stroke::new(1.3_f32, accent),
+            if t.dark_base { Color32::WHITE } else { accent },
+        )
+    } else {
+        (
+            if t.dark_base {
+                shift_color(t.card_bg, 8)
+            } else {
+                shift_color(t.card_bg, -12)
+            },
+            Stroke::new(1.0_f32, rgb(t.card_border)),
+            rgb(t.text_primary),
+        )
+    };
+
+    let mut rt = egui::RichText::new(label).size(12.5).color(text_color);
+    if selected {
+        rt = rt.strong();
+    }
+
+    let btn = egui::Button::new(rt)
+        .fill(fill)
+        .stroke(stroke)
+        .corner_radius(CornerRadius::same(8));
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(9.0, 4.0);
+        ui.add(btn)
+    })
+    .inner
+}
+
 pub fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     let bg = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 32);
     egui::Frame::NONE

@@ -1,7 +1,7 @@
 use crate::system_info::collect_system_identity;
 use crate::wmi_bios::{HpWmiBios, OutputSize, describe_wmi_return_code};
 use omvix_core::thermal::{
-    DEFAULT_MAX_FAN_LEVEL, fan_percent_to_wmi_level, resolve_scheme_from_identity,
+    DEFAULT_MAX_FAN_LEVEL, resolve_scheme_from_identity, safe_manual_wmi_level,
     thermal_profile_byte,
 };
 use omvix_core::{
@@ -104,19 +104,27 @@ impl WindowsThermalFanBackend {
         mode: FanMode,
         manual_speed_pct: Option<u8>,
         max_levels: (u8, u8),
+        scheme: ThermalProfileScheme,
+        performance_mode: PerformanceMode,
     ) -> Result<()> {
         match mode {
             FanMode::Auto => {
+                // CRITICAL: NEVER write `0x2E [0, 0]` for Auto mode! On Victus 8C99 / OMEN firmware,
+                // level 0 means "fans OFF (0 RPM)" until user-defined state expires (~120s).
+                // Clear Max Fan (0x27 [0]) and re-apply 0x1A with `byBios = 0x01` to restore BIOS control.
                 Self::write_bios_checked(bios, 0x20008, 0x27, &[0x00, 0x00, 0x00, 0x00])?;
-                Self::write_bios_checked(bios, 0x20008, 0x2E, &[0x00, 0x00, 0x00, 0x00])?;
+                let mode_byte = thermal_profile_byte(scheme, performance_mode);
+                Self::write_bios_checked(bios, 0x20008, 0x1A, &[0xFF, mode_byte, 0x01, 0x00])?;
             }
             FanMode::Max => {
+                let _ = bios.execute(0x20008, 0x10, &[0u8; 4], OutputSize::Size4);
                 Self::write_bios_checked(bios, 0x20008, 0x27, &[0x01, 0x00, 0x00, 0x00])?;
             }
             FanMode::Manual | FanMode::CustomCurve => {
                 let pct = manual_speed_pct.unwrap_or(50);
-                let l1 = fan_percent_to_wmi_level(pct, max_levels.0);
-                let l2 = fan_percent_to_wmi_level(pct, max_levels.1);
+                let l1 = safe_manual_wmi_level(pct, max_levels.0);
+                let l2 = safe_manual_wmi_level(pct, max_levels.1);
+                let _ = bios.execute(0x20008, 0x10, &[0u8; 4], OutputSize::Size4);
                 Self::write_bios_checked(bios, 0x20008, 0x27, &[0x00, 0x00, 0x00, 0x00])?;
                 Self::write_bios_checked(bios, 0x20008, 0x2E, &[l1, l2, 0x00, 0x00])?;
             }
@@ -129,14 +137,27 @@ impl ThermalFanBackend for WindowsThermalFanBackend {
     fn set_performance_mode(&self, mode: PerformanceMode) -> Result<()> {
         let scheme = self.detect_scheme();
         let mode_byte = thermal_profile_byte(scheme, mode);
+        let fan_mode = self
+            .state
+            .lock()
+            .map(|g| g.fan_mode)
+            .unwrap_or(FanMode::Auto);
+        let by_bios = if fan_mode == FanMode::Auto { 0x01 } else { 0x00 };
+
         HpWmiBios::with_cached(|bios| {
-            Self::write_bios_checked(bios, 0x20008, 0x1A, &[0xFF, mode_byte, 0x00, 0x00])
+            Self::write_bios_checked(bios, 0x20008, 0x1A, &[0xFF, mode_byte, by_bios, 0x00])
         })?;
 
         if let Ok(mut guard) = self.state.lock() {
             guard.performance_mode = mode;
         }
-        tracing::info!(?mode, ?scheme, byte = %format!("0x{mode_byte:02X}"), "Applied performance mode");
+        tracing::info!(
+            ?mode,
+            ?scheme,
+            by_bios,
+            byte = %format!("0x{mode_byte:02X}"),
+            "Applied performance mode"
+        );
         Ok(())
     }
 
@@ -149,9 +170,16 @@ impl ThermalFanBackend for WindowsThermalFanBackend {
     }
 
     fn set_fan_mode(&self, mode: FanMode, manual_speed_pct: Option<u8>) -> Result<()> {
+        let scheme = self.detect_scheme();
+        let perf_mode = self
+            .state
+            .lock()
+            .map(|g| g.performance_mode)
+            .unwrap_or(PerformanceMode::Balanced);
+
         let max_levels = HpWmiBios::with_cached(|bios| {
             let max_levels = Self::query_max_fan_levels(bios);
-            Self::apply_fan_commands(bios, mode, manual_speed_pct, max_levels)?;
+            Self::apply_fan_commands(bios, mode, manual_speed_pct, max_levels, scheme, perf_mode)?;
             Ok(max_levels)
         })?;
 
@@ -167,12 +195,18 @@ impl ThermalFanBackend for WindowsThermalFanBackend {
     }
 
     fn keep_alive_tick(&self) -> Result<()> {
-        let (fan_mode, manual_speed_pct, max_levels) = {
+        let scheme = self.detect_scheme();
+        let (fan_mode, manual_speed_pct, max_levels, perf_mode) = {
             let guard = self
                 .state
                 .lock()
                 .map_err(|_| OmvixError::Config("Thermal mutex poisoned".to_string()))?;
-            (guard.fan_mode, guard.manual_speed_pct, guard.max_fan_levels)
+            (
+                guard.fan_mode,
+                guard.manual_speed_pct,
+                guard.max_fan_levels,
+                guard.performance_mode,
+            )
         };
 
         if matches!(
@@ -180,9 +214,14 @@ impl ThermalFanBackend for WindowsThermalFanBackend {
             FanMode::Manual | FanMode::CustomCurve | FanMode::Max
         ) {
             HpWmiBios::with_cached(|bios| {
-                // Query FanCount as BIOS heartbeat before refreshing active fan target.
-                let _ = bios.execute(0x20008, 0x10, &[0u8; 4], OutputSize::Size4);
-                Self::apply_fan_commands(bios, fan_mode, Some(manual_speed_pct), max_levels)
+                Self::apply_fan_commands(
+                    bios,
+                    fan_mode,
+                    Some(manual_speed_pct),
+                    max_levels,
+                    scheme,
+                    perf_mode,
+                )
             })?;
             tracing::debug!(?fan_mode, manual_speed_pct, "Executed BIOS fan keep-alive tick");
         }
