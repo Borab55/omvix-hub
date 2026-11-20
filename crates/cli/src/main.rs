@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
 use omvix_core::{
-    AppConfig, DiagnosticReport, DiagnosticsBackend, LogLevel, init_logging, list_log_files,
-    total_log_bytes,
+    AppConfig, DiagnosticReport, DiagnosticsBackend, LogLevel, TelemetryBackend, TelemetrySnapshot,
+    init_logging, list_log_files, total_log_bytes,
 };
-use omvix_windows::WindowsDiagnosticsBackend;
+use omvix_windows::{WindowsDiagnosticsBackend, WindowsTelemetryBackend};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -35,6 +35,8 @@ enum Commands {
     },
     /// Show active rotating log directory and disk usage.
     LogsPath,
+    /// Read live system telemetry snapshot (CPU, NVIDIA GPU, RAM, fans, battery).
+    Telemetry,
 }
 
 fn main() -> ExitCode {
@@ -110,7 +112,99 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Commands::Telemetry => match WindowsTelemetryBackend::new().read_telemetry() {
+            Ok(snap) => {
+                print_telemetry(&snap);
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                tracing::error!("Telemetry read failed: {err}");
+                eprintln!("Error: {err}");
+                ExitCode::FAILURE
+            }
+        },
     }
+}
+
+fn print_telemetry(t: &TelemetrySnapshot) {
+    println!("============================================================");
+    println!(" Omvix Hub Live Telemetry");
+    println!("============================================================");
+    println!(
+        "CPU Usage   : {}",
+        t.cpu_usage_pct
+            .map(|v| format!("{v:.1}%"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "CPU Clock   : {}",
+        t.cpu_clock_mhz
+            .map(|v| format!("{v} MHz"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "CPU Temp    : {}",
+        t.cpu_temp_c
+            .map(|v| format!("{v:.1} °C"))
+            .unwrap_or_else(|| "N/A (requires Admin/WMI)".to_string())
+    );
+    println!(
+        "GPU         : {}",
+        t.gpu_name.as_deref().unwrap_or("N/A")
+    );
+    println!(
+        "GPU Temp/Ld : {} / {}",
+        t.gpu_temp_c
+            .map(|v| format!("{v:.1} °C"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.gpu_usage_pct
+            .map(|v| format!("{v:.0}%"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "GPU Pwr/Clk : {} / {}",
+        t.gpu_power_w
+            .map(|v| format!("{v:.1} W"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.gpu_clock_mhz
+            .map(|v| format!("{v} MHz"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "RAM         : {} / {}",
+        t.ram_used_gb
+            .map(|v| format!("{v:.2} GB"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.ram_total_gb
+            .map(|v| format!("{v:.2} GB"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "Fan RPMs    : {}",
+        if t.fan_rpms.is_empty() {
+            "N/A (requires Admin/WMI)".to_string()
+        } else {
+            t.fan_rpms
+                .iter()
+                .map(|r| format!("{r} RPM"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    println!(
+        "Power / Bat : {} | {} | Rate: {}",
+        match t.ac_connected {
+            Some(true) => "AC Plugged In",
+            Some(false) => "On Battery",
+            None => "Unknown",
+        },
+        t.battery_pct
+            .map(|p| format!("{p}%"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.battery_rate_w
+            .map(|w| format!("{w:+.2} W"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
 }
 
 fn run_diagnostics() -> omvix_core::Result<DiagnosticReport> {

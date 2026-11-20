@@ -25,3 +25,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 directories = "5"
 clap = { version = "4", features = ["derive"] }
+sysinfo = "0.33"
+nvml-wrapper = "0.10"

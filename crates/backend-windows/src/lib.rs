@@ -1,6 +1,8 @@
 #[cfg(windows)]
 mod system_info;
 #[cfg(windows)]
+pub mod telemetry;
+#[cfg(windows)]
 pub mod wmi_bios;
 #[cfg(windows)]
 mod wmi_com;
@@ -10,6 +12,9 @@ use omvix_core::boards::lookup_board;
 use omvix_core::{DiagnosticReport, DiagnosticsBackend, Result};
 #[cfg(not(windows))]
 use omvix_core::OmvixError;
+
+#[cfg(windows)]
+pub use telemetry::WindowsTelemetryBackend;
 
 #[derive(Debug, Default)]
 pub struct WindowsDiagnosticsBackend;
