@@ -3,6 +3,8 @@ mod system_info;
 #[cfg(windows)]
 pub mod telemetry;
 #[cfg(windows)]
+pub mod thermal_fan;
+#[cfg(windows)]
 pub mod wmi_bios;
 #[cfg(windows)]
 mod wmi_com;
@@ -15,6 +17,8 @@ use omvix_core::OmvixError;
 
 #[cfg(windows)]
 pub use telemetry::WindowsTelemetryBackend;
+#[cfg(windows)]
+pub use thermal_fan::WindowsThermalFanBackend;
 
 #[derive(Debug, Default)]
 pub struct WindowsDiagnosticsBackend;

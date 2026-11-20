@@ -1,9 +1,12 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use omvix_core::{
-    AppConfig, DiagnosticReport, DiagnosticsBackend, LogLevel, TelemetryBackend, TelemetrySnapshot,
-    init_logging, list_log_files, total_log_bytes,
+    AppConfig, DiagnosticReport, DiagnosticsBackend, FanMode, LogLevel, PerformanceMode,
+    TelemetryBackend, TelemetrySnapshot, ThermalFanBackend, init_logging, list_log_files,
+    total_log_bytes,
 };
-use omvix_windows::{WindowsDiagnosticsBackend, WindowsTelemetryBackend};
+use omvix_windows::{
+    WindowsDiagnosticsBackend, WindowsTelemetryBackend, WindowsThermalFanBackend,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -37,6 +40,73 @@ enum Commands {
     LogsPath,
     /// Read live system telemetry snapshot (CPU, NVIDIA GPU, RAM, fans, battery).
     Telemetry,
+    /// Thermal / performance mode controls (requires Administrator).
+    Thermal {
+        #[command(subcommand)]
+        action: ThermalAction,
+    },
+    /// Cooling fan controls (requires Administrator).
+    Fan {
+        #[command(subcommand)]
+        action: FanAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThermalAction {
+    /// Set active thermal/performance mode.
+    Set {
+        #[arg(value_enum)]
+        mode: CliPerfMode,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CliPerfMode {
+    Eco,
+    Quiet,
+    Balanced,
+    Performance,
+}
+
+impl From<CliPerfMode> for PerformanceMode {
+    fn from(value: CliPerfMode) -> Self {
+        match value {
+            CliPerfMode::Eco => Self::Eco,
+            CliPerfMode::Quiet => Self::Quiet,
+            CliPerfMode::Balanced => Self::Balanced,
+            CliPerfMode::Performance => Self::Performance,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum FanAction {
+    /// Set cooling fan control mode.
+    Set {
+        #[arg(value_enum)]
+        mode: CliFanMode,
+        /// Target fan speed percentage (0..100) for manual mode.
+        #[arg(long)]
+        speed: Option<u8>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CliFanMode {
+    Auto,
+    Max,
+    Manual,
+}
+
+impl From<CliFanMode> for FanMode {
+    fn from(value: CliFanMode) -> Self {
+        match value {
+            CliFanMode::Auto => Self::Auto,
+            CliFanMode::Max => Self::Max,
+            CliFanMode::Manual => Self::Manual,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -121,6 +191,38 @@ fn main() -> ExitCode {
                 tracing::error!("Telemetry read failed: {err}");
                 eprintln!("Error: {err}");
                 ExitCode::FAILURE
+            }
+        },
+        Commands::Thermal { action } => match action {
+            ThermalAction::Set { mode } => {
+                let target: PerformanceMode = mode.into();
+                match WindowsThermalFanBackend::new().set_performance_mode(target) {
+                    Ok(()) => {
+                        println!("Applied performance mode: {target:?}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        tracing::error!("Failed to set performance mode: {err}");
+                        eprintln!("Error: {err}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        },
+        Commands::Fan { action } => match action {
+            FanAction::Set { mode, speed } => {
+                let target: FanMode = mode.into();
+                match WindowsThermalFanBackend::new().set_fan_mode(target, speed) {
+                    Ok(()) => {
+                        println!("Applied fan mode: {target:?} (speed={speed:?})");
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        tracing::error!("Failed to set fan mode: {err}");
+                        eprintln!("Error: {err}");
+                        ExitCode::FAILURE
+                    }
+                }
             }
         },
     }
