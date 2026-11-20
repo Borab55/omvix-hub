@@ -8,6 +8,271 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomThemeConfig {
+    pub name: String,
+    pub dark_base: bool,
+    pub accent: [u8; 3],
+    pub canvas_bg: [u8; 3],
+    pub sidebar_bg: [u8; 3],
+    pub card_bg: [u8; 3],
+    pub card_border: [u8; 3],
+    pub text_primary: [u8; 3],
+}
+
+impl Default for CustomThemeConfig {
+    fn default() -> Self {
+        Self::preset_dark_slate()
+    }
+}
+
+impl CustomThemeConfig {
+    pub fn preset_dark_slate() -> Self {
+        Self {
+            name: "Dark Slate".to_string(),
+            dark_base: true,
+            accent: [0, 180, 216],
+            canvas_bg: [15, 20, 27],
+            sidebar_bg: [12, 17, 24],
+            card_bg: [22, 29, 39],
+            card_border: [38, 49, 64],
+            text_primary: [230, 237, 243],
+        }
+    }
+
+    pub fn preset_clean_light() -> Self {
+        Self {
+            name: "Clean Light".to_string(),
+            dark_base: false,
+            accent: [2, 132, 199],
+            canvas_bg: [244, 246, 249],
+            sidebar_bg: [235, 240, 246],
+            card_bg: [255, 255, 255],
+            card_border: [216, 223, 232],
+            text_primary: [24, 32, 44],
+        }
+    }
+
+    pub fn preset_omen_crimson() -> Self {
+        Self {
+            name: "OMEN Crimson".to_string(),
+            dark_base: true,
+            accent: [230, 57, 70],
+            canvas_bg: [16, 14, 18],
+            sidebar_bg: [12, 10, 14],
+            card_bg: [26, 21, 28],
+            card_border: [58, 36, 46],
+            text_primary: [244, 238, 242],
+        }
+    }
+
+    pub fn preset_emerald_matrix() -> Self {
+        Self {
+            name: "Emerald Matrix".to_string(),
+            dark_base: true,
+            accent: [16, 185, 129],
+            canvas_bg: [11, 18, 16],
+            sidebar_bg: [9, 14, 13],
+            card_bg: [18, 29, 26],
+            card_border: [31, 56, 48],
+            text_primary: [228, 244, 238],
+        }
+    }
+
+    pub fn preset_midnight_violet() -> Self {
+        Self {
+            name: "Midnight Violet".to_string(),
+            dark_base: true,
+            accent: [139, 92, 246],
+            canvas_bg: [15, 14, 24],
+            sidebar_bg: [12, 11, 20],
+            card_bg: [24, 22, 38],
+            card_border: [48, 42, 74],
+            text_primary: [238, 236, 248],
+        }
+    }
+
+    pub fn presets() -> Vec<Self> {
+        vec![
+            Self::preset_dark_slate(),
+            Self::preset_clean_light(),
+            Self::preset_omen_crimson(),
+            Self::preset_emerald_matrix(),
+            Self::preset_midnight_violet(),
+        ]
+    }
+
+    /// Encodes this theme into a compact shareable ASCII code (`OMVIX1|...`).
+    pub fn encode_share_code(&self) -> String {
+        let mode = if self.dark_base { "D" } else { "L" };
+        let clean_name = self
+            .name
+            .replace(['|', '\r', '\n'], " ")
+            .trim()
+            .to_string();
+        let display_name = if clean_name.is_empty() {
+            "Custom".to_string()
+        } else {
+            clean_name
+        };
+        format!(
+            "OMVIX1|{}|{}|{}|{}|{}|{}|{}|{}",
+            mode,
+            rgb_to_hex(self.accent),
+            rgb_to_hex(self.canvas_bg),
+            rgb_to_hex(self.sidebar_bg),
+            rgb_to_hex(self.card_bg),
+            rgb_to_hex(self.card_border),
+            rgb_to_hex(self.text_primary),
+            display_name
+        )
+    }
+
+    /// Decodes either an `OMVIX1|...` compact share code or a raw JSON `CustomThemeConfig`.
+    pub fn decode_share_code(raw: &str) -> Result<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(OmvixError::Config("Theme share code is empty".to_string()));
+        }
+
+        if trimmed.starts_with('{') {
+            return serde_json::from_str::<Self>(trimmed)
+                .map_err(|e| OmvixError::Config(format!("Invalid theme JSON: {e}")));
+        }
+
+        let parts: Vec<&str> = trimmed.split('|').collect();
+        if parts.len() < 8 || parts[0] != "OMVIX1" {
+            return Err(OmvixError::Config(
+                "Invalid theme code format (expected OMVIX1|... or JSON)".to_string(),
+            ));
+        }
+
+        let dark_base = match parts[1] {
+            "D" | "d" | "dark" | "1" | "true" => true,
+            "L" | "l" | "light" | "0" | "false" => false,
+            other => {
+                return Err(OmvixError::Config(format!(
+                    "Invalid theme base flag `{other}` (expected D or L)"
+                )));
+            }
+        };
+
+        let accent = hex_to_rgb(parts[2])?;
+        let canvas_bg = hex_to_rgb(parts[3])?;
+        let sidebar_bg = hex_to_rgb(parts[4])?;
+        let card_bg = hex_to_rgb(parts[5])?;
+        let card_border = hex_to_rgb(parts[6])?;
+        let text_primary = hex_to_rgb(parts[7])?;
+        let name = parts
+            .get(8)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Imported Theme")
+            .to_string();
+
+        Ok(Self {
+            name,
+            dark_base,
+            accent,
+            canvas_bg,
+            sidebar_bg,
+            card_bg,
+            card_border,
+            text_primary,
+        })
+    }
+}
+
+fn rgb_to_hex(rgb: [u8; 3]) -> String {
+    format!("{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+}
+
+fn hex_to_rgb(s: &str) -> Result<[u8; 3]> {
+    let hex = s.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return Err(OmvixError::Config(format!(
+            "Invalid RGB hex color `{s}` (expected 6 hex chars)"
+        )));
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16)
+        .map_err(|e| OmvixError::Config(format!("Invalid red hex in `{s}`: {e}")))?;
+    let g = u8::from_str_radix(&hex[2..4], 16)
+        .map_err(|e| OmvixError::Config(format!("Invalid green hex in `{s}`: {e}")))?;
+    let b = u8::from_str_radix(&hex[4..6], 16)
+        .map_err(|e| OmvixError::Config(format!("Invalid blue hex in `{s}`: {e}")))?;
+    Ok([r, g, b])
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BatteryProfile {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub stop_threshold_pct: u8,
+    pub start_threshold_pct: u8,
+    pub mode: BatteryChargeMode,
+    pub builtin: bool,
+}
+
+impl Default for BatteryProfile {
+    fn default() -> Self {
+        Self {
+            id: "balanced".to_string(),
+            name: "Balanced".to_string(),
+            enabled: true,
+            stop_threshold_pct: 80,
+            start_threshold_pct: 75,
+            mode: BatteryChargeMode::Inhibit,
+            builtin: false,
+        }
+    }
+}
+
+impl BatteryProfile {
+    pub fn builtins() -> Vec<Self> {
+        vec![
+            Self {
+                id: "desktop".to_string(),
+                name: "Desktop (60%)".to_string(),
+                enabled: true,
+                stop_threshold_pct: 60,
+                start_threshold_pct: 55,
+                mode: BatteryChargeMode::Inhibit,
+                builtin: true,
+            },
+            Self {
+                id: "balanced".to_string(),
+                name: "Balanced (80%)".to_string(),
+                enabled: true,
+                stop_threshold_pct: 80,
+                start_threshold_pct: 75,
+                mode: BatteryChargeMode::Inhibit,
+                builtin: true,
+            },
+            Self {
+                id: "travel".to_string(),
+                name: "Travel (90%)".to_string(),
+                enabled: true,
+                stop_threshold_pct: 90,
+                start_threshold_pct: 85,
+                mode: BatteryChargeMode::Inhibit,
+                builtin: true,
+            },
+            Self {
+                id: "full".to_string(),
+                name: "Full Charge (100%)".to_string(),
+                enabled: false,
+                stop_threshold_pct: 100,
+                start_threshold_pct: 95,
+                mode: BatteryChargeMode::Auto,
+                builtin: true,
+            },
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralConfig {
@@ -17,6 +282,8 @@ pub struct GeneralConfig {
     pub start_with_windows: bool,
     pub show_tray_notice_on_close: bool,
     pub theme: String,
+    pub telemetry_interval_ms: u64,
+    pub custom_theme: CustomThemeConfig,
 }
 
 impl Default for GeneralConfig {
@@ -28,6 +295,8 @@ impl Default for GeneralConfig {
             start_with_windows: false,
             show_tray_notice_on_close: true,
             theme: "dark".to_string(),
+            telemetry_interval_ms: 1000,
+            custom_theme: CustomThemeConfig::preset_dark_slate(),
         }
     }
 }
@@ -65,6 +334,8 @@ pub struct BatteryConfig {
     pub start_threshold_pct: u8,
     pub hold_when_shutdown: bool,
     pub one_time_full_charge: bool,
+    pub active_profile_id: Option<String>,
+    pub custom_profiles: Vec<BatteryProfile>,
 }
 
 impl Default for BatteryConfig {
@@ -76,6 +347,8 @@ impl Default for BatteryConfig {
             start_threshold_pct: 75,
             hold_when_shutdown: false,
             one_time_full_charge: false,
+            active_profile_id: None,
+            custom_profiles: Vec::new(),
         }
     }
 }
@@ -246,20 +519,57 @@ mod tests {
 
         let mut cfg = AppConfig::default();
         cfg.general.language = "en".to_string();
+        cfg.general.telemetry_interval_ms = 100;
+        cfg.general.custom_theme = CustomThemeConfig::preset_omen_crimson();
         cfg.battery.enabled = true;
         cfg.battery.stop_threshold_pct = 80;
         cfg.battery.start_threshold_pct = 75;
+        cfg.battery.active_profile_id = Some("balanced".to_string());
+        cfg.battery.custom_profiles.push(BatteryProfile {
+            id: "gaming-cap".to_string(),
+            name: "Gaming Cap".to_string(),
+            enabled: true,
+            stop_threshold_pct: 70,
+            start_threshold_pct: 65,
+            mode: BatteryChargeMode::Hold,
+            builtin: false,
+        });
         cfg.logging.max_total_mb = 20;
 
         cfg.save_to_path(&path).expect("save config");
         let loaded = AppConfig::load_from_path(&path).expect("load config");
 
         assert_eq!(loaded.general.language, "en");
+        assert_eq!(loaded.general.telemetry_interval_ms, 100);
+        assert_eq!(
+            loaded.general.custom_theme,
+            CustomThemeConfig::preset_omen_crimson()
+        );
         assert!(loaded.battery.enabled);
         assert_eq!(loaded.battery.stop_threshold_pct, 80);
         assert_eq!(loaded.battery.start_threshold_pct, 75);
+        assert_eq!(loaded.battery.active_profile_id.as_deref(), Some("balanced"));
+        assert_eq!(loaded.battery.custom_profiles.len(), 1);
+        assert_eq!(loaded.battery.custom_profiles[0].name, "Gaming Cap");
         assert_eq!(loaded.logging.max_total_mb, 20);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_share_code_and_json_roundtrip() {
+        for preset in CustomThemeConfig::presets() {
+            let code = preset.encode_share_code();
+            let decoded = CustomThemeConfig::decode_share_code(&code).expect("decode compact code");
+            assert_eq!(decoded, preset);
+
+            let json = serde_json::to_string(&preset).expect("serialize theme json");
+            let from_json = CustomThemeConfig::decode_share_code(&json).expect("decode json code");
+            assert_eq!(from_json, preset);
+        }
+
+        assert!(CustomThemeConfig::decode_share_code("").is_err());
+        assert!(CustomThemeConfig::decode_share_code("INVALID|D|000000").is_err());
+        assert!(CustomThemeConfig::decode_share_code("OMVIX1|D|zzzzzz|000000|000000|000000|000000|ffffff|Bad").is_err());
     }
 }

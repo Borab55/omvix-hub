@@ -5,6 +5,8 @@ pub mod battery;
 #[cfg(windows)]
 pub mod display;
 #[cfg(windows)]
+pub mod emi;
+#[cfg(windows)]
 pub mod gpu_mux;
 #[cfg(windows)]
 pub mod hotkeys;

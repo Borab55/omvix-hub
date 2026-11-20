@@ -13,26 +13,27 @@ impl WindowsGpuSwitchBackend {
 
 impl GpuSwitchBackend for WindowsGpuSwitchBackend {
     fn get_gpu_mode(&self) -> Result<GpuMode> {
-        let bios = HpWmiBios::connect()?;
-        let resp = match bios.execute(0x20008, 0x52, &[0u8; 4], OutputSize::Size4) {
-            Ok(r) if r.return_code == 0 => r,
-            _ => bios.execute(0x20008, 0x21, &[0u8; 4], OutputSize::Size4)?,
-        };
+        HpWmiBios::with_cached(|bios| {
+            let resp = bios.execute(0x20008, 0x52, &[0u8; 4], OutputSize::Size4)?;
+            if resp.return_code == 3 {
+                tracing::debug!("GPU MUX query (0x52) returned RC=3 (unsupported on this BIOS)");
+                return Ok(GpuMode::Unknown);
+            }
+            if resp.return_code != 0 || resp.data.is_empty() {
+                return Err(OmvixError::WmiCallFailed {
+                    command: 0x20008,
+                    command_type: 0x52,
+                    return_code: resp.return_code,
+                    message: describe_wmi_return_code(resp.return_code),
+                });
+            }
 
-        if resp.return_code != 0 || resp.data.is_empty() {
-            return Err(OmvixError::WmiCallFailed {
-                command: 0x20008,
-                command_type: 0x52,
-                return_code: resp.return_code,
-                message: describe_wmi_return_code(resp.return_code),
-            });
-        }
-
-        Ok(match resp.data[0] {
-            0 => GpuMode::Hybrid,
-            1 => GpuMode::Discrete,
-            2 => GpuMode::Optimus,
-            _ => GpuMode::Unknown,
+            Ok(match resp.data[0] {
+                0 => GpuMode::Hybrid,
+                1 => GpuMode::Discrete,
+                2 => GpuMode::Optimus,
+                _ => GpuMode::Unknown,
+            })
         })
     }
 
@@ -48,23 +49,27 @@ impl GpuSwitchBackend for WindowsGpuSwitchBackend {
             }
         };
 
-        let bios = HpWmiBios::connect()?;
         let payload = [mode_byte, 0x00, 0x00, 0x00];
-        let mut resp = bios.execute(0x20008, 0x53, &payload, OutputSize::Size0)?;
-        if resp.return_code == 3 {
-            resp = bios.execute(0x20008, 0x52, &payload, OutputSize::Size0)?;
-        }
+        HpWmiBios::with_cached(|bios| {
+            let resp = bios.execute(0x20008, 0x53, &payload, OutputSize::Size0)?;
+            if resp.return_code == 3 {
+                return Err(OmvixError::UnsupportedHardware(
+                    "GPU MUX WMI command (0x52/0x53) is unsupported by this BIOS; switch GPU mode via BIOS Setup or NVIDIA Control Panel (Advanced Optimus)."
+                        .to_string(),
+                ));
+            }
 
-        if resp.return_code == 0 {
-            tracing::info!(?mode, "Applied GPU MUX mode (system restart required)");
-            Ok(())
-        } else {
-            Err(OmvixError::WmiCallFailed {
-                command: 0x20008,
-                command_type: 0x53,
-                return_code: resp.return_code,
-                message: describe_wmi_return_code(resp.return_code),
-            })
-        }
+            if resp.return_code == 0 {
+                tracing::info!(?mode, "Applied GPU MUX mode (system restart required)");
+                Ok(())
+            } else {
+                Err(OmvixError::WmiCallFailed {
+                    command: 0x20008,
+                    command_type: 0x53,
+                    return_code: resp.return_code,
+                    message: describe_wmi_return_code(resp.return_code),
+                })
+            }
+        })
     }
 }

@@ -87,8 +87,13 @@ pub fn collect_system_identity() -> Result<SystemIdentity> {
     })
 }
 
+/// Fast synchronous check (< 0.01 ms) of current process elevation.
+pub fn is_process_elevated() -> bool {
+    unsafe { IsUserAnAdmin().as_bool() }
+}
+
 pub fn collect_security_status() -> SecurityStatus {
-    let is_admin = unsafe { IsUserAnAdmin().as_bool() };
+    let is_admin = is_process_elevated();
     let mut vbs_status = None;
     let mut hvci_running = false;
 

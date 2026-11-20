@@ -11,7 +11,9 @@
 - **Zero OGH Dependency / OGH Bağımsızlığı:** Communicates directly with HP ACPI/WMI firmware (`root\WMI\hpqBIntM`, `hpqBEvnt`) without Microsoft Store apps, background telemetry, or HP HSA services.
 - **Victus & OMEN Support / Victus ve OMEN Desteği:** Auto-detects board ID (`Win32_BaseBoard.Product`, e.g., Victus 16 `8C99`) and selects the appropriate thermal profile protocol (`OmenV0`, `OmenV1`, `Victus`, `VictusS`).
 - **Thermal & Fan Control:** Performance mode switching (`Eco`, `Quiet`, `Balanced`, `Performance`), `Auto`/`Max`/`Manual` speed, interactive `CustomCurve` with downward hysteresis, and a 2-minute keep-alive guard preventing Victus/OMEN BIOS timeout resets.
-- **Battery Care / Batarya Sağlığı:** Native WMI `0x2B` charge limiting (`Auto`, `Inhibit`, `Hold`), custom upper/lower thresholds, **one-time 100% travel charge**, wear %, capacity, and charge/discharge wattage (inspired by `hp-charge-limit-rs` & `hp-charge-limiter`).
+- **Dual-Tier Telemetry & Windows EMI:** Supports **0.1s–5.0s** live polling of CPU %/Clock, **CPU Package Power (W via Windows EMI — works under VBS/HVCI)**, NVIDIA NVML (Temp, Load, Power/TGP Limit, VRAM, Clocks, P-State, Throttle), Disk & Network I/O, Session Min/Max/Avg, and 3 dedicated real-time plots (Temperature, Usage, Power), while keeping EC/WMI BIOS reads safely capped at `1.0s`.
+- **Battery Care / Batarya Sağlığı:** Native WMI `0x2B` charge limiting (`Auto`, `Inhibit`, `Hold`), one-click presets (`60% / 80% / 90% / 100%`), unlimited custom battery profiles, **one-time 100% travel charge**, wear %, capacity, voltage, remaining time, and charge/discharge wattage.
+- **Low-Power iGPU UI & Themes:** Built on `eframe` + `wgpu` (`PowerPreference::LowPower`) to render cleanly on integrated graphics without waking dGPU, with built-in theme presets, live custom RGB pickers, and Copy/Paste shareable theme codes (`OMVIX1|...` / JSON).
 - **Display, Lighting, GPU & CPU Tuning:** 1-zone/4-zone RGB & white backlight control, GPU MUX switch (`Hybrid`/`Discrete`/`Optimus`), display refresh rate (`Hz`) switcher, AC/Battery auto-profiles, CPU Turbo Boost, PL1/PL2/TCC/Undervolt controls (with automatic VBS/HVCI lock detection).
 - **Hotkeys & System Tray:** Dedicated OMEN key capture (`hpqBEvnt`) with custom action/command assignment, global toggle shortcut (`Ctrl+Shift+O`), minimize-to-tray on close, and tray quick actions.
 - **i18n & Diagnostics:** Instant **Türkçe / English** switching (extensible JSON packs under `locales/`), companion/conflict service detector, JSON diagnostic export, and timestamped ring-rotating file logger capped at **20 MB** (`4 x 5 MB`).
@@ -41,10 +43,10 @@ hp-omen-hub-lite/
 # Run all workspace unit tests
 cargo test --workspace
 
-# Build optimized standalone release binaries (~7.6 MB GUI, ~2.7 MB CLI)
+# Build optimized standalone release binaries (~12.3 MB GUI w/ wgpu, ~2.9 MB CLI)
 cargo build --release --workspace
 
-# Launch Omvix Hub GUI (click "Restart as Administrator" inside Dashboard for WMI BIOS writes)
+# Launch Omvix Hub GUI (click "Restart as Administrator" inside Home cockpit for WMI BIOS writes)
 .\target\release\omvix-hub.exe
 
 # Run smoke test

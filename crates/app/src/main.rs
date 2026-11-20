@@ -10,8 +10,10 @@ use crate::ui::Tab;
 use crate::worker::{BackgroundWorker, SharedState, WorkerCommand};
 use egui::{Color32, RichText};
 use omvix_core::config::OmenKeyAction;
-use omvix_core::{AppConfig, I18n, LogHandle, PerformanceMode, init_logging};
+use omvix_core::{AppConfig, CustomThemeConfig, I18n, LogHandle, PerformanceMode, init_logging};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,17 +24,134 @@ use omvix_windows::hotkeys::{ListenerHandle, spawn_global_hotkey_listener, spawn
 
 #[derive(Debug, Clone)]
 enum AppSignal {
-    Tray(TrayAction),
-    OmenKeyPressed,
-    GlobalTogglePressed,
+    SyncVisibility(bool),
+    TrayPerfChanged(PerformanceMode),
+    TrayFanChanged(omvix_core::FanMode),
+    TrayBatteryToggled,
+    OmenKeyNonToggle,
+    QuitRequested,
 }
+
+fn omen_action_to_code(action: &OmenKeyAction) -> u8 {
+    match action {
+        OmenKeyAction::ToggleWindow => 0,
+        OmenKeyAction::CyclePerformanceMode => 1,
+        OmenKeyAction::LaunchCustomCommand => 2,
+    }
+}
+
+#[cfg(windows)]
+struct SingleInstanceGuard(Option<isize>);
+
+#[cfg(windows)]
+impl SingleInstanceGuard {
+    fn acquire() -> std::result::Result<Self, ()> {
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+        use windows::Win32::System::Threading::CreateMutexW;
+        use windows::core::{HSTRING, PCWSTR};
+
+        let name = HSTRING::from("Local\\OmvixHubSingleInstance");
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }.map_err(|_| ())?;
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
+            }
+            return Err(());
+        }
+        Ok(Self(Some(handle.0 as isize)))
+    }
+
+    fn release(&mut self) {
+        if let Some(raw) = self.0.take() {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(
+                    windows::Win32::Foundation::HANDLE(raw as *mut std::ffi::c_void),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(windows)]
+fn restore_existing_instance_window() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    };
+    use windows::core::{HSTRING, PCWSTR};
+
+    let title = HSTRING::from("Omvix Hub");
+    if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) } {
+        if !hwnd.is_invalid() {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn restore_existing_instance_window() {}
+
+#[cfg(windows)]
+fn win32_set_visible(hwnd_raw: isize, visible: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    };
+
+    if hwnd_raw == 0 {
+        return;
+    }
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        if visible {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = SetForegroundWindow(hwnd);
+        } else {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn win32_set_visible(_hwnd_raw: isize, _visible: bool) {}
+
+#[cfg(windows)]
+fn win32_post_close(hwnd_raw: isize) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+
+    if hwnd_raw == 0 {
+        return;
+    }
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+}
+
+#[cfg(not(windows))]
+fn win32_post_close(_hwnd_raw: isize) {}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let smoke_test = args.iter().any(|a| a == "--smoke-test");
 
     let cfg_path = AppConfig::default_config_path();
-    let cfg = AppConfig::load_from_path(&cfg_path).unwrap_or_default();
+    let mut cfg = AppConfig::load_from_path(&cfg_path).unwrap_or_default();
+    if cfg.general.theme == "light" && cfg.general.custom_theme == CustomThemeConfig::preset_dark_slate() {
+        cfg.general.custom_theme = CustomThemeConfig::preset_clean_light();
+    }
     let log_handle = init_logging(&cfg.logging, smoke_test).ok();
     let i18n = I18n::new(&cfg.general.language);
 
@@ -51,13 +170,26 @@ fn main() {
         return;
     }
 
+    #[cfg(windows)]
+    let single_instance = match SingleInstanceGuard::acquire() {
+        Ok(guard) => Some(guard),
+        Err(()) => {
+            tracing::info!("Another Omvix Hub instance is already running; focusing existing window");
+            restore_existing_instance_window();
+            if let Some(h) = &log_handle {
+                h.flush();
+            }
+            return;
+        }
+    };
+
     tracing::info!(lang = %i18n.active_language(), "Launching Omvix Hub desktop GUI");
 
     let (rgba, icon_w, icon_h) = build_tray_icon_rgba();
     let viewport = egui::ViewportBuilder::default()
         .with_title("Omvix Hub")
-        .with_inner_size([1120.0, 740.0])
-        .with_min_inner_size([900.0, 600.0])
+        .with_inner_size([1140.0, 760.0])
+        .with_min_inner_size([920.0, 620.0])
         .with_visible(!cfg.general.start_minimized)
         .with_icon(Arc::new(egui::IconData {
             rgba,
@@ -67,6 +199,16 @@ fn main() {
 
     let options = eframe::NativeOptions {
         viewport,
+        renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
+                eframe::egui_wgpu::WgpuSetupCreateNew {
+                    power_preference: eframe::wgpu::PowerPreference::LowPower,
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -78,12 +220,33 @@ fn main() {
         }
     };
 
+    let hwnd_atomic = Arc::new(AtomicIsize::new(0));
+    let hwnd_setup = Arc::clone(&hwnd_atomic);
+
     if let Err(err) = eframe::run_native(
         "Omvix Hub",
         options,
         Box::new(move |cc| {
+            if let Some(rs) = &cc.wgpu_render_state {
+                let info = rs.adapter.get_info();
+                tracing::info!(
+                    adapter = %info.name,
+                    backend = ?info.backend,
+                    device_type = ?info.device_type,
+                    "Initialized wgpu graphics adapter"
+                );
+            }
+
+            #[cfg(windows)]
+            if let Ok(wh) = cc.window_handle() {
+                if let RawWindowHandle::Win32(h) = wh.as_raw() {
+                    hwnd_setup.store(h.hwnd.get(), Ordering::SeqCst);
+                    tracing::debug!(hwnd = h.hwnd.get(), "Captured native Win32 HWND");
+                }
+            }
+
             theme::configure_fonts(&cc.egui_ctx);
-            theme::apply_theme(&cc.egui_ctx, cfg.general.theme != "light");
+            theme::apply_theme(&cc.egui_ctx, &cfg.general.custom_theme);
             Ok(Box::new(OmvixApp::new(
                 cc.egui_ctx.clone(),
                 cfg,
@@ -91,6 +254,9 @@ fn main() {
                 i18n,
                 tray_ctrl,
                 log_handle,
+                hwnd_atomic,
+                #[cfg(windows)]
+                single_instance,
             )))
         }),
     ) {
@@ -103,7 +269,13 @@ struct OmvixApp {
     cfg_path: PathBuf,
     i18n: I18n,
     active_tab: Tab,
-    window_visible: bool,
+    battery_draft: ui::battery::BatteryDraftState,
+    settings_draft: ui::settings::SettingsThemeDraft,
+    window_visible: Arc<AtomicBool>,
+    hwnd_atomic: Arc<AtomicIsize>,
+    force_quit: Arc<AtomicBool>,
+    clean_quit_started: Arc<AtomicBool>,
+    omen_action_code: Arc<AtomicU8>,
     quitting: bool,
     tray: Option<TrayController>,
     worker: Option<BackgroundWorker>,
@@ -114,10 +286,13 @@ struct OmvixApp {
     omen_listener: Option<ListenerHandle>,
     #[cfg(windows)]
     hotkey_listener: Option<ListenerHandle>,
+    #[cfg(windows)]
+    single_instance: Option<SingleInstanceGuard>,
     log_handle: Option<LogHandle>,
 }
 
 impl OmvixApp {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         ctx: egui::Context,
         cfg: AppConfig,
@@ -125,33 +300,104 @@ impl OmvixApp {
         i18n: I18n,
         tray: Option<TrayController>,
         log_handle: Option<LogHandle>,
+        hwnd_atomic: Arc<AtomicIsize>,
+        #[cfg(windows)] single_instance: Option<SingleInstanceGuard>,
     ) -> Self {
-        let worker = BackgroundWorker::spawn(cfg.clone(), Some(ctx.clone()));
+        let initial_visible = !cfg.general.start_minimized;
+        let window_visible = Arc::new(AtomicBool::new(initial_visible));
+        let force_quit = Arc::new(AtomicBool::new(false));
+        let clean_quit_started = Arc::new(AtomicBool::new(false));
+        let omen_action_code = Arc::new(AtomicU8::new(omen_action_to_code(
+            &cfg.hotkeys.omen_key_action,
+        )));
+
+        let worker = BackgroundWorker::spawn(cfg.clone(), Some(ctx.clone()), Arc::clone(&window_visible));
         let state = worker.state();
         let (signal_tx, signal_rx) = mpsc::channel::<AppSignal>();
 
-        // Poll tray events every 80ms even while the main window is hidden in tray.
+        // Poll tray events every 80ms; handles show/hide/quit directly on Win32 HWND even when hidden.
         let tray_tx = signal_tx.clone();
         let wake_ctx = ctx.clone();
+        let tray_vis = Arc::clone(&window_visible);
+        let tray_hwnd = Arc::clone(&hwnd_atomic);
+        let tray_force_quit = Arc::clone(&force_quit);
+        let tray_quit_started = Arc::clone(&clean_quit_started);
+        let tray_cfg_manual_speed = cfg.thermal_fan.manual_speed_pct;
+        let _worker_clone_for_tray = worker_command_proxy(&worker);
         thread::spawn(move || loop {
-            let mut woke = false;
             for action in TrayController::poll_actions() {
-                let _ = tray_tx.send(AppSignal::Tray(action));
-                woke = true;
-            }
-            if woke {
-                wake_ctx.request_repaint();
+                match action {
+                    TrayAction::ToggleWindow => {
+                        let prev = tray_vis.fetch_xor(true, Ordering::SeqCst);
+                        let next = !prev;
+                        win32_set_visible(tray_hwnd.load(Ordering::SeqCst), next);
+                        let _ = tray_tx.send(AppSignal::SyncVisibility(next));
+                        wake_ctx.request_repaint();
+                    }
+                    TrayAction::SetPerformance(mode) => {
+                        let _ = _worker_clone_for_tray.send(WorkerCommand::SetPerformanceMode(mode));
+                        let _ = tray_tx.send(AppSignal::TrayPerfChanged(mode));
+                        if tray_vis.load(Ordering::Relaxed) {
+                            wake_ctx.request_repaint();
+                        }
+                    }
+                    TrayAction::SetFan(mode) => {
+                        let _ = _worker_clone_for_tray.send(WorkerCommand::SetFanMode {
+                            mode,
+                            manual_speed_pct: Some(tray_cfg_manual_speed),
+                        });
+                        let _ = tray_tx.send(AppSignal::TrayFanChanged(mode));
+                        if tray_vis.load(Ordering::Relaxed) {
+                            wake_ctx.request_repaint();
+                        }
+                    }
+                    TrayAction::ToggleBatteryLimit => {
+                        let _ = tray_tx.send(AppSignal::TrayBatteryToggled);
+                        wake_ctx.request_repaint();
+                    }
+                    TrayAction::Quit => {
+                        tracing::info!("Tray Quit action triggered");
+                        tray_force_quit.store(true, Ordering::SeqCst);
+                        let hwnd_raw = tray_hwnd.load(Ordering::SeqCst);
+                        let _ = tray_tx.send(AppSignal::QuitRequested);
+                        win32_post_close(hwnd_raw);
+                        wake_ctx.request_repaint();
+
+                        let quit_started_chk = Arc::clone(&tray_quit_started);
+                        let wake_again = wake_ctx.clone();
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(250));
+                            if !quit_started_chk.load(Ordering::SeqCst) {
+                                // Nudge hidden winit event loop to process WM_CLOSE cleanly
+                                win32_set_visible(hwnd_raw, true);
+                                win32_post_close(hwnd_raw);
+                                wake_again.request_repaint();
+                                thread::sleep(Duration::from_millis(450));
+                            } else {
+                                thread::sleep(Duration::from_millis(450));
+                            }
+                            tracing::warn!("Tray quit watchdog forcing clean process termination");
+                            std::process::exit(0);
+                        });
+                        return;
+                    }
+                }
             }
             thread::sleep(Duration::from_millis(80));
         });
 
-        let window_visible = !cfg.general.start_minimized;
         let mut app = Self {
             cfg,
             cfg_path,
             i18n,
-            active_tab: Tab::Dashboard,
+            active_tab: Tab::Home,
+            battery_draft: ui::battery::BatteryDraftState::default(),
+            settings_draft: ui::settings::SettingsThemeDraft::default(),
             window_visible,
+            hwnd_atomic,
+            force_quit,
+            clean_quit_started,
+            omen_action_code,
             quitting: false,
             tray,
             worker: Some(worker),
@@ -162,6 +408,8 @@ impl OmvixApp {
             omen_listener: None,
             #[cfg(windows)]
             hotkey_listener: None,
+            #[cfg(windows)]
+            single_instance,
             log_handle,
         };
         app.rebind_hotkeys(&ctx);
@@ -180,7 +428,7 @@ impl OmvixApp {
         }
     }
 
-    fn rebind_hotkeys(&mut self, ctx: &egui::Context) {
+    fn stop_hotkeys(&mut self) {
         #[cfg(windows)]
         {
             if let Some(old) = self.omen_listener.take() {
@@ -189,12 +437,33 @@ impl OmvixApp {
             if let Some(old) = self.hotkey_listener.take() {
                 old.stop();
             }
+        }
+    }
+
+    fn rebind_hotkeys(&mut self, ctx: &egui::Context) {
+        self.omen_action_code.store(
+            omen_action_to_code(&self.cfg.hotkeys.omen_key_action),
+            Ordering::SeqCst,
+        );
+        #[cfg(windows)]
+        {
+            self.stop_hotkeys();
 
             if self.cfg.hotkeys.capture_omen_key {
                 let tx = self.signal_tx.clone();
                 let c = ctx.clone();
+                let vis = Arc::clone(&self.window_visible);
+                let hwnd = Arc::clone(&self.hwnd_atomic);
+                let action_code = Arc::clone(&self.omen_action_code);
                 self.omen_listener = Some(spawn_omen_key_listener(move || {
-                    let _ = tx.send(AppSignal::OmenKeyPressed);
+                    if action_code.load(Ordering::Relaxed) == 0 {
+                        let prev = vis.fetch_xor(true, Ordering::SeqCst);
+                        let next = !prev;
+                        win32_set_visible(hwnd.load(Ordering::SeqCst), next);
+                        let _ = tx.send(AppSignal::SyncVisibility(next));
+                    } else {
+                        let _ = tx.send(AppSignal::OmenKeyNonToggle);
+                    }
                     c.request_repaint();
                 }));
             }
@@ -202,10 +471,18 @@ impl OmvixApp {
             if !self.cfg.hotkeys.global_toggle_shortcut.trim().is_empty() {
                 let tx = self.signal_tx.clone();
                 let c = ctx.clone();
-                match spawn_global_hotkey_listener(&self.cfg.hotkeys.global_toggle_shortcut, move || {
-                    let _ = tx.send(AppSignal::GlobalTogglePressed);
-                    c.request_repaint();
-                }) {
+                let vis = Arc::clone(&self.window_visible);
+                let hwnd = Arc::clone(&self.hwnd_atomic);
+                match spawn_global_hotkey_listener(
+                    &self.cfg.hotkeys.global_toggle_shortcut,
+                    move || {
+                        let prev = vis.fetch_xor(true, Ordering::SeqCst);
+                        let next = !prev;
+                        win32_set_visible(hwnd.load(Ordering::SeqCst), next);
+                        let _ = tx.send(AppSignal::SyncVisibility(next));
+                        c.request_repaint();
+                    },
+                ) {
                     Ok(handle) => self.hotkey_listener = Some(handle),
                     Err(err) => tracing::warn!("Global hotkey bind failed: {err}"),
                 }
@@ -215,9 +492,10 @@ impl OmvixApp {
         let _ = ctx;
     }
 
-    fn toggle_window(&mut self, ctx: &egui::Context) {
-        self.window_visible = !self.window_visible;
-        if self.window_visible {
+    fn sync_window_visibility(&self, ctx: &egui::Context, visible: bool) {
+        self.window_visible.store(visible, Ordering::SeqCst);
+        win32_set_visible(self.hwnd_atomic.load(Ordering::SeqCst), visible);
+        if visible {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -225,7 +503,7 @@ impl OmvixApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         if let Some(tray) = &self.tray {
-            tray.update_labels(&self.i18n, self.window_visible);
+            tray.update_labels(&self.i18n, visible);
         }
     }
 
@@ -261,19 +539,16 @@ impl OmvixApp {
             return;
         }
         self.quitting = true;
+        self.force_quit.store(true, Ordering::SeqCst);
+        self.clean_quit_started.store(true, Ordering::SeqCst);
         self.save_config();
-
-        #[cfg(windows)]
-        {
-            if let Some(old) = self.omen_listener.take() {
-                old.stop();
-            }
-            if let Some(old) = self.hotkey_listener.take() {
-                old.stop();
-            }
-        }
+        self.stop_hotkeys();
         if let Some(w) = self.worker.take() {
             w.shutdown();
+        }
+        #[cfg(windows)]
+        if let Some(mut guard) = self.single_instance.take() {
+            guard.release();
         }
         if let Some(h) = &self.log_handle {
             h.flush();
@@ -285,35 +560,29 @@ impl OmvixApp {
     fn process_signals(&mut self, ctx: &egui::Context) {
         while let Ok(sig) = self.signal_rx.try_recv() {
             match sig {
-                AppSignal::Tray(action) => match action {
-                    TrayAction::ToggleWindow => self.toggle_window(ctx),
-                    TrayAction::SetPerformance(mode) => {
-                        self.cfg.thermal_fan.performance_mode = mode;
-                        self.save_config();
-                        self.send_cmd(WorkerCommand::SetPerformanceMode(mode));
-                    }
-                    TrayAction::SetFan(mode) => {
-                        self.cfg.thermal_fan.fan_mode = mode;
-                        self.save_config();
-                        self.send_cmd(WorkerCommand::SetFanMode {
-                            mode,
-                            manual_speed_pct: Some(self.cfg.thermal_fan.manual_speed_pct),
-                        });
-                    }
-                    TrayAction::ToggleBatteryLimit => {
-                        self.cfg.battery.enabled = !self.cfg.battery.enabled;
-                        self.save_config();
-                        self.send_cmd(WorkerCommand::UpdateConfig(self.cfg.clone()));
-                        self.send_cmd(WorkerCommand::ApplyBatteryNow);
-                    }
-                    TrayAction::Quit => self.begin_quit(ctx),
-                },
-                AppSignal::GlobalTogglePressed => self.toggle_window(ctx),
-                AppSignal::OmenKeyPressed => match self.cfg.hotkeys.omen_key_action {
-                    OmenKeyAction::ToggleWindow => self.toggle_window(ctx),
+                AppSignal::SyncVisibility(visible) => {
+                    self.sync_window_visibility(ctx, visible);
+                }
+                AppSignal::TrayPerfChanged(mode) => {
+                    self.cfg.thermal_fan.performance_mode = mode;
+                    self.save_config();
+                }
+                AppSignal::TrayFanChanged(mode) => {
+                    self.cfg.thermal_fan.fan_mode = mode;
+                    self.save_config();
+                }
+                AppSignal::TrayBatteryToggled => {
+                    self.cfg.battery.enabled = !self.cfg.battery.enabled;
+                    self.save_config();
+                    self.send_cmd(WorkerCommand::UpdateConfig(self.cfg.clone()));
+                    self.send_cmd(WorkerCommand::ApplyBatteryNow);
+                }
+                AppSignal::OmenKeyNonToggle => match self.cfg.hotkeys.omen_key_action {
+                    OmenKeyAction::ToggleWindow => {}
                     OmenKeyAction::CyclePerformanceMode => self.cycle_performance_mode(),
                     OmenKeyAction::LaunchCustomCommand => self.launch_custom_omen_command(),
                 },
+                AppSignal::QuitRequested => self.begin_quit(ctx),
             }
         }
     }
@@ -325,6 +594,12 @@ impl OmvixApp {
             use windows::Win32::UI::Shell::ShellExecuteW;
             use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
             use windows::core::{HSTRING, PCWSTR};
+
+            // Release global hotkeys & single-instance mutex BEFORE spawning elevated process.
+            self.stop_hotkeys();
+            if let Some(guard) = &mut self.single_instance {
+                guard.release();
+            }
 
             if let Ok(exe) = std::env::current_exe() {
                 let verb = HSTRING::from("runas");
@@ -341,14 +616,23 @@ impl OmvixApp {
                 };
                 if res.0 as isize > 32 {
                     self.begin_quit(ctx);
-                } else {
-                    tracing::warn!("ShellExecuteW(runas) declined or failed: {:?}", res.0);
+                    return;
                 }
+                tracing::warn!("ShellExecuteW(runas) declined or failed: {:?}", res.0);
             }
+
+            // User cancelled UAC or launch failed -> restore mutex and hotkeys.
+            self.single_instance = SingleInstanceGuard::acquire().ok();
+            self.rebind_hotkeys(ctx);
         }
         #[cfg(not(windows))]
         let _ = ctx;
     }
+}
+
+/// Lightweight proxy sender so tray background actions execute immediately even while window is hidden.
+fn worker_command_proxy(worker: &BackgroundWorker) -> Sender<WorkerCommand> {
+    worker.sender_clone()
 }
 
 impl eframe::App for OmvixApp {
@@ -356,54 +640,57 @@ impl eframe::App for OmvixApp {
         self.process_signals(ctx);
 
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.cfg.general.minimize_to_tray_on_close && !self.quitting {
+            let forced = self.force_quit.load(Ordering::SeqCst);
+            if !forced && self.cfg.general.minimize_to_tray_on_close && !self.quitting {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.window_visible = false;
-                if let Some(tray) = &self.tray {
-                    tray.update_labels(&self.i18n, false);
-                }
+                self.sync_window_visibility(ctx, false);
                 tracing::info!("{}", self.i18n.t("app.close_to_tray_notice"));
             } else {
                 self.begin_quit(ctx);
             }
         }
 
-        let dark = self.cfg.general.theme != "light";
         let snapshot_state = self
             .state
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default();
 
-        // Sidebar navigation
+        let current_theme = self.cfg.general.custom_theme.clone();
+        let accent = theme::accent_color(&current_theme);
+        let sidebar_frame = egui::Frame::side_top_panel(&ctx.style())
+            .fill(theme::sidebar_fill(&current_theme))
+            .inner_margin(egui::Margin::same(12));
+
+        // Sidebar navigation (with persistent rounded corners for both active and inactive tabs)
         egui::SidePanel::left("omvix_sidebar")
+            .frame(sidebar_frame)
             .resizable(false)
-            .exact_width(210.0)
+            .exact_width(214.0)
             .show(ctx, |ui| {
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 ui.label(
                     RichText::new(self.i18n.t("app.title"))
                         .size(21.0)
                         .strong()
-                        .color(theme::ACCENT_CYAN),
+                        .color(accent),
                 );
                 ui.weak(self.i18n.t("app.subtitle"));
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
 
                 for &tab in Tab::all() {
                     let selected = self.active_tab == tab;
                     let label = self.i18n.t(tab.i18n_key());
-                    let btn = egui::Button::new(RichText::new(label).size(14.5)).selected(selected);
-                    if ui.add_sized([190.0, 32.0], btn).clicked() {
+                    if theme::sidebar_tab_button(ui, &label, selected, &current_theme).clicked() {
                         self.active_tab = tab;
                     }
+                    ui.add_space(2.0);
                 }
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     if let Some((msg, is_err, ts)) = &snapshot_state.last_toast {
                         if ts.elapsed() < Duration::from_secs(6) {
                             let color = if *is_err {
@@ -425,26 +712,37 @@ impl eframe::App for OmvixApp {
                 let mut should_save = false;
                 let mut should_restart_admin = false;
                 let mut should_rebind_hotkeys = false;
+                let mut next_tab: Option<Tab> = None;
 
                 let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
                 let mut mark_save = || should_save = true;
 
                 match self.active_tab {
-                    Tab::Dashboard => ui::dashboard::render(
+                    Tab::Home => {
+                        let res = ui::home::render(
+                            ui,
+                            &mut self.cfg,
+                            &snapshot_state,
+                            &self.i18n,
+                            &mut push_cmd,
+                            &mut mark_save,
+                            &mut || should_restart_admin = true,
+                        );
+                        next_tab = res.navigate_to;
+                    }
+                    Tab::Monitor => ui::monitor::render(
                         ui,
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
-                        &mut || should_restart_admin = true,
+                        &mut mark_save,
                     ),
                     Tab::PerformanceFans => ui::performance::render(
                         ui,
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
                         &mut mark_save,
                     ),
@@ -453,7 +751,7 @@ impl eframe::App for OmvixApp {
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
+                        &mut self.battery_draft,
                         &mut push_cmd,
                         &mut mark_save,
                     ),
@@ -462,7 +760,6 @@ impl eframe::App for OmvixApp {
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
                         &mut mark_save,
                     ),
@@ -471,7 +768,6 @@ impl eframe::App for OmvixApp {
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
                         &mut mark_save,
                     ),
@@ -479,7 +775,6 @@ impl eframe::App for OmvixApp {
                         ui,
                         &mut self.cfg,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
                         &mut mark_save,
                         &mut || should_rebind_hotkeys = true,
@@ -488,7 +783,7 @@ impl eframe::App for OmvixApp {
                         ui,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
+                        &current_theme,
                         &mut push_cmd,
                     ),
                     Tab::Settings => {
@@ -496,23 +791,31 @@ impl eframe::App for OmvixApp {
                             ui,
                             &mut self.cfg,
                             &mut self.i18n,
-                            dark,
+                            &mut self.settings_draft,
                             &mut push_cmd,
                             &mut mark_save,
                         );
                         if res.language_changed {
                             if let Some(tray) = &self.tray {
-                                tray.update_labels(&self.i18n, self.window_visible);
+                                tray.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
                             }
                         }
                         if res.theme_changed {
-                            theme::apply_theme(ctx, self.cfg.general.theme != "light");
+                            theme::apply_theme(ctx, &self.cfg.general.custom_theme);
                         }
                     }
                 }
 
+                if let Some(target_tab) = next_tab {
+                    self.active_tab = target_tab;
+                }
+
                 if should_save {
                     self.save_config();
+                    self.omen_action_code.store(
+                        omen_action_to_code(&self.cfg.hotkeys.omen_key_action),
+                        Ordering::SeqCst,
+                    );
                 }
                 for cmd in pending_cmds {
                     self.send_cmd(cmd);

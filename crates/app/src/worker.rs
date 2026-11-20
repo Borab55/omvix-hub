@@ -10,6 +10,7 @@ use omvix_core::{
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -19,18 +20,80 @@ use std::time::{Duration, Instant};
 use omvix_windows::{
     WindowsBatteryBackend, WindowsCpuTuningBackend, WindowsDiagnosticsBackend,
     WindowsDisplayBackend, WindowsGpuSwitchBackend, WindowsKeyboardBackend,
-    WindowsTelemetryBackend, WindowsThermalFanBackend, system_info,
+    WindowsTelemetryBackend, WindowsThermalFanBackend, system_info, wmi_bios::HpWmiBios,
 };
 
-const MAX_HISTORY_SAMPLES: usize = 60;
+const MAX_HISTORY_SAMPLES: usize = 180;
+
+#[derive(Debug, Clone, Copy)]
+pub struct MetricStats {
+    pub min: f32,
+    pub max: f32,
+    pub sum: f64,
+    pub count: u64,
+}
+
+impl Default for MetricStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MetricStats {
+    pub fn new() -> Self {
+        Self {
+            min: f32::INFINITY,
+            max: f32::NEG_INFINITY,
+            sum: 0.0,
+            count: 0,
+        }
+    }
+
+    pub fn record(&mut self, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        if value < self.min {
+            self.min = value;
+        }
+        if value > self.max {
+            self.max = value;
+        }
+        self.sum += value as f64;
+        self.count += 1;
+    }
+
+    pub fn min_opt(&self) -> Option<f32> {
+        (self.count > 0 && self.min.is_finite()).then_some(self.min)
+    }
+
+    pub fn max_opt(&self) -> Option<f32> {
+        (self.count > 0 && self.max.is_finite()).then_some(self.max)
+    }
+
+    pub fn avg_opt(&self) -> Option<f32> {
+        (self.count > 0).then_some((self.sum / self.count as f64) as f32)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SharedState {
     pub telemetry: TelemetrySnapshot,
     pub cpu_usage_history: VecDeque<(f64, f32)>,
+    pub gpu_load_history: VecDeque<(f64, f32)>,
+    pub ram_usage_history: VecDeque<(f64, f32)>,
     pub cpu_temp_history: VecDeque<(f64, f32)>,
     pub gpu_temp_history: VecDeque<(f64, f32)>,
-    pub gpu_load_history: VecDeque<(f64, f32)>,
+    pub cpu_power_history: VecDeque<(f64, f32)>,
+    pub gpu_power_history: VecDeque<(f64, f32)>,
+    pub battery_power_history: VecDeque<(f64, f32)>,
+    pub cpu_temp_stats: MetricStats,
+    pub gpu_temp_stats: MetricStats,
+    pub cpu_power_stats: MetricStats,
+    pub gpu_power_stats: MetricStats,
+    pub cpu_usage_stats: MetricStats,
+    pub gpu_usage_stats: MetricStats,
+    pub telemetry_paused: bool,
     pub battery_status: Option<BatteryStatus>,
     pub display_mode: Option<DisplayModeInfo>,
     pub diagnostics: Option<DiagnosticReport>,
@@ -48,9 +111,20 @@ impl Default for SharedState {
         Self {
             telemetry: TelemetrySnapshot::default(),
             cpu_usage_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
+            gpu_load_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
+            ram_usage_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
             cpu_temp_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
             gpu_temp_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
-            gpu_load_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
+            cpu_power_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
+            gpu_power_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
+            battery_power_history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
+            cpu_temp_stats: MetricStats::new(),
+            gpu_temp_stats: MetricStats::new(),
+            cpu_power_stats: MetricStats::new(),
+            gpu_power_stats: MetricStats::new(),
+            cpu_usage_stats: MetricStats::new(),
+            gpu_usage_stats: MetricStats::new(),
+            telemetry_paused: false,
             battery_status: None,
             display_mode: None,
             diagnostics: None,
@@ -75,6 +149,23 @@ impl SharedState {
     pub fn set_toast(&mut self, msg: impl Into<String>, is_error: bool) {
         self.last_toast = Some((msg.into(), is_error, Instant::now()));
     }
+
+    pub fn clear_telemetry_history(&mut self) {
+        self.cpu_usage_history.clear();
+        self.gpu_load_history.clear();
+        self.ram_usage_history.clear();
+        self.cpu_temp_history.clear();
+        self.gpu_temp_history.clear();
+        self.cpu_power_history.clear();
+        self.gpu_power_history.clear();
+        self.battery_power_history.clear();
+        self.cpu_temp_stats = MetricStats::new();
+        self.gpu_temp_stats = MetricStats::new();
+        self.cpu_power_stats = MetricStats::new();
+        self.gpu_power_stats = MetricStats::new();
+        self.cpu_usage_stats = MetricStats::new();
+        self.gpu_usage_stats = MetricStats::new();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +176,9 @@ pub enum WorkerCommand {
         manual_speed_pct: Option<u8>,
     },
     UpdateConfig(AppConfig),
+    SetTelemetryIntervalMs(u64),
+    SetTelemetryPaused(bool),
+    ResetTelemetryStats,
     ApplyBatteryNow,
     ApplyLighting,
     SetRefreshRate(u32),
@@ -108,13 +202,23 @@ pub struct BackgroundWorker {
 }
 
 impl BackgroundWorker {
-    pub fn spawn(initial_config: AppConfig, ctx: Option<egui::Context>) -> Self {
+    pub fn spawn(
+        initial_config: AppConfig,
+        ctx: Option<egui::Context>,
+        window_visible: Arc<AtomicBool>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<WorkerCommand>();
-        let state = Arc::new(Mutex::new(SharedState::default()));
+        let mut initial_state = SharedState::default();
+        #[cfg(windows)]
+        {
+            // Populate Admin elevation synchronously (<0.01ms) so Frame 1 shows accurate badge immediately.
+            initial_state.security.is_admin = system_info::is_process_elevated();
+        }
+        let state = Arc::new(Mutex::new(initial_state));
         let state_bg = Arc::clone(&state);
 
         let join = thread::spawn(move || {
-            run_worker_loop(initial_config, state_bg, rx, ctx);
+            run_worker_loop(initial_config, state_bg, rx, ctx, window_visible);
         });
 
         Self {
@@ -126,6 +230,10 @@ impl BackgroundWorker {
 
     pub fn send(&self, cmd: WorkerCommand) {
         let _ = self.tx.send(cmd);
+    }
+
+    pub fn sender_clone(&self) -> Sender<WorkerCommand> {
+        self.tx.clone()
     }
 
     pub fn state(&self) -> Arc<Mutex<SharedState>> {
@@ -147,13 +255,25 @@ fn push_sample(buf: &mut VecDeque<(f64, f32)>, x: f64, y: f32) {
     buf.push_back((x, y));
 }
 
+fn request_repaint_if_visible(ctx: &Option<egui::Context>, window_visible: &Arc<AtomicBool>) {
+    if window_visible.load(Ordering::Relaxed) {
+        if let Some(c) = ctx {
+            c.request_repaint();
+        }
+    }
+}
+
 #[cfg(windows)]
 fn run_worker_loop(
     mut cfg: AppConfig,
     state: Arc<Mutex<SharedState>>,
     rx: mpsc::Receiver<WorkerCommand>,
     ctx: Option<egui::Context>,
+    window_visible: Arc<AtomicBool>,
 ) {
+    // Hold a single persistent COM/WMI session on this worker thread for its entire lifetime.
+    let _wmi_scope = HpWmiBios::enable_thread_cache();
+
     let diag_be = WindowsDiagnosticsBackend::new();
     let telemetry_be = WindowsTelemetryBackend::new();
     let thermal_be = WindowsThermalFanBackend::new();
@@ -166,7 +286,42 @@ fn run_worker_loop(
     let mut battery_engine = BatteryCareEngine::new();
     let mut auto_profile_engine = AutoProfileEngine::new();
 
-    // Initial discovery snapshot
+    let started = Instant::now();
+
+    // Phase 1 discovery: instant live telemetry + display modes + CPU boost
+    {
+        let snap = telemetry_be.read_telemetry().ok();
+        let disp = display_be.get_display_mode().ok();
+        let boost = tuning_be.read_cpu_boost_mode().ok();
+        if let Ok(mut st) = state.lock() {
+            if let Some(s) = snap {
+                record_snapshot(&mut st, &s, started.elapsed().as_secs_f64());
+            }
+            st.display_mode = disp;
+            st.cpu_boost = boost;
+        }
+        request_repaint_if_visible(&ctx, &window_visible);
+    }
+
+    // Phase 2 discovery: battery, keyboard type, GPU MUX mode
+    {
+        let is_admin = system_info::is_process_elevated();
+        let bat = battery_be.get_battery_status().ok();
+        let kbd_type = kbd_be.detect_keyboard_type().unwrap_or(KeyboardType::Unknown);
+        let gpu_mode = if is_admin {
+            gpu_be.get_gpu_mode().ok()
+        } else {
+            None
+        };
+        if let Ok(mut st) = state.lock() {
+            st.battery_status = bat;
+            st.keyboard_type = kbd_type;
+            st.gpu_mode = gpu_mode;
+        }
+        request_repaint_if_visible(&ctx, &window_visible);
+    }
+
+    // Phase 3 discovery: VBS/HVCI security & conflicting background services
     {
         let sec = system_info::collect_security_status();
         let conflicts = system_info::scan_conflict_services();
@@ -174,36 +329,25 @@ fn run_worker_loop(
             s.service_name.eq_ignore_ascii_case("hp-charge-limit-rs")
                 && s.status.eq_ignore_ascii_case("Running")
         });
-        let disp = display_be.get_display_mode().ok();
-        let boost = tuning_be.read_cpu_boost_mode().ok();
-        let kbd_type = kbd_be.detect_keyboard_type().unwrap_or(KeyboardType::Unknown);
-        let bat = battery_be.get_battery_status().ok();
-        let gpu_mode = if sec.is_admin {
-            gpu_be.get_gpu_mode().ok()
-        } else {
-            None
-        };
-        let diag = diag_be.collect_diagnostics().ok();
-
         if let Ok(mut st) = state.lock() {
             st.security = sec;
             st.conflict_services = conflicts;
             st.hp_charge_service_running = hp_charge_running;
-            st.display_mode = disp;
-            st.cpu_boost = boost;
-            st.keyboard_type = kbd_type;
-            st.battery_status = bat;
-            st.gpu_mode = gpu_mode;
-            st.diagnostics = diag;
         }
-        if let Some(c) = &ctx {
-            c.request_repaint();
-        }
+        request_repaint_if_visible(&ctx, &window_visible);
     }
 
-    let started = Instant::now();
-    let mut last_telemetry = Instant::now() - Duration::from_secs(10);
-    let mut last_battery = Instant::now() - Duration::from_secs(10);
+    // Phase 4 discovery: full read-only diagnostics + WMI probe table
+    {
+        let diag = diag_be.collect_diagnostics().ok();
+        if let Ok(mut st) = state.lock() {
+            st.diagnostics = diag;
+        }
+        request_repaint_if_visible(&ctx, &window_visible);
+    }
+
+    let mut last_telemetry = Instant::now();
+    let mut last_battery = Instant::now();
     let mut last_curve_eval = Instant::now();
     let mut last_keep_alive = Instant::now();
     let mut prev_curve_temp: f32 = 45.0;
@@ -211,163 +355,52 @@ fn run_worker_loop(
     let mut last_applied_bat_mode: Option<BatteryChargeMode> = None;
 
     loop {
-        while let Ok(cmd) = rx.try_recv() {
-            match cmd {
-                WorkerCommand::Shutdown => {
-                    tracing::info!("Background worker shutting down");
-                    return;
+        let interval_ms = cfg.general.telemetry_interval_ms.clamp(100, 10_000);
+        let sleep_ms = (interval_ms / 4).clamp(20, 100);
+
+        match rx.recv_timeout(Duration::from_millis(sleep_ms)) {
+            Ok(first_cmd) => {
+                let mut cmds = vec![first_cmd];
+                while let Ok(more) = rx.try_recv() {
+                    cmds.push(more);
                 }
-                WorkerCommand::UpdateConfig(new_cfg) => {
-                    cfg = new_cfg;
-                }
-                WorkerCommand::SetPerformanceMode(mode) => {
-                    cfg.thermal_fan.performance_mode = mode;
-                    let res = thermal_be.set_performance_mode(mode);
-                    record_result(&state, res, format!("Performance mode -> {mode:?}"));
-                }
-                WorkerCommand::SetFanMode {
-                    mode,
-                    manual_speed_pct,
-                } => {
-                    cfg.thermal_fan.fan_mode = mode;
-                    if let Some(pct) = manual_speed_pct {
-                        cfg.thermal_fan.manual_speed_pct = pct;
-                    }
-                    let res = thermal_be.set_fan_mode(mode, manual_speed_pct);
-                    record_result(&state, res, format!("Fan mode -> {mode:?}"));
-                }
-                WorkerCommand::ApplyBatteryNow => {
-                    if let Ok(bat) = battery_be.get_battery_status() {
-                        let target = battery_engine.evaluate(
-                            &mut cfg.battery,
-                            bat.charge_percent,
-                            bat.ac_connected,
-                        );
-                        let res = battery_be.set_charge_mode(target);
-                        if res.is_ok() {
-                            last_applied_bat_mode = Some(target);
-                        }
-                        record_result(&state, res, format!("Battery charge mode -> {target:?}"));
-                    }
-                }
-                WorkerCommand::ApplyLighting => {
-                    let res = kbd_be.set_backlight(
-                        cfg.lighting.enabled,
-                        cfg.lighting.brightness_pct,
-                        &cfg.lighting.zones,
-                    );
-                    record_result(&state, res, "Keyboard lighting updated".to_string());
-                }
-                WorkerCommand::SetRefreshRate(hz) => {
-                    let res = display_be.set_refresh_rate(hz);
-                    if res.is_ok() {
-                        if let Ok(disp) = display_be.get_display_mode() {
-                            if let Ok(mut st) = state.lock() {
-                                st.display_mode = Some(disp);
-                            }
-                        }
-                    }
-                    record_result(&state, res, format!("Refresh rate -> {hz} Hz"));
-                }
-                WorkerCommand::SetGpuMode(mode) => {
-                    let res = gpu_be.set_gpu_mode(mode);
-                    if res.is_ok() {
-                        if let Ok(mut st) = state.lock() {
-                            st.gpu_mode = Some(mode);
-                        }
-                    }
-                    record_result(
+                for cmd in cmds {
+                    let should_shutdown = handle_worker_command(
+                        cmd,
+                        &mut cfg,
                         &state,
-                        res,
-                        format!("GPU MUX -> {mode:?} (reboot required)"),
+                        &diag_be,
+                        &thermal_be,
+                        &battery_be,
+                        &kbd_be,
+                        &gpu_be,
+                        &display_be,
+                        &tuning_be,
+                        &mut battery_engine,
+                        &mut last_applied_bat_mode,
                     );
-                }
-                WorkerCommand::SetCpuBoost(mode) => {
-                    let res = tuning_be.set_cpu_boost_mode(mode);
-                    if res.is_ok() {
-                        if let Ok(mut st) = state.lock() {
-                            st.cpu_boost = Some(mode);
-                        }
-                    }
-                    record_result(&state, res, format!("CPU Boost -> {mode:?}"));
-                }
-                WorkerCommand::SetPowerLimits { pl1, pl2 } => {
-                    let res = tuning_be.set_power_limits(pl1, pl2);
-                    record_result(&state, res, format!("Power limits PL1={pl1:?} PL2={pl2:?}"));
-                }
-                WorkerCommand::SetTccLimit(temp_c) => {
-                    let res = tuning_be.set_tcc_temp_limit(temp_c);
-                    record_result(&state, res, format!("TCC temp limit -> {temp_c}°C"));
-                }
-                WorkerCommand::SetUndervolt(mv) => {
-                    let res = tuning_be.set_core_undervolt_mv(mv);
-                    record_result(&state, res, format!("Core undervolt -> {mv} mV"));
-                }
-                WorkerCommand::RefreshDiagnostics => {
-                    let res = diag_be.collect_diagnostics();
-                    match res {
-                        Ok(report) => {
-                            if let Ok(mut st) = state.lock() {
-                                st.security = report.security.clone();
-                                st.conflict_services = report.conflict_services.clone();
-                                st.diagnostics = Some(report);
-                                st.set_toast("Diagnostics refreshed", false);
-                            }
-                        }
-                        Err(err) => {
-                            if let Ok(mut st) = state.lock() {
-                                st.set_toast(err.to_string(), true);
-                            }
-                        }
+                    if should_shutdown {
+                        return;
                     }
                 }
-                WorkerCommand::ExportDiagnostics(path) => match diag_be.collect_diagnostics() {
-                    Ok(report) => match serde_json::to_string_pretty(&report) {
-                        Ok(json) => {
-                            let res = fs::write(&path, json).map_err(Into::into);
-                            record_result(
-                                &state,
-                                res,
-                                format!("Exported diagnostics to {}", path.display()),
-                            );
-                        }
-                        Err(err) => {
-                            if let Ok(mut st) = state.lock() {
-                                st.set_toast(err.to_string(), true);
-                            }
-                        }
-                    },
-                    Err(err) => {
-                        if let Ok(mut st) = state.lock() {
-                            st.set_toast(err.to_string(), true);
-                        }
-                    }
-                },
+                request_repaint_if_visible(&ctx, &window_visible);
             }
-            if let Some(c) = &ctx {
-                c.request_repaint();
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
 
-        // Periodic telemetry poll (1.5s)
-        if last_telemetry.elapsed() >= Duration::from_millis(1500) {
+        // Periodic telemetry poll
+        let interval_ms = cfg.general.telemetry_interval_ms.clamp(100, 10_000);
+        if last_telemetry.elapsed() >= Duration::from_millis(interval_ms) {
             last_telemetry = Instant::now();
             if let Ok(snap) = telemetry_be.read_telemetry() {
                 let t = started.elapsed().as_secs_f64();
                 if let Ok(mut st) = state.lock() {
-                    if let Some(u) = snap.cpu_usage_pct {
-                        push_sample(&mut st.cpu_usage_history, t, u);
+                    if !st.telemetry_paused {
+                        record_snapshot(&mut st, &snap, t);
+                    } else {
+                        st.telemetry = snap.clone();
                     }
-                    if let Some(ct) = snap.cpu_temp_c {
-                        push_sample(&mut st.cpu_temp_history, t, ct);
-                    }
-                    if let Some(gt) = snap.gpu_temp_c {
-                        push_sample(&mut st.gpu_temp_history, t, gt);
-                    }
-                    if let Some(gl) = snap.gpu_usage_pct {
-                        push_sample(&mut st.gpu_load_history, t, gl);
-                    }
-                    st.telemetry = snap.clone();
                 }
 
                 // Evaluate AC/DC Auto-Profile on transitions
@@ -420,9 +453,7 @@ fn run_worker_loop(
                     }
                 }
 
-                if let Some(c) = &ctx {
-                    c.request_repaint();
-                }
+                request_repaint_if_visible(&ctx, &window_visible);
             }
         }
 
@@ -451,6 +482,7 @@ fn run_worker_loop(
                 if let Ok(mut st) = state.lock() {
                     st.battery_status = Some(bat);
                 }
+                request_repaint_if_visible(&ctx, &window_visible);
             }
         }
 
@@ -462,9 +494,208 @@ fn run_worker_loop(
             last_keep_alive = Instant::now();
             let _ = thermal_be.keep_alive_tick();
         }
-
-        thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn record_snapshot(st: &mut SharedState, snap: &TelemetrySnapshot, t: f64) {
+    if let Some(u) = snap.cpu_usage_pct {
+        push_sample(&mut st.cpu_usage_history, t, u);
+        st.cpu_usage_stats.record(u);
+    }
+    if let Some(gl) = snap.gpu_usage_pct {
+        push_sample(&mut st.gpu_load_history, t, gl);
+        st.gpu_usage_stats.record(gl);
+    }
+    if let (Some(used), Some(total)) = (snap.ram_used_gb, snap.ram_total_gb) {
+        if total > 0.0 {
+            let pct = ((used / total) * 100.0).clamp(0.0, 100.0);
+            push_sample(&mut st.ram_usage_history, t, pct);
+        }
+    }
+    if let Some(ct) = snap.cpu_temp_c {
+        push_sample(&mut st.cpu_temp_history, t, ct);
+        st.cpu_temp_stats.record(ct);
+    }
+    if let Some(gt) = snap.gpu_temp_c {
+        push_sample(&mut st.gpu_temp_history, t, gt);
+        st.gpu_temp_stats.record(gt);
+    }
+    if let Some(cp) = snap.cpu_power_w {
+        push_sample(&mut st.cpu_power_history, t, cp);
+        st.cpu_power_stats.record(cp);
+    }
+    if let Some(gp) = snap.gpu_power_w {
+        push_sample(&mut st.gpu_power_history, t, gp);
+        st.gpu_power_stats.record(gp);
+    }
+    if let Some(bp) = snap.battery_rate_w {
+        push_sample(&mut st.battery_power_history, t, bp.abs());
+    }
+    st.telemetry = snap.clone();
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn handle_worker_command(
+    cmd: WorkerCommand,
+    cfg: &mut AppConfig,
+    state: &Arc<Mutex<SharedState>>,
+    diag_be: &WindowsDiagnosticsBackend,
+    thermal_be: &WindowsThermalFanBackend,
+    battery_be: &WindowsBatteryBackend,
+    kbd_be: &WindowsKeyboardBackend,
+    gpu_be: &WindowsGpuSwitchBackend,
+    display_be: &WindowsDisplayBackend,
+    tuning_be: &WindowsCpuTuningBackend,
+    battery_engine: &mut BatteryCareEngine,
+    last_applied_bat_mode: &mut Option<BatteryChargeMode>,
+) -> bool {
+    match cmd {
+        WorkerCommand::Shutdown => {
+            tracing::info!("Background worker shutting down");
+            return true;
+        }
+        WorkerCommand::UpdateConfig(new_cfg) => {
+            *cfg = new_cfg;
+        }
+        WorkerCommand::SetTelemetryIntervalMs(ms) => {
+            cfg.general.telemetry_interval_ms = ms.clamp(100, 10_000);
+        }
+        WorkerCommand::SetTelemetryPaused(paused) => {
+            if let Ok(mut st) = state.lock() {
+                st.telemetry_paused = paused;
+            }
+        }
+        WorkerCommand::ResetTelemetryStats => {
+            if let Ok(mut st) = state.lock() {
+                st.clear_telemetry_history();
+            }
+        }
+        WorkerCommand::SetPerformanceMode(mode) => {
+            cfg.thermal_fan.performance_mode = mode;
+            let res = thermal_be.set_performance_mode(mode);
+            record_result(state, res, format!("Performance mode -> {mode:?}"));
+        }
+        WorkerCommand::SetFanMode {
+            mode,
+            manual_speed_pct,
+        } => {
+            cfg.thermal_fan.fan_mode = mode;
+            if let Some(pct) = manual_speed_pct {
+                cfg.thermal_fan.manual_speed_pct = pct;
+            }
+            let res = thermal_be.set_fan_mode(mode, manual_speed_pct);
+            record_result(state, res, format!("Fan mode -> {mode:?}"));
+        }
+        WorkerCommand::ApplyBatteryNow => {
+            if let Ok(bat) = battery_be.get_battery_status() {
+                let target = battery_engine.evaluate(
+                    &mut cfg.battery,
+                    bat.charge_percent,
+                    bat.ac_connected,
+                );
+                let res = battery_be.set_charge_mode(target);
+                if res.is_ok() {
+                    *last_applied_bat_mode = Some(target);
+                }
+                record_result(state, res, format!("Battery charge mode -> {target:?}"));
+            }
+        }
+        WorkerCommand::ApplyLighting => {
+            let res = kbd_be.set_backlight(
+                cfg.lighting.enabled,
+                cfg.lighting.brightness_pct,
+                &cfg.lighting.zones,
+            );
+            record_result(state, res, "Keyboard lighting updated".to_string());
+        }
+        WorkerCommand::SetRefreshRate(hz) => {
+            let res = display_be.set_refresh_rate(hz);
+            if res.is_ok() {
+                if let Ok(disp) = display_be.get_display_mode() {
+                    if let Ok(mut st) = state.lock() {
+                        st.display_mode = Some(disp);
+                    }
+                }
+            }
+            record_result(state, res, format!("Refresh rate -> {hz} Hz"));
+        }
+        WorkerCommand::SetGpuMode(mode) => {
+            let res = gpu_be.set_gpu_mode(mode);
+            if res.is_ok() {
+                if let Ok(mut st) = state.lock() {
+                    st.gpu_mode = Some(mode);
+                }
+            }
+            record_result(
+                state,
+                res,
+                format!("GPU MUX -> {mode:?} (reboot required)"),
+            );
+        }
+        WorkerCommand::SetCpuBoost(mode) => {
+            let res = tuning_be.set_cpu_boost_mode(mode);
+            if res.is_ok() {
+                if let Ok(mut st) = state.lock() {
+                    st.cpu_boost = Some(mode);
+                }
+            }
+            record_result(state, res, format!("CPU Boost -> {mode:?}"));
+        }
+        WorkerCommand::SetPowerLimits { pl1, pl2 } => {
+            let res = tuning_be.set_power_limits(pl1, pl2);
+            record_result(state, res, format!("Power limits PL1={pl1:?} PL2={pl2:?}"));
+        }
+        WorkerCommand::SetTccLimit(temp_c) => {
+            let res = tuning_be.set_tcc_temp_limit(temp_c);
+            record_result(state, res, format!("TCC temp limit -> {temp_c}°C"));
+        }
+        WorkerCommand::SetUndervolt(mv) => {
+            let res = tuning_be.set_core_undervolt_mv(mv);
+            record_result(state, res, format!("Core undervolt -> {mv} mV"));
+        }
+        WorkerCommand::RefreshDiagnostics => {
+            let res = diag_be.collect_diagnostics();
+            match res {
+                Ok(report) => {
+                    if let Ok(mut st) = state.lock() {
+                        st.security = report.security.clone();
+                        st.conflict_services = report.conflict_services.clone();
+                        st.diagnostics = Some(report);
+                        st.set_toast("Diagnostics refreshed", false);
+                    }
+                }
+                Err(err) => {
+                    if let Ok(mut st) = state.lock() {
+                        st.set_toast(err.to_string(), true);
+                    }
+                }
+            }
+        }
+        WorkerCommand::ExportDiagnostics(path) => match diag_be.collect_diagnostics() {
+            Ok(report) => match serde_json::to_string_pretty(&report) {
+                Ok(json) => {
+                    let res = fs::write(&path, json).map_err(Into::into);
+                    record_result(
+                        state,
+                        res,
+                        format!("Exported diagnostics to {}", path.display()),
+                    );
+                }
+                Err(err) => {
+                    if let Ok(mut st) = state.lock() {
+                        st.set_toast(err.to_string(), true);
+                    }
+                }
+            },
+            Err(err) => {
+                if let Ok(mut st) = state.lock() {
+                    st.set_toast(err.to_string(), true);
+                }
+            }
+        },
+    }
+    false
 }
 
 #[cfg(not(windows))]
@@ -473,6 +704,7 @@ fn run_worker_loop(
     _state: Arc<Mutex<SharedState>>,
     rx: mpsc::Receiver<WorkerCommand>,
     _ctx: Option<egui::Context>,
+    _window_visible: Arc<AtomicBool>,
 ) {
     while let Ok(cmd) = rx.recv() {
         if matches!(cmd, WorkerCommand::Shutdown) {

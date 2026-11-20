@@ -1,15 +1,17 @@
 pub mod battery;
-pub mod dashboard;
 pub mod diagnostics;
+pub mod home;
 pub mod hotkeys;
 pub mod lighting_display;
+pub mod monitor;
 pub mod performance;
 pub mod settings;
 pub mod tuning;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    Dashboard,
+    Home,
+    Monitor,
     PerformanceFans,
     Battery,
     LightingDisplay,
@@ -22,7 +24,8 @@ pub enum Tab {
 impl Tab {
     pub fn all() -> &'static [Tab] {
         &[
-            Self::Dashboard,
+            Self::Home,
+            Self::Monitor,
             Self::PerformanceFans,
             Self::Battery,
             Self::LightingDisplay,
@@ -35,7 +38,8 @@ impl Tab {
 
     pub fn i18n_key(self) -> &'static str {
         match self {
-            Self::Dashboard => "nav.dashboard",
+            Self::Home => "nav.home",
+            Self::Monitor => "nav.monitor",
             Self::PerformanceFans => "nav.performance_fans",
             Self::Battery => "nav.battery",
             Self::LightingDisplay => "nav.lighting_display",

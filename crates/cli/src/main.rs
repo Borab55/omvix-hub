@@ -376,6 +376,24 @@ fn print_battery_status(b: &BatteryStatus) {
             .unwrap_or_else(|| "N/A".to_string())
     );
     println!(
+        "Voltage        : {}",
+        b.voltage_v
+            .map(|v| format!("{v:.2} V"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "Remaining Cap  : {}",
+        b.remaining_capacity_mwh
+            .map(|m| format!("{m} mWh"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "Time Remaining : {}",
+        b.time_remaining_min
+            .map(|m| format!("{}h {}m", m / 60, m % 60))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
         "Design Cap     : {}",
         b.design_capacity_mwh
             .map(|m| format!("{m} mWh"))
@@ -393,7 +411,14 @@ fn print_battery_status(b: &BatteryStatus) {
             .map(|w| format!("{w:.1}%"))
             .unwrap_or_else(|| "N/A".to_string())
     );
-    println!("Firmware Mode  : {:?}", b.current_mode);
+    println!(
+        "Firmware Mode  : {:?}{}",
+        b.current_mode,
+        b.raw_mode_hex
+            .as_deref()
+            .map(|h| format!(" [{h}]"))
+            .unwrap_or_default()
+    );
 }
 
 fn print_telemetry(t: &TelemetrySnapshot) {
@@ -410,6 +435,12 @@ fn print_telemetry(t: &TelemetrySnapshot) {
         "CPU Clock   : {}",
         t.cpu_clock_mhz
             .map(|v| format!("{v} MHz"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "CPU Power   : {}",
+        t.cpu_power_w
+            .map(|v| format!("{v:.1} W (EMI)"))
             .unwrap_or_else(|| "N/A".to_string())
     );
     println!(
@@ -432,13 +463,33 @@ fn print_telemetry(t: &TelemetrySnapshot) {
             .unwrap_or_else(|| "N/A".to_string())
     );
     println!(
-        "GPU Pwr/Clk : {} / {}",
+        "GPU Pwr/Lim : {} / {}",
         t.gpu_power_w
             .map(|v| format!("{v:.1} W"))
             .unwrap_or_else(|| "N/A".to_string()),
+        t.gpu_power_limit_w
+            .map(|v| format!("{v:.0} W"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "GPU Clocks  : {} core / {} mem ({})",
         t.gpu_clock_mhz
             .map(|v| format!("{v} MHz"))
-            .unwrap_or_else(|| "N/A".to_string())
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.gpu_mem_clock_mhz
+            .map(|v| format!("{v} MHz"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.gpu_pstate.as_deref().unwrap_or("?")
+    );
+    println!(
+        "GPU VRAM    : {} / {} ({})",
+        t.gpu_mem_used_mb
+            .map(|v| format!("{v} MB"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.gpu_mem_total_mb
+            .map(|v| format!("{v} MB"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.gpu_throttle_reason.as_deref().unwrap_or("No Throttle")
     );
     println!(
         "RAM         : {} / {}",
@@ -447,6 +498,24 @@ fn print_telemetry(t: &TelemetrySnapshot) {
             .unwrap_or_else(|| "N/A".to_string()),
         t.ram_total_gb
             .map(|v| format!("{v:.2} GB"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "Disk I/O    : R {} | W {}",
+        t.disk_read_mb_s
+            .map(|v| format!("{v:.2} MB/s"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.disk_write_mb_s
+            .map(|v| format!("{v:.2} MB/s"))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "Network I/O : Down {} | Up {}",
+        t.net_rx_mb_s
+            .map(|v| format!("{v:.2} MB/s"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.net_tx_mb_s
+            .map(|v| format!("{v:.2} MB/s"))
             .unwrap_or_else(|| "N/A".to_string())
     );
     println!(
@@ -462,7 +531,7 @@ fn print_telemetry(t: &TelemetrySnapshot) {
         }
     );
     println!(
-        "Power / Bat : {} | {} | Rate: {}",
+        "Power / Bat : {} | {} | Rate: {} | Volt: {}",
         match t.ac_connected {
             Some(true) => "AC Plugged In",
             Some(false) => "On Battery",
@@ -473,6 +542,9 @@ fn print_telemetry(t: &TelemetrySnapshot) {
             .unwrap_or_else(|| "N/A".to_string()),
         t.battery_rate_w
             .map(|w| format!("{w:+.2} W"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        t.battery_voltage_v
+            .map(|v| format!("{v:.2} V"))
             .unwrap_or_else(|| "N/A".to_string())
     );
 }
