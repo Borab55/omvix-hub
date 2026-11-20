@@ -1,3 +1,4 @@
+pub mod auto_profile;
 pub mod battery_care;
 pub mod boards;
 pub mod config;
