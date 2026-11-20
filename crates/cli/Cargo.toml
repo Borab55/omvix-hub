@@ -1,0 +1,14 @@
+[package]
+name = "omvix-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+omvix-core = { path = "../core" }
+omvix-windows = { path = "../backend-windows" }
+clap.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
