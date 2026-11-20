@@ -81,6 +81,7 @@ mod tests {
             start_threshold_pct: 75,
             hold_when_shutdown: false,
             one_time_full_charge: false,
+            ..BatteryConfig::default()
         };
 
         // Below start -> Auto
@@ -111,6 +112,7 @@ mod tests {
             start_threshold_pct: 75,
             hold_when_shutdown: true,
             one_time_full_charge: false,
+            ..BatteryConfig::default()
         };
         assert_eq!(engine.evaluate(&mut cfg, 85, true), BatteryChargeMode::Hold);
     }
@@ -125,6 +127,7 @@ mod tests {
             start_threshold_pct: 75,
             hold_when_shutdown: false,
             one_time_full_charge: true,
+            ..BatteryConfig::default()
         };
 
         // Even at 85%, travel mode keeps Auto until 99% or unplug

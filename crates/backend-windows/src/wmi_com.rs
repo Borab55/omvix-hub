@@ -1,4 +1,5 @@
 use omvix_core::{OmvixError, Result};
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr;
 use windows::core::{BSTR, HRESULT, HSTRING, IUnknown, Interface, PCWSTR, VARIANT};
@@ -37,6 +38,20 @@ impl Drop for ComApartmentGuard {
     }
 }
 
+thread_local! {
+    static WMI_CONN_CACHE_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static ROOT_WMI_CONN_CACHE: RefCell<Option<WmiConnection>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn set_root_wmi_cache_enabled(enabled: bool) {
+    WMI_CONN_CACHE_ENABLED.with(|c| c.set(enabled));
+    if !enabled {
+        ROOT_WMI_CONN_CACHE.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+}
+
 /// Safe COM/WMI session wrapper for querying namespaces and invoking WMI methods.
 /// Field order matters: `services` MUST drop before `_com` calls `CoUninitialize`.
 pub struct WmiConnection {
@@ -46,6 +61,27 @@ pub struct WmiConnection {
 }
 
 impl WmiConnection {
+    /// Executes `f` using a persistent `root\WMI` connection when thread caching is enabled.
+    pub(crate) fn with_cached_root_wmi<T>(f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let enabled = WMI_CONN_CACHE_ENABLED.with(|c| c.get());
+        if !enabled {
+            let conn = Self::connect(r"root\WMI")?;
+            return f(&conn);
+        }
+
+        ROOT_WMI_CONN_CACHE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(Self::connect(r"root\WMI")?);
+            }
+            let res = f(slot.as_ref().expect("root\\WMI connection populated"));
+            if matches!(&res, Err(OmvixError::WmiUnavailable(_))) {
+                *slot = None;
+            }
+            res
+        })
+    }
+
     pub fn connect(namespace: &str) -> Result<Self> {
         unsafe {
             let init_hr = CoInitializeEx(None, COINIT_MULTITHREADED);

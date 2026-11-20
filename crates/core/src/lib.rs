@@ -9,7 +9,7 @@ pub mod models;
 pub mod thermal;
 pub mod traits;
 
-pub use config::AppConfig;
+pub use config::{AppConfig, BatteryProfile, CustomThemeConfig};
 pub use error::{OmvixError, Result};
 pub use i18n::I18n;
 pub use logging::{
