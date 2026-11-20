@@ -338,11 +338,6 @@ fn main() {
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
                 eframe::egui_wgpu::WgpuSetupCreateNew {
-                    #[cfg(windows)]
-                    instance_descriptor: eframe::wgpu::InstanceDescriptor {
-                        backends: eframe::wgpu::Backends::DX12,
-                        ..Default::default()
-                    },
                     power_preference: eframe::wgpu::PowerPreference::LowPower,
                     ..Default::default()
                 },
