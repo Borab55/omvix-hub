@@ -1,12 +1,18 @@
-use crate::theme::{ACCENT_CYAN, card_frame};
+use crate::theme::{STATUS_ERR, STATUS_OK, card_frame, section_title};
 use crate::worker::WorkerCommand;
 use egui::{RichText, ScrollArea, Slider, Ui};
 use omvix_core::{
-    AppConfig, I18n, LogLevel, clear_logs, tail_logs, total_log_bytes,
+    AppConfig, CustomThemeConfig, I18n, LogLevel, clear_logs, tail_logs, total_log_bytes,
 };
 
 #[cfg(windows)]
 use omvix_windows::autostart;
+
+#[derive(Debug, Default, Clone)]
+pub struct SettingsThemeDraft {
+    pub import_input: String,
+    pub status_msg: Option<(String, bool)>,
+}
 
 pub struct SettingsActions {
     pub language_changed: bool,
@@ -17,7 +23,7 @@ pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
     i18n: &mut I18n,
-    dark: bool,
+    draft: &mut SettingsThemeDraft,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) -> SettingsActions {
@@ -25,14 +31,15 @@ pub fn render(
         language_changed: false,
         theme_changed: false,
     };
+    let theme_snapshot = cfg.general.custom_theme.clone();
 
     ui.heading(i18n.t("nav.settings"));
     ui.add_space(6.0);
 
-    // General, Language, Theme, Tray, Autostart
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new("General").strong().color(ACCENT_CYAN));
-        ui.horizontal(|ui| {
+    // General, Language, Refresh Rate, Tray, Autostart
+    card_frame(&theme_snapshot).show(ui, |ui| {
+        section_title(ui, i18n.t("settings.general"), &theme_snapshot);
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("common.language"));
             let langs = i18n.available_languages();
             let current_label = langs
@@ -59,23 +66,25 @@ pub fn render(
                     }
                 });
 
-            ui.add_space(16.0);
-            ui.label(i18n.t("settings.theme"));
-            if ui
-                .selectable_label(cfg.general.theme == "dark", i18n.t("settings.theme_dark"))
-                .clicked()
-            {
-                cfg.general.theme = "dark".to_string();
-                on_save();
-                actions.theme_changed = true;
-            }
-            if ui
-                .selectable_label(cfg.general.theme == "light", i18n.t("settings.theme_light"))
-                .clicked()
-            {
-                cfg.general.theme = "light".to_string();
-                on_save();
-                actions.theme_changed = true;
+            ui.add_space(12.0);
+            ui.label(i18n.t("monitor.refresh_rate"));
+            for &(ms, label) in &[
+                (100u64, "0.1s"),
+                (250, "0.25s"),
+                (500, "0.5s"),
+                (1000, "1s"),
+                (1500, "1.5s"),
+                (2000, "2s"),
+                (5000, "5s"),
+            ] {
+                if ui
+                    .selectable_label(cfg.general.telemetry_interval_ms == ms, label)
+                    .clicked()
+                {
+                    cfg.general.telemetry_interval_ms = ms;
+                    on_save();
+                    on_cmd(WorkerCommand::SetTelemetryIntervalMs(ms));
+                }
             }
         });
 
@@ -117,9 +126,178 @@ pub fn render(
 
     ui.add_space(8.0);
 
+    // Custom Theme Colors & Copy/Paste Profile Sharing Card
+    card_frame(&theme_snapshot).show(ui, |ui| {
+        section_title(ui, i18n.t("settings.custom_theme"), &theme_snapshot);
+        ui.add_space(4.0);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(i18n.t("settings.theme_presets"));
+            for preset in CustomThemeConfig::presets() {
+                let selected = cfg.general.custom_theme == preset;
+                if ui.selectable_label(selected, &preset.name).clicked() {
+                    cfg.general.custom_theme = preset.clone();
+                    cfg.general.theme = if preset.dark_base {
+                        "dark".to_string()
+                    } else {
+                        "light".to_string()
+                    };
+                    on_save();
+                    actions.theme_changed = true;
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(i18n.t("settings.theme_name"));
+            if ui
+                .text_edit_singleline(&mut cfg.general.custom_theme.name)
+                .changed()
+            {
+                on_save();
+            }
+            if ui
+                .checkbox(
+                    &mut cfg.general.custom_theme.dark_base,
+                    i18n.t("settings.theme_dark_base"),
+                )
+                .changed()
+            {
+                cfg.general.theme = if cfg.general.custom_theme.dark_base {
+                    "dark".to_string()
+                } else {
+                    "light".to_string()
+                };
+                on_save();
+                actions.theme_changed = true;
+            }
+        });
+
+        ui.add_space(4.0);
+        egui::Grid::new("custom_theme_pickers_grid")
+            .num_columns(6)
+            .spacing([14.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(i18n.t("settings.color_accent"));
+                if ui
+                    .color_edit_button_srgb(&mut cfg.general.custom_theme.accent)
+                    .changed()
+                {
+                    actions.theme_changed = true;
+                    on_save();
+                }
+
+                ui.label(i18n.t("settings.color_canvas"));
+                if ui
+                    .color_edit_button_srgb(&mut cfg.general.custom_theme.canvas_bg)
+                    .changed()
+                {
+                    actions.theme_changed = true;
+                    on_save();
+                }
+
+                ui.label(i18n.t("settings.color_sidebar"));
+                if ui
+                    .color_edit_button_srgb(&mut cfg.general.custom_theme.sidebar_bg)
+                    .changed()
+                {
+                    actions.theme_changed = true;
+                    on_save();
+                }
+                ui.end_row();
+
+                ui.label(i18n.t("settings.color_card"));
+                if ui
+                    .color_edit_button_srgb(&mut cfg.general.custom_theme.card_bg)
+                    .changed()
+                {
+                    actions.theme_changed = true;
+                    on_save();
+                }
+
+                ui.label(i18n.t("settings.color_border"));
+                if ui
+                    .color_edit_button_srgb(&mut cfg.general.custom_theme.card_border)
+                    .changed()
+                {
+                    actions.theme_changed = true;
+                    on_save();
+                }
+
+                ui.label(i18n.t("settings.color_text"));
+                if ui
+                    .color_edit_button_srgb(&mut cfg.general.custom_theme.text_primary)
+                    .changed()
+                {
+                    actions.theme_changed = true;
+                    on_save();
+                }
+                ui.end_row();
+            });
+
+        ui.separator();
+
+        let share_code = cfg.general.custom_theme.encode_share_code();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(i18n.t("settings.share_code"));
+            let mut preview = share_code.clone();
+            ui.add_enabled(
+                false,
+                egui::TextEdit::singleline(&mut preview).desired_width(360.0),
+            );
+            if ui.button(i18n.t("settings.copy_theme")).clicked() {
+                ui.ctx().copy_text(share_code);
+                draft.status_msg = Some((i18n.t("settings.theme_copied"), false));
+            }
+            if ui.button(i18n.t("settings.copy_theme_json")).clicked() {
+                if let Ok(json) = serde_json::to_string_pretty(&cfg.general.custom_theme) {
+                    ui.ctx().copy_text(json);
+                    draft.status_msg = Some((i18n.t("settings.theme_copied"), false));
+                }
+            }
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut draft.import_input)
+                    .hint_text(i18n.t("settings.import_placeholder"))
+                    .desired_width(360.0),
+            );
+            if ui
+                .button(RichText::new(i18n.t("settings.import_theme")).strong())
+                .clicked()
+            {
+                match CustomThemeConfig::decode_share_code(&draft.import_input) {
+                    Ok(imported) => {
+                        cfg.general.custom_theme = imported.clone();
+                        cfg.general.theme = if imported.dark_base {
+                            "dark".to_string()
+                        } else {
+                            "light".to_string()
+                        };
+                        on_save();
+                        actions.theme_changed = true;
+                        draft.import_input.clear();
+                        draft.status_msg = Some((i18n.t("settings.theme_imported"), false));
+                    }
+                    Err(err) => {
+                        draft.status_msg = Some((err.to_string(), true));
+                    }
+                }
+            }
+        });
+
+        if let Some((msg, is_err)) = &draft.status_msg {
+            ui.colored_label(if *is_err { STATUS_ERR } else { STATUS_OK }, msg);
+        }
+    });
+
+    ui.add_space(8.0);
+
     // Diagnostic Rotating Logging Card
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new(i18n.t("logs.title")).strong().color(ACCENT_CYAN));
+    card_frame(&theme_snapshot).show(ui, |ui| {
+        section_title(ui, i18n.t("logs.title"), &theme_snapshot);
         let log_dir = cfg.logging.resolved_dir();
         let bytes = total_log_bytes(&log_dir);
         ui.label(format!(

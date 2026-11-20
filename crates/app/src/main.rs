@@ -10,7 +10,7 @@ use crate::ui::Tab;
 use crate::worker::{BackgroundWorker, SharedState, WorkerCommand};
 use egui::{Color32, RichText};
 use omvix_core::config::OmenKeyAction;
-use omvix_core::{AppConfig, I18n, LogHandle, PerformanceMode, init_logging};
+use omvix_core::{AppConfig, CustomThemeConfig, I18n, LogHandle, PerformanceMode, init_logging};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
@@ -148,7 +148,10 @@ fn main() {
     let smoke_test = args.iter().any(|a| a == "--smoke-test");
 
     let cfg_path = AppConfig::default_config_path();
-    let cfg = AppConfig::load_from_path(&cfg_path).unwrap_or_default();
+    let mut cfg = AppConfig::load_from_path(&cfg_path).unwrap_or_default();
+    if cfg.general.theme == "light" && cfg.general.custom_theme == CustomThemeConfig::preset_dark_slate() {
+        cfg.general.custom_theme = CustomThemeConfig::preset_clean_light();
+    }
     let log_handle = init_logging(&cfg.logging, smoke_test).ok();
     let i18n = I18n::new(&cfg.general.language);
 
@@ -243,7 +246,7 @@ fn main() {
             }
 
             theme::configure_fonts(&cc.egui_ctx);
-            theme::apply_theme(&cc.egui_ctx, cfg.general.theme != "light");
+            theme::apply_theme(&cc.egui_ctx, &cfg.general.custom_theme);
             Ok(Box::new(OmvixApp::new(
                 cc.egui_ctx.clone(),
                 cfg,
@@ -266,6 +269,8 @@ struct OmvixApp {
     cfg_path: PathBuf,
     i18n: I18n,
     active_tab: Tab,
+    battery_draft: ui::battery::BatteryDraftState,
+    settings_draft: ui::settings::SettingsThemeDraft,
     window_visible: Arc<AtomicBool>,
     hwnd_atomic: Arc<AtomicIsize>,
     force_quit: Arc<AtomicBool>,
@@ -385,7 +390,9 @@ impl OmvixApp {
             cfg,
             cfg_path,
             i18n,
-            active_tab: Tab::Dashboard,
+            active_tab: Tab::Home,
+            battery_draft: ui::battery::BatteryDraftState::default(),
+            settings_draft: ui::settings::SettingsThemeDraft::default(),
             window_visible,
             hwnd_atomic,
             force_quit,
@@ -643,41 +650,47 @@ impl eframe::App for OmvixApp {
             }
         }
 
-        let dark = self.cfg.general.theme != "light";
         let snapshot_state = self
             .state
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default();
 
-        // Sidebar navigation
+        let current_theme = self.cfg.general.custom_theme.clone();
+        let accent = theme::accent_color(&current_theme);
+        let sidebar_frame = egui::Frame::side_top_panel(&ctx.style())
+            .fill(theme::sidebar_fill(&current_theme))
+            .inner_margin(egui::Margin::same(12));
+
+        // Sidebar navigation (with persistent rounded corners for both active and inactive tabs)
         egui::SidePanel::left("omvix_sidebar")
+            .frame(sidebar_frame)
             .resizable(false)
-            .exact_width(210.0)
+            .exact_width(214.0)
             .show(ctx, |ui| {
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 ui.label(
                     RichText::new(self.i18n.t("app.title"))
                         .size(21.0)
                         .strong()
-                        .color(theme::ACCENT_CYAN),
+                        .color(accent),
                 );
                 ui.weak(self.i18n.t("app.subtitle"));
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
 
                 for &tab in Tab::all() {
                     let selected = self.active_tab == tab;
                     let label = self.i18n.t(tab.i18n_key());
-                    let btn = egui::Button::new(RichText::new(label).size(14.5)).selected(selected);
-                    if ui.add_sized([190.0, 32.0], btn).clicked() {
+                    if theme::sidebar_tab_button(ui, &label, selected, &current_theme).clicked() {
                         self.active_tab = tab;
                     }
+                    ui.add_space(2.0);
                 }
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     if let Some((msg, is_err, ts)) = &snapshot_state.last_toast {
                         if ts.elapsed() < Duration::from_secs(6) {
                             let color = if *is_err {
@@ -699,26 +712,37 @@ impl eframe::App for OmvixApp {
                 let mut should_save = false;
                 let mut should_restart_admin = false;
                 let mut should_rebind_hotkeys = false;
+                let mut next_tab: Option<Tab> = None;
 
                 let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
                 let mut mark_save = || should_save = true;
 
                 match self.active_tab {
-                    Tab::Dashboard => ui::dashboard::render(
+                    Tab::Home => {
+                        let res = ui::home::render(
+                            ui,
+                            &mut self.cfg,
+                            &snapshot_state,
+                            &self.i18n,
+                            &mut push_cmd,
+                            &mut mark_save,
+                            &mut || should_restart_admin = true,
+                        );
+                        next_tab = res.navigate_to;
+                    }
+                    Tab::Monitor => ui::monitor::render(
                         ui,
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
-                        &mut || should_restart_admin = true,
+                        &mut mark_save,
                     ),
                     Tab::PerformanceFans => ui::performance::render(
                         ui,
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
                         &mut mark_save,
                     ),
@@ -727,7 +751,7 @@ impl eframe::App for OmvixApp {
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
+                        &mut self.battery_draft,
                         &mut push_cmd,
                         &mut mark_save,
                     ),
@@ -736,7 +760,6 @@ impl eframe::App for OmvixApp {
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
                         &mut mark_save,
                     ),
@@ -745,7 +768,6 @@ impl eframe::App for OmvixApp {
                         &mut self.cfg,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
                         &mut mark_save,
                     ),
@@ -753,7 +775,6 @@ impl eframe::App for OmvixApp {
                         ui,
                         &mut self.cfg,
                         &self.i18n,
-                        dark,
                         &mut push_cmd,
                         &mut mark_save,
                         &mut || should_rebind_hotkeys = true,
@@ -762,7 +783,7 @@ impl eframe::App for OmvixApp {
                         ui,
                         &snapshot_state,
                         &self.i18n,
-                        dark,
+                        &current_theme,
                         &mut push_cmd,
                     ),
                     Tab::Settings => {
@@ -770,7 +791,7 @@ impl eframe::App for OmvixApp {
                             ui,
                             &mut self.cfg,
                             &mut self.i18n,
-                            dark,
+                            &mut self.settings_draft,
                             &mut push_cmd,
                             &mut mark_save,
                         );
@@ -780,9 +801,13 @@ impl eframe::App for OmvixApp {
                             }
                         }
                         if res.theme_changed {
-                            theme::apply_theme(ctx, self.cfg.general.theme != "light");
+                            theme::apply_theme(ctx, &self.cfg.general.custom_theme);
                         }
                     }
+                }
+
+                if let Some(target_tab) = next_tab {
+                    self.active_tab = target_tab;
                 }
 
                 if should_save {

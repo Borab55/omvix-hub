@@ -1,4 +1,4 @@
-use crate::theme::{ACCENT_CYAN, STATUS_WARN, card_frame, status_badge};
+use crate::theme::{STATUS_WARN, accent_color, card_frame, section_title, status_badge};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
 use omvix_core::{AppConfig, GpuMode, I18n, KeyboardType, RgbColor};
@@ -8,18 +8,20 @@ pub fn render(
     cfg: &mut AppConfig,
     st: &SharedState,
     i18n: &I18n,
-    dark: bool,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) {
+    let t = &cfg.general.custom_theme.clone();
+    let accent = accent_color(t);
+
     ui.heading(i18n.t("nav.lighting_display"));
     ui.add_space(6.0);
 
     // Keyboard Backlight & RGB Card
-    card_frame(dark).show(ui, |ui| {
+    card_frame(t).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(i18n.t("lighting.keyboard")).strong().color(ACCENT_CYAN));
-            status_badge(ui, &format!("{:?}", st.keyboard_type), ACCENT_CYAN);
+            section_title(ui, i18n.t("lighting.keyboard"), t);
+            status_badge(ui, &format!("{:?}", st.keyboard_type), accent);
         });
 
         ui.horizontal(|ui| {
@@ -53,7 +55,7 @@ pub fn render(
             });
 
             ui.horizontal_wrapped(|ui| {
-                ui.label("Presets:");
+                ui.label(i18n.t("lighting.presets"));
                 for (label, rgb) in [
                     ("Cyan", RgbColor { r: 0, g: 180, b: 216 }),
                     ("White", RgbColor { r: 245, g: 245, b: 255 }),
@@ -85,8 +87,8 @@ pub fn render(
     ui.add_space(8.0);
 
     // Display Refresh Rate Card
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new(i18n.t("display.refresh_rate")).strong().color(ACCENT_CYAN));
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("display.refresh_rate"), t);
         if let Some(disp) = &st.display_mode {
             ui.label(format!(
                 "{}x{} @ {}",
@@ -109,15 +111,15 @@ pub fn render(
                 }
             });
         } else {
-            ui.weak("Enumerating display modes...");
+            ui.weak("...");
         }
     });
 
     ui.add_space(8.0);
 
     // GPU MUX Switch Card
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new(i18n.t("gpu.mux_switch")).strong().color(ACCENT_CYAN));
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("gpu.mux_switch"), t);
         let cur = st.gpu_mode.unwrap_or(GpuMode::Unknown);
         ui.horizontal_wrapped(|ui| {
             for (mode, key) in [

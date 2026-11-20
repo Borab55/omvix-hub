@@ -1,4 +1,4 @@
-use crate::theme::{ACCENT_CYAN, card_frame};
+use crate::theme::{accent_color, card_frame, section_title};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
 use egui_plot::{Line, Plot, PlotPoints, Points};
@@ -9,16 +9,18 @@ pub fn render(
     cfg: &mut AppConfig,
     st: &SharedState,
     i18n: &I18n,
-    dark: bool,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) {
+    let t = &cfg.general.custom_theme.clone();
+    let accent = accent_color(t);
+
     ui.heading(i18n.t("nav.performance_fans"));
     ui.add_space(6.0);
 
     // Thermal / Performance Mode Card
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new(i18n.t("thermal.mode")).strong().color(ACCENT_CYAN));
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("thermal.mode"), t);
         ui.horizontal_wrapped(|ui| {
             for (mode, key) in [
                 (PerformanceMode::Eco, "thermal.mode_eco"),
@@ -39,9 +41,9 @@ pub fn render(
     ui.add_space(8.0);
 
     // AC / Battery Auto-Profile Card
-    card_frame(dark).show(ui, |ui| {
+    card_frame(t).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(i18n.t("thermal.auto_profile")).strong().color(ACCENT_CYAN));
+            section_title(ui, i18n.t("thermal.auto_profile"), t);
             if ui
                 .checkbox(&mut cfg.auto_profile.enabled, i18n.t("common.enabled"))
                 .changed()
@@ -182,8 +184,8 @@ pub fn render(
     ui.add_space(8.0);
 
     // Fan Control Card + Interactive Custom Curve
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new(i18n.t("fan.mode")).strong().color(ACCENT_CYAN));
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("fan.mode"), t);
         ui.horizontal_wrapped(|ui| {
             for (mode, key) in [
                 (FanMode::Auto, "fan.mode_auto"),
@@ -265,7 +267,7 @@ pub fn render(
                 .allow_zoom(false)
                 .allow_drag(false)
                 .show(ui, |plot_ui| {
-                    plot_ui.line(Line::new(line_pts).color(ACCENT_CYAN).width(2.0_f32));
+                    plot_ui.line(Line::new(line_pts).color(accent).width(2.0_f32));
                     plot_ui.points(
                         Points::new(scatter_pts)
                             .color(Color32::from_rgb(245, 158, 11))
