@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Logs and local diagnostics exports
+*.log
+*.log.*
+diagnostics-*.json
+probe-*.json
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
