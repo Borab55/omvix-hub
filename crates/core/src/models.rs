@@ -69,26 +69,14 @@ impl Default for FanCurve {
     fn default() -> Self {
         Self {
             points: vec![
-                FanCurvePoint {
-                    temp_c: 40,
-                    speed_pct: 25,
-                },
-                FanCurvePoint {
-                    temp_c: 55,
-                    speed_pct: 40,
-                },
-                FanCurvePoint {
-                    temp_c: 70,
-                    speed_pct: 65,
-                },
-                FanCurvePoint {
-                    temp_c: 82,
-                    speed_pct: 85,
-                },
-                FanCurvePoint {
-                    temp_c: 92,
-                    speed_pct: 100,
-                },
+                FanCurvePoint { temp_c: 35, speed_pct: 25 },
+                FanCurvePoint { temp_c: 45, speed_pct: 30 },
+                FanCurvePoint { temp_c: 55, speed_pct: 42 },
+                FanCurvePoint { temp_c: 65, speed_pct: 58 },
+                FanCurvePoint { temp_c: 72, speed_pct: 70 },
+                FanCurvePoint { temp_c: 80, speed_pct: 82 },
+                FanCurvePoint { temp_c: 88, speed_pct: 92 },
+                FanCurvePoint { temp_c: 95, speed_pct: 100 },
             ],
             hysteresis_c: 3,
         }

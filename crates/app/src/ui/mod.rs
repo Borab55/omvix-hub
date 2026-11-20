@@ -1,4 +1,5 @@
 pub mod battery;
+pub mod charts;
 pub mod cockpit;
 pub mod diagnostics;
 pub mod hotkeys;

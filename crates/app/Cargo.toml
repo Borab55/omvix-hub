@@ -10,7 +10,6 @@ repository.workspace = true
 omvix-core = { path = "../core" }
 eframe.workspace = true
 egui.workspace = true
-egui_plot.workspace = true
 tray-icon.workspace = true
 raw-window-handle = "0.6"
 serde_json.workspace = true
@@ -21,6 +20,7 @@ chrono.workspace = true
 omvix-windows = { path = "../backend-windows" }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

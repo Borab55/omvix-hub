@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const COMPACT_SIZE: [f32; 2] = [468.0, 712.0];
-const EXPANDED_SIZE: [f32; 2] = [1080.0, 712.0];
+const COMPACT_SIZE: [f32; 2] = [468.0, 728.0];
+const DRAWER_SIZE: [f32; 2] = [632.0, 728.0];
 
 #[cfg(windows)]
 use omvix_windows::hotkeys::{ListenerHandle, spawn_global_hotkey_listener, spawn_omen_key_listener};
@@ -147,11 +147,37 @@ fn win32_post_close(hwnd_raw: isize) {
 fn win32_post_close(_hwnd_raw: isize) {}
 
 #[cfg(windows)]
+fn win32_visible_bounds(hwnd: windows::Win32::Foundation::HWND) -> Option<(windows::Win32::Foundation::RECT, windows::Win32::Foundation::RECT)> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let mut wr = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut wr) }.is_err() {
+        return None;
+    }
+    let mut vis = RECT::default();
+    let dwm_ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&mut vis as *mut RECT).cast(),
+            std::mem::size_of::<RECT>() as u32,
+        )
+    }
+    .is_ok();
+    if !dwm_ok || (vis.right - vis.left) <= 0 || (vis.bottom - vis.top) <= 0 {
+        vis = wr;
+    }
+    Some((wr, vis))
+}
+
+#[cfg(windows)]
 fn win32_dock_bottom_right(hwnd_raw: isize) {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+        SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, SystemParametersInfoW,
     };
 
     if hwnd_raw == 0 {
@@ -159,7 +185,6 @@ fn win32_dock_bottom_right(hwnd_raw: isize) {
     }
     let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
     let mut work = RECT::default();
-    let mut rect = RECT::default();
     unsafe {
         if SystemParametersInfoW(
             SPI_GETWORKAREA,
@@ -171,21 +196,29 @@ fn win32_dock_bottom_right(hwnd_raw: isize) {
         {
             return;
         }
-        if GetWindowRect(hwnd, &mut rect).is_err() {
+        let Some((wr, vis)) = win32_visible_bounds(hwnd) else {
+            return;
+        };
+        let vis_w = vis.right - vis.left;
+        let vis_h = vis.bottom - vis.top;
+        if vis_w <= 0 || vis_h <= 0 {
             return;
         }
-        let w = rect.right - rect.left;
-        let h = rect.bottom - rect.top;
-        if w <= 0 || h <= 0 {
+        // Compensate for invisible DWM shadow margin so visible frame aligns cleanly at bottom-right.
+        let shadow_left = vis.left - wr.left;
+        let shadow_top = vis.top - wr.top;
+        let target_vis_x = (work.right - vis_w - 10).max(work.left + 8);
+        let target_vis_y = (work.bottom - vis_h - 10).max(work.top + 8);
+        let target_x = target_vis_x - shadow_left;
+        let target_y = target_vis_y - shadow_top;
+        if (wr.left - target_x).abs() <= 1 && (wr.top - target_y).abs() <= 1 {
             return;
         }
-        let x = (work.right - w - 12).max(work.left + 8);
-        let y = (work.bottom - h - 12).max(work.top + 8);
         let _ = SetWindowPos(
             hwnd,
             HWND::default(),
-            x,
-            y,
+            target_x,
+            target_y,
             0,
             0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
@@ -197,25 +230,22 @@ fn win32_dock_bottom_right(hwnd_raw: isize) {
 fn win32_dock_bottom_right(_hwnd_raw: isize) {}
 
 #[cfg(windows)]
-fn win32_resize_anchored_right(
+fn win32_drawer_anchor_pos(
     hwnd_raw: isize,
-    target_inner_w: f32,
-    target_inner_h: f32,
+    drawer_w: f32,
+    drawer_h: f32,
     ppp: f32,
-    dock_bottom_right: bool,
-) -> bool {
+) -> Option<egui::Pos2> {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, GetWindowRect, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER,
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, SystemParametersInfoW,
+        GetClientRect, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
     };
 
     if hwnd_raw == 0 || !ppp.is_finite() || ppp <= 0.0 {
-        return false;
+        return None;
     }
     let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
     let mut work = RECT::default();
-    let mut wr = RECT::default();
     let mut cr = RECT::default();
     unsafe {
         if SystemParametersInfoW(
@@ -226,52 +256,32 @@ fn win32_resize_anchored_right(
         )
         .is_err()
         {
-            return false;
+            return None;
         }
-        if GetWindowRect(hwnd, &mut wr).is_err() || GetClientRect(hwnd, &mut cr).is_err() {
-            return false;
+        let (wr, vis) = win32_visible_bounds(hwnd)?;
+        if GetClientRect(hwnd, &mut cr).is_err() {
+            return None;
         }
         let nc_w = ((wr.right - wr.left) - (cr.right - cr.left)).max(0);
         let nc_h = ((wr.bottom - wr.top) - (cr.bottom - cr.top)).max(0);
-        let new_w = (target_inner_w * ppp).round() as i32 + nc_w;
-        let new_h = (target_inner_h * ppp).round() as i32 + nc_h;
-        if new_w <= 0 || new_h <= 0 {
-            return false;
-        }
-        let anchor_right = if dock_bottom_right {
-            work.right - 12
-        } else {
-            wr.right
-        };
-        let anchor_bottom = if dock_bottom_right {
-            work.bottom - 12
-        } else {
-            wr.bottom
-        };
-        let new_x = (anchor_right - new_w).max(work.left + 8);
-        let new_y = (anchor_bottom - new_h).max(work.top + 8);
-        SetWindowPos(
-            hwnd,
-            HWND::default(),
-            new_x,
-            new_y,
-            new_w,
-            new_h,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        )
-        .is_ok()
+        let outer_w = (drawer_w * ppp).round() as i32 + nc_w;
+        let outer_h = (drawer_h * ppp).round() as i32 + nc_h;
+        let px_x = (vis.left - outer_w + (vis.left - wr.left) - 8).max(work.left + 8);
+        let px_y = vis
+            .top
+            .clamp(work.top + 8, (work.bottom - outer_h - 8).max(work.top + 8));
+        Some(egui::pos2(px_x as f32 / ppp, px_y as f32 / ppp))
     }
 }
 
 #[cfg(not(windows))]
-fn win32_resize_anchored_right(
+fn win32_drawer_anchor_pos(
     _hwnd_raw: isize,
-    _target_inner_w: f32,
-    _target_inner_h: f32,
+    _drawer_w: f32,
+    _drawer_h: f32,
     _ppp: f32,
-    _dock_bottom_right: bool,
-) -> bool {
-    false
+) -> Option<egui::Pos2> {
+    None
 }
 
 fn main() {
@@ -660,35 +670,12 @@ impl OmvixApp {
                 ctx.request_repaint();
             }
         } else {
+            self.open_drawer = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         if let Some(tray) = &self.tray {
             tray.update_labels(&self.i18n, visible);
         }
-    }
-
-    fn apply_drawer_size(&mut self, ctx: &egui::Context) {
-        let target = if self.open_drawer.is_some() {
-            EXPANDED_SIZE
-        } else {
-            COMPACT_SIZE
-        };
-        let handled = win32_resize_anchored_right(
-            self.hwnd_atomic.load(Ordering::SeqCst),
-            target[0],
-            target[1],
-            ctx.pixels_per_point(),
-            self.cfg.general.dock_bottom_right,
-        );
-        if !handled {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                target[0], target[1],
-            )));
-            if self.cfg.general.dock_bottom_right {
-                self.pending_dock_frames = 2;
-            }
-        }
-        ctx.request_repaint();
     }
 
     fn cycle_performance_mode(&mut self) {
@@ -723,6 +710,7 @@ impl OmvixApp {
             return;
         }
         self.quitting = true;
+        self.open_drawer = None;
         self.force_quit.store(true, Ordering::SeqCst);
         self.clean_quit_started.store(true, Ordering::SeqCst);
         self.save_config();
@@ -831,6 +819,11 @@ impl eframe::App for OmvixApp {
             if self.pending_dock_frames > 0 {
                 ctx.request_repaint();
             }
+        } else if self.cfg.general.dock_bottom_right
+            && self.window_visible.load(Ordering::Relaxed)
+            && !ctx.is_using_pointer()
+        {
+            win32_dock_bottom_right(self.hwnd_atomic.load(Ordering::SeqCst));
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -877,256 +870,310 @@ impl eframe::App for OmvixApp {
         let mut should_save = false;
         let mut should_restart_admin = false;
         let mut should_rebind_hotkeys = false;
+        let mut should_restore_defaults = false;
         let mut should_hide_to_tray = false;
         let mut should_quit = false;
         let mut toggle_drawer: Option<Drawer> = None;
         let mut open_extra: Option<ExtraSubTab> = None;
 
-        // Render compact G-Helper cockpit either alone or pinned RIGHT when drawer opens LEFT
-        if self.open_drawer.is_some() {
-            egui::SidePanel::right("omvix_cockpit_pane")
-                .frame(cockpit_frame)
-                .resizable(false)
-                .exact_width(COMPACT_SIZE[0])
-                .show(ctx, |ui| {
-                    let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
-                    let mut mark_save = || should_save = true;
-                    let res = ui::cockpit::render(
-                        ui,
-                        &mut self.cfg,
-                        &snapshot_state,
-                        &self.i18n,
-                        self.open_drawer,
-                        COMPACT_SIZE[0],
-                        &mut push_cmd,
-                        &mut mark_save,
-                    );
-                    toggle_drawer = res.toggle_drawer;
-                    open_extra = res.open_extra_subtab;
-                    if res.restart_admin {
-                        should_restart_admin = true;
-                    }
-                    if res.hide_to_tray {
-                        should_hide_to_tray = true;
-                    }
-                    if res.quit_app {
-                        should_quit = true;
-                    }
-                });
-
-            let drawer = self.open_drawer.expect("checked is_some");
-            egui::CentralPanel::default().frame(detail_frame).show(ctx, |ui| {
-                // Drawer header: sub-tabs (for FansPower / Extra) + Collapse button
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    match drawer {
-                        Drawer::Monitor => {
-                            ui.heading(self.i18n.t("monitor.title"));
-                        }
-                        Drawer::FansPower => {
-                            for (sub, key) in [
-                                (FansPowerSubTab::PerformanceFans, "drawer.sub_perf_fans"),
-                                (FansPowerSubTab::Tuning, "drawer.sub_cpu_power"),
-                            ] {
-                                if theme::tile_button(
-                                    ui,
-                                    &self.i18n.t(key),
-                                    self.fans_power_tab == sub,
-                                    170.0,
-                                    28.0,
-                                    &current_theme,
-                                )
-                                .clicked()
-                                {
-                                    self.fans_power_tab = sub;
-                                }
-                            }
-                        }
-                        Drawer::Battery => {
-                            ui.heading(self.i18n.t("nav.battery"));
-                        }
-                        Drawer::Extra => {
-                            for (sub, key) in [
-                                (ExtraSubTab::LightingDisplay, "drawer.sub_lighting_display"),
-                                (ExtraSubTab::Hotkeys, "drawer.sub_hotkeys"),
-                                (ExtraSubTab::Diagnostics, "drawer.sub_diagnostics"),
-                                (ExtraSubTab::Settings, "drawer.sub_settings"),
-                            ] {
-                                if theme::tile_button(
-                                    ui,
-                                    &self.i18n.t(key),
-                                    self.extra_tab == sub,
-                                    114.0,
-                                    28.0,
-                                    &current_theme,
-                                )
-                                .clicked()
-                                {
-                                    self.extra_tab = sub;
-                                }
-                            }
-                        }
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::tile_button(
-                            ui,
-                            &self.i18n.t("drawer.collapse"),
-                            false,
-                            88.0,
-                            28.0,
-                            &current_theme,
-                        )
-                        .clicked()
-                        {
-                            toggle_drawer = Some(drawer);
-                        }
-                    });
-                });
-
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(6.0);
-
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
-                    let mut mark_save = || should_save = true;
-
-                    match drawer {
-                        Drawer::Monitor => ui::monitor::render(
-                            ui,
-                            &mut self.cfg,
-                            &snapshot_state,
-                            &self.i18n,
-                            &mut push_cmd,
-                            &mut mark_save,
-                        ),
-                        Drawer::FansPower => match self.fans_power_tab {
-                            FansPowerSubTab::PerformanceFans => ui::performance::render(
-                                ui,
-                                &mut self.cfg,
-                                &snapshot_state,
-                                &self.i18n,
-                                &mut push_cmd,
-                                &mut mark_save,
-                            ),
-                            FansPowerSubTab::Tuning => ui::tuning::render(
-                                ui,
-                                &mut self.cfg,
-                                &snapshot_state,
-                                &self.i18n,
-                                &mut push_cmd,
-                                &mut mark_save,
-                            ),
-                        },
-                        Drawer::Battery => ui::battery::render(
-                            ui,
-                            &mut self.cfg,
-                            &snapshot_state,
-                            &self.i18n,
-                            &mut self.battery_draft,
-                            &mut push_cmd,
-                            &mut mark_save,
-                        ),
-                        Drawer::Extra => match self.extra_tab {
-                            ExtraSubTab::LightingDisplay => ui::lighting_display::render(
-                                ui,
-                                &mut self.cfg,
-                                &snapshot_state,
-                                &self.i18n,
-                                &mut push_cmd,
-                                &mut mark_save,
-                            ),
-                            ExtraSubTab::Hotkeys => ui::hotkeys::render(
-                                ui,
-                                &mut self.cfg,
-                                &self.i18n,
-                                &mut push_cmd,
-                                &mut mark_save,
-                                &mut || should_rebind_hotkeys = true,
-                            ),
-                            ExtraSubTab::Diagnostics => ui::diagnostics::render(
-                                ui,
-                                &snapshot_state,
-                                &self.i18n,
-                                &current_theme,
-                                &mut push_cmd,
-                            ),
-                            ExtraSubTab::Settings => {
-                                let res = ui::settings::render(
-                                    ui,
-                                    &mut self.cfg,
-                                    &mut self.i18n,
-                                    &mut self.settings_draft,
-                                    &mut push_cmd,
-                                    &mut mark_save,
-                                );
-                                if res.language_changed {
-                                    if let Some(tray) = &self.tray {
-                                        tray.update_labels(
-                                            &self.i18n,
-                                            self.window_visible.load(Ordering::Relaxed),
-                                        );
-                                    }
-                                }
-                                if res.theme_changed {
-                                    theme::apply_theme(ctx, &self.cfg.general.custom_theme);
-                                }
-                                if res.dock_changed && self.cfg.general.dock_bottom_right {
-                                    self.pending_dock_frames = 2;
-                                    ctx.request_repaint();
-                                }
-                            }
-                        },
-                    }
-                });
-            });
-        } else {
-            egui::CentralPanel::default().frame(cockpit_frame).show(ctx, |ui| {
-                let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
-                let mut mark_save = || should_save = true;
-                let res = ui::cockpit::render(
-                    ui,
-                    &mut self.cfg,
-                    &snapshot_state,
-                    &self.i18n,
-                    self.open_drawer,
-                    COMPACT_SIZE[0],
-                    &mut push_cmd,
-                    &mut mark_save,
-                );
-                toggle_drawer = res.toggle_drawer;
-                open_extra = res.open_extra_subtab;
-                if res.restart_admin {
-                    should_restart_admin = true;
-                }
-                if res.hide_to_tray {
-                    should_hide_to_tray = true;
-                }
-                if res.quit_app {
-                    should_quit = true;
-                }
-            });
-        }
+        // Main window ALWAYS renders fixed-size compact cockpit (zero resize/flicker)
+        egui::CentralPanel::default().frame(cockpit_frame).show(ctx, |ui| {
+            let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
+            let mut mark_save = || should_save = true;
+            let res = ui::cockpit::render(
+                ui,
+                &mut self.cfg,
+                &snapshot_state,
+                &self.i18n,
+                self.open_drawer,
+                COMPACT_SIZE[0],
+                &mut push_cmd,
+                &mut mark_save,
+            );
+            toggle_drawer = res.toggle_drawer;
+            open_extra = res.open_extra_subtab;
+            if res.restart_admin {
+                should_restart_admin = true;
+            }
+            if res.hide_to_tray {
+                should_hide_to_tray = true;
+            }
+            if res.quit_app {
+                should_quit = true;
+            }
+        });
 
         if let Some(sub) = open_extra {
             self.extra_tab = sub;
-            let was_open = self.open_drawer.is_some();
             self.open_drawer = Some(Drawer::Extra);
-            if !was_open {
-                self.apply_drawer_size(ctx);
-            }
         } else if let Some(d) = toggle_drawer {
-            let next = if self.open_drawer == Some(d) {
+            self.open_drawer = if self.open_drawer == Some(d) {
                 None
             } else {
                 Some(d)
             };
-            let size_changed = next.is_some() != self.open_drawer.is_some();
-            self.open_drawer = next;
-            if size_changed {
-                self.apply_drawer_size(ctx);
+        }
+
+        // Secondary flicker-free detail viewport opens to the LEFT of the docked cockpit
+        if let Some(drawer) = self.open_drawer {
+            if self.window_visible.load(Ordering::Relaxed)
+                && !self.quitting
+                && !should_hide_to_tray
+                && !should_quit
+            {
+                let drawer_title = match drawer {
+                    Drawer::Monitor => self.i18n.t("monitor.title"),
+                    Drawer::FansPower => self.i18n.t("drawer.fans_power"),
+                    Drawer::Battery => self.i18n.t("nav.battery"),
+                    Drawer::Extra => self.i18n.t("drawer.extra"),
+                };
+                let mut builder = egui::ViewportBuilder::default()
+                    .with_title(format!("Omvix Hub — {drawer_title}"))
+                    .with_inner_size(DRAWER_SIZE)
+                    .with_resizable(false)
+                    .with_maximize_button(false)
+                    .with_minimize_button(false)
+                    .with_taskbar(false);
+                if let Some(pos) = win32_drawer_anchor_pos(
+                    self.hwnd_atomic.load(Ordering::SeqCst),
+                    DRAWER_SIZE[0],
+                    DRAWER_SIZE[1],
+                    ctx.pixels_per_point(),
+                ) {
+                    builder = builder.with_position(pos);
+                }
+
+                let mut close_drawer = false;
+                let mut theme_applied = false;
+                let drawer_id = egui::ViewportId::from_hash_of("omvix_drawer_viewport");
+                ctx.show_viewport_immediate(drawer_id, builder, |drawer_ctx, _class| {
+                    if drawer_ctx.input(|i| i.viewport().close_requested()) {
+                        close_drawer = true;
+                        return;
+                    }
+                    if drawer_ctx.style().visuals.panel_fill != theme::rgb(current_theme.canvas_bg)
+                    {
+                        theme::apply_theme(drawer_ctx, &self.cfg.general.custom_theme);
+                    }
+
+                    egui::CentralPanel::default()
+                        .frame(detail_frame)
+                        .show(drawer_ctx, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                match drawer {
+                                    Drawer::Monitor => {
+                                        ui.heading(self.i18n.t("monitor.title"));
+                                    }
+                                    Drawer::FansPower => {
+                                        for (sub, key) in [
+                                            (
+                                                FansPowerSubTab::PerformanceFans,
+                                                "drawer.sub_perf_fans",
+                                            ),
+                                            (FansPowerSubTab::Tuning, "drawer.sub_cpu_power"),
+                                        ] {
+                                            if theme::tile_button(
+                                                ui,
+                                                &self.i18n.t(key),
+                                                self.fans_power_tab == sub,
+                                                170.0,
+                                                28.0,
+                                                &current_theme,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.fans_power_tab = sub;
+                                            }
+                                        }
+                                    }
+                                    Drawer::Battery => {
+                                        ui.heading(self.i18n.t("nav.battery"));
+                                    }
+                                    Drawer::Extra => {
+                                        for (sub, key) in [
+                                            (
+                                                ExtraSubTab::LightingDisplay,
+                                                "drawer.sub_lighting_display",
+                                            ),
+                                            (ExtraSubTab::Hotkeys, "drawer.sub_hotkeys"),
+                                            (ExtraSubTab::Diagnostics, "drawer.sub_diagnostics"),
+                                            (ExtraSubTab::Settings, "drawer.sub_settings"),
+                                        ] {
+                                            if theme::tile_button(
+                                                ui,
+                                                &self.i18n.t(key),
+                                                self.extra_tab == sub,
+                                                114.0,
+                                                28.0,
+                                                &current_theme,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.extra_tab = sub;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if theme::tile_button(
+                                            ui,
+                                            &self.i18n.t("drawer.collapse"),
+                                            false,
+                                            88.0,
+                                            28.0,
+                                            &current_theme,
+                                        )
+                                        .clicked()
+                                        {
+                                            close_drawer = true;
+                                        }
+                                    },
+                                );
+                            });
+
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
+                                let mut mark_save = || should_save = true;
+
+                                match drawer {
+                                    Drawer::Monitor => ui::monitor::render(
+                                        ui,
+                                        &mut self.cfg,
+                                        &snapshot_state,
+                                        &self.i18n,
+                                        &mut push_cmd,
+                                        &mut mark_save,
+                                    ),
+                                    Drawer::FansPower => match self.fans_power_tab {
+                                        FansPowerSubTab::PerformanceFans => {
+                                            ui::performance::render(
+                                                ui,
+                                                &mut self.cfg,
+                                                &snapshot_state,
+                                                &self.i18n,
+                                                &mut push_cmd,
+                                                &mut mark_save,
+                                            )
+                                        }
+                                        FansPowerSubTab::Tuning => ui::tuning::render(
+                                            ui,
+                                            &mut self.cfg,
+                                            &snapshot_state,
+                                            &self.i18n,
+                                            &mut push_cmd,
+                                            &mut mark_save,
+                                        ),
+                                    },
+                                    Drawer::Battery => ui::battery::render(
+                                        ui,
+                                        &mut self.cfg,
+                                        &snapshot_state,
+                                        &self.i18n,
+                                        &mut self.battery_draft,
+                                        &mut push_cmd,
+                                        &mut mark_save,
+                                    ),
+                                    Drawer::Extra => match self.extra_tab {
+                                        ExtraSubTab::LightingDisplay => {
+                                            ui::lighting_display::render(
+                                                ui,
+                                                &mut self.cfg,
+                                                &snapshot_state,
+                                                &self.i18n,
+                                                &mut push_cmd,
+                                                &mut mark_save,
+                                            )
+                                        }
+                                        ExtraSubTab::Hotkeys => ui::hotkeys::render(
+                                            ui,
+                                            &mut self.cfg,
+                                            &self.i18n,
+                                            &mut push_cmd,
+                                            &mut mark_save,
+                                            &mut || should_rebind_hotkeys = true,
+                                        ),
+                                        ExtraSubTab::Diagnostics => ui::diagnostics::render(
+                                            ui,
+                                            &snapshot_state,
+                                            &self.i18n,
+                                            &current_theme,
+                                            &mut push_cmd,
+                                        ),
+                                        ExtraSubTab::Settings => {
+                                            let res = ui::settings::render(
+                                                ui,
+                                                &mut self.cfg,
+                                                &snapshot_state,
+                                                &mut self.i18n,
+                                                &mut self.settings_draft,
+                                                &mut push_cmd,
+                                                &mut mark_save,
+                                            );
+                                            if res.language_changed {
+                                                if let Some(tray) = &self.tray {
+                                                    tray.update_labels(
+                                                        &self.i18n,
+                                                        self.window_visible.load(Ordering::Relaxed),
+                                                    );
+                                                }
+                                            }
+                                            if res.theme_changed {
+                                                theme_applied = true;
+                                                theme::apply_theme(
+                                                    drawer_ctx,
+                                                    &self.cfg.general.custom_theme,
+                                                );
+                                            }
+                                            if res.dock_changed && self.cfg.general.dock_bottom_right
+                                            {
+                                                self.pending_dock_frames = 2;
+                                                ctx.request_repaint();
+                                            }
+                                            if res.restore_defaults {
+                                                should_restore_defaults = true;
+                                            }
+                                        }
+                                    },
+                                }
+                            });
+                        });
+                });
+
+                if close_drawer {
+                    self.open_drawer = None;
+                }
+                if theme_applied {
+                    theme::apply_theme(ctx, &self.cfg.general.custom_theme);
+                }
             }
+        }
+
+        if should_restore_defaults {
+            let keep_lang = self.cfg.general.language.clone();
+            self.cfg = AppConfig::default();
+            self.cfg.general.language = keep_lang;
+            self.cfg.general.start_minimized = false;
+            self.battery_draft = ui::battery::BatteryDraftState::default();
+            self.settings_draft = ui::settings::SettingsThemeDraft::default();
+            theme::apply_theme(ctx, &self.cfg.general.custom_theme);
+            if let Some(tray) = &self.tray {
+                tray.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
+            }
+            should_save = true;
+            should_rebind_hotkeys = true;
+            if self.cfg.general.dock_bottom_right {
+                self.pending_dock_frames = 2;
+            }
+            pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
+            pending_cmds.push(WorkerCommand::RestoreAllDefaults);
         }
 
         if should_save {

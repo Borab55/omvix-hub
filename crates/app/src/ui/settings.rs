@@ -1,5 +1,5 @@
-use crate::theme::{STATUS_ERR, STATUS_OK, card_frame, section_title};
-use crate::worker::WorkerCommand;
+use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge};
+use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Slider, Ui};
 use omvix_core::{
     AppConfig, CustomThemeConfig, I18n, LogLevel, clear_logs, tail_logs, total_log_bytes,
@@ -12,17 +12,20 @@ use omvix_windows::autostart;
 pub struct SettingsThemeDraft {
     pub import_input: String,
     pub status_msg: Option<(String, bool)>,
+    pub confirm_reset: bool,
 }
 
 pub struct SettingsActions {
     pub language_changed: bool,
     pub theme_changed: bool,
     pub dock_changed: bool,
+    pub restore_defaults: bool,
 }
 
 pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
+    st: &SharedState,
     i18n: &mut I18n,
     draft: &mut SettingsThemeDraft,
     on_cmd: &mut dyn FnMut(WorkerCommand),
@@ -32,6 +35,7 @@ pub fn render(
         language_changed: false,
         theme_changed: false,
         dock_changed: false,
+        restore_defaults: false,
     };
     let theme_snapshot = cfg.general.custom_theme.clone();
 
@@ -375,6 +379,69 @@ pub fn render(
                     ui.monospace(line);
                 }
             });
+        });
+    });
+
+    ui.add_space(8.0);
+
+    // PawnIO CPU Die Temperature Sensor Card
+    card_frame(&theme_snapshot).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            section_title(ui, i18n.t("settings.pawnio_section"), &theme_snapshot);
+            if st.pawnio_cpu_active {
+                status_badge(ui, &i18n.t("monitor.pawnio_active"), STATUS_OK);
+            } else {
+                status_badge(ui, &i18n.t("common.disabled"), STATUS_WARN);
+            }
+        });
+        ui.add_space(4.0);
+        ui.weak(i18n.t("settings.pawnio_desc"));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if st.pawnio_installing {
+                ui.weak(i18n.t("monitor.installing_pawnio"));
+            } else if pill_button(
+                ui,
+                &i18n.t("monitor.install_pawnio"),
+                !st.pawnio_cpu_active,
+                &theme_snapshot,
+            )
+            .clicked()
+            {
+                on_cmd(WorkerCommand::InstallPawnIo);
+            }
+        });
+    });
+
+    ui.add_space(8.0);
+
+    // Safety & Factory Defaults Reset Card
+    card_frame(&theme_snapshot).show(ui, |ui| {
+        section_title(ui, i18n.t("settings.reset_section"), &theme_snapshot);
+        ui.add_space(4.0);
+        ui.weak(i18n.t("settings.reset_desc"));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if !draft.confirm_reset {
+                if ui.button(i18n.t("settings.reset_all_btn")).clicked() {
+                    draft.confirm_reset = true;
+                }
+            } else {
+                if ui
+                    .button(
+                        RichText::new(i18n.t("settings.reset_confirm_btn"))
+                            .strong()
+                            .color(STATUS_ERR),
+                    )
+                    .clicked()
+                {
+                    draft.confirm_reset = false;
+                    actions.restore_defaults = true;
+                }
+                if ui.button(i18n.t("common.cancel")).clicked() {
+                    draft.confirm_reset = false;
+                }
+            }
         });
     });
 
