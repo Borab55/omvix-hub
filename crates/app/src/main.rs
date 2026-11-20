@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const COMPACT_SIZE: [f32; 2] = [456.0, 676.0];
-const EXPANDED_SIZE: [f32; 2] = [1060.0, 700.0];
+const COMPACT_SIZE: [f32; 2] = [468.0, 680.0];
+const EXPANDED_SIZE: [f32; 2] = [1080.0, 680.0];
 
 #[cfg(windows)]
 use omvix_windows::hotkeys::{ListenerHandle, spawn_global_hotkey_listener, spawn_omen_key_listener};
@@ -196,6 +196,84 @@ fn win32_dock_bottom_right(hwnd_raw: isize) {
 #[cfg(not(windows))]
 fn win32_dock_bottom_right(_hwnd_raw: isize) {}
 
+#[cfg(windows)]
+fn win32_resize_anchored_right(
+    hwnd_raw: isize,
+    target_inner_w: f32,
+    target_inner_h: f32,
+    ppp: f32,
+    dock_bottom_right: bool,
+) -> bool {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, GetWindowRect, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER,
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, SystemParametersInfoW,
+    };
+
+    if hwnd_raw == 0 || !ppp.is_finite() || ppp <= 0.0 {
+        return false;
+    }
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    let mut work = RECT::default();
+    let mut wr = RECT::default();
+    let mut cr = RECT::default();
+    unsafe {
+        if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some((&mut work as *mut RECT).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_err()
+        {
+            return false;
+        }
+        if GetWindowRect(hwnd, &mut wr).is_err() || GetClientRect(hwnd, &mut cr).is_err() {
+            return false;
+        }
+        let nc_w = ((wr.right - wr.left) - (cr.right - cr.left)).max(0);
+        let nc_h = ((wr.bottom - wr.top) - (cr.bottom - cr.top)).max(0);
+        let new_w = (target_inner_w * ppp).round() as i32 + nc_w;
+        let new_h = (target_inner_h * ppp).round() as i32 + nc_h;
+        if new_w <= 0 || new_h <= 0 {
+            return false;
+        }
+        let anchor_right = if dock_bottom_right {
+            work.right - 12
+        } else {
+            wr.right
+        };
+        let anchor_bottom = if dock_bottom_right {
+            work.bottom - 12
+        } else {
+            wr.bottom
+        };
+        let new_x = (anchor_right - new_w).max(work.left + 8);
+        let new_y = (anchor_bottom - new_h).max(work.top + 8);
+        SetWindowPos(
+            hwnd,
+            HWND::default(),
+            new_x,
+            new_y,
+            new_w,
+            new_h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .is_ok()
+    }
+}
+
+#[cfg(not(windows))]
+fn win32_resize_anchored_right(
+    _hwnd_raw: isize,
+    _target_inner_w: f32,
+    _target_inner_h: f32,
+    _ppp: f32,
+    _dock_bottom_right: bool,
+) -> bool {
+    false
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let smoke_test = args.iter().any(|a| a == "--smoke-test");
@@ -245,6 +323,8 @@ fn main() {
         .with_title("Omvix Hub")
         .with_inner_size(COMPACT_SIZE)
         .with_min_inner_size([440.0, 580.0])
+        .with_resizable(false)
+        .with_maximize_button(false)
         .with_visible(!cfg.general.start_minimized)
         .with_icon(Arc::new(egui::IconData {
             rgba,
@@ -564,7 +644,11 @@ impl OmvixApp {
 
     fn sync_window_visibility(&mut self, ctx: &egui::Context, visible: bool) {
         self.window_visible.store(visible, Ordering::SeqCst);
-        win32_set_visible(self.hwnd_atomic.load(Ordering::SeqCst), visible);
+        let hwnd = self.hwnd_atomic.load(Ordering::SeqCst);
+        if visible && self.cfg.general.dock_bottom_right {
+            win32_dock_bottom_right(hwnd);
+        }
+        win32_set_visible(hwnd, visible);
         if visible {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -585,15 +669,26 @@ impl OmvixApp {
 
     fn apply_drawer_size(&mut self, ctx: &egui::Context) {
         let target = if self.open_drawer.is_some() {
-            egui::vec2(EXPANDED_SIZE[0], EXPANDED_SIZE[1])
+            EXPANDED_SIZE
         } else {
-            egui::vec2(COMPACT_SIZE[0], COMPACT_SIZE[1])
+            COMPACT_SIZE
         };
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target));
-        if self.cfg.general.dock_bottom_right {
-            self.pending_dock_frames = 2;
-            ctx.request_repaint();
+        let handled = win32_resize_anchored_right(
+            self.hwnd_atomic.load(Ordering::SeqCst),
+            target[0],
+            target[1],
+            ctx.pixels_per_point(),
+            self.cfg.general.dock_bottom_right,
+        );
+        if !handled {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                target[0], target[1],
+            )));
+            if self.cfg.general.dock_bottom_right {
+                self.pending_dock_frames = 2;
+            }
         }
+        ctx.request_repaint();
     }
 
     fn cycle_performance_mode(&mut self) {
@@ -773,7 +868,7 @@ impl eframe::App for OmvixApp {
         let current_theme = self.cfg.general.custom_theme.clone();
         let cockpit_frame = egui::Frame::central_panel(&ctx.style())
             .fill(theme::sidebar_fill(&current_theme))
-            .inner_margin(Margin::symmetric(12, 10));
+            .inner_margin(Margin::symmetric(12, 8));
         let detail_frame = egui::Frame::central_panel(&ctx.style())
             .fill(theme::rgb(current_theme.canvas_bg))
             .inner_margin(Margin::same(14));
@@ -787,9 +882,9 @@ impl eframe::App for OmvixApp {
         let mut toggle_drawer: Option<Drawer> = None;
         let mut open_extra: Option<ExtraSubTab> = None;
 
-        // Render compact G-Helper cockpit either alone (456 px) or anchored left when expanded
+        // Render compact G-Helper cockpit either alone or pinned RIGHT when drawer opens LEFT
         if self.open_drawer.is_some() {
-            egui::SidePanel::left("omvix_cockpit_pane")
+            egui::SidePanel::right("omvix_cockpit_pane")
                 .frame(cockpit_frame)
                 .resizable(false)
                 .exact_width(COMPACT_SIZE[0])
@@ -802,6 +897,7 @@ impl eframe::App for OmvixApp {
                         &snapshot_state,
                         &self.i18n,
                         self.open_drawer,
+                        COMPACT_SIZE[0],
                         &mut push_cmd,
                         &mut mark_save,
                     );
@@ -822,6 +918,7 @@ impl eframe::App for OmvixApp {
             egui::CentralPanel::default().frame(detail_frame).show(ctx, |ui| {
                 // Drawer header: sub-tabs (for FansPower / Extra) + Collapse button
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
                     match drawer {
                         Drawer::Monitor => {
                             ui.heading(self.i18n.t("monitor.title"));
@@ -835,7 +932,7 @@ impl eframe::App for OmvixApp {
                                     ui,
                                     &self.i18n.t(key),
                                     self.fans_power_tab == sub,
-                                    180.0,
+                                    170.0,
                                     28.0,
                                     &current_theme,
                                 )
@@ -859,7 +956,7 @@ impl eframe::App for OmvixApp {
                                     ui,
                                     &self.i18n.t(key),
                                     self.extra_tab == sub,
-                                    118.0,
+                                    114.0,
                                     28.0,
                                     &current_theme,
                                 )
@@ -876,7 +973,7 @@ impl eframe::App for OmvixApp {
                             ui,
                             &self.i18n.t("drawer.collapse"),
                             false,
-                            92.0,
+                            88.0,
                             28.0,
                             &current_theme,
                         )
@@ -994,6 +1091,7 @@ impl eframe::App for OmvixApp {
                     &snapshot_state,
                     &self.i18n,
                     self.open_drawer,
+                    COMPACT_SIZE[0],
                     &mut push_cmd,
                     &mut mark_save,
                 );
