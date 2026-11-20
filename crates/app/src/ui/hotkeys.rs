@@ -1,6 +1,6 @@
-use crate::theme::{ACCENT_CYAN, STATUS_ERR, STATUS_OK, card_frame, status_badge};
+use crate::theme::{STATUS_ERR, STATUS_OK, card_frame, section_title, status_badge};
 use crate::worker::WorkerCommand;
-use egui::{RichText, Ui};
+use egui::Ui;
 use omvix_core::config::OmenKeyAction;
 use omvix_core::{AppConfig, I18n};
 
@@ -11,18 +11,19 @@ pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
     i18n: &I18n,
-    dark: bool,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
     on_rebind_hotkeys: &mut dyn FnMut(),
 ) {
+    let t = &cfg.general.custom_theme.clone();
+
     ui.heading(i18n.t("nav.hotkeys"));
     ui.add_space(6.0);
 
     // Omen Key Card
-    card_frame(dark).show(ui, |ui| {
+    card_frame(t).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(i18n.t("hotkeys.omen_key")).strong().color(ACCENT_CYAN));
+            section_title(ui, i18n.t("hotkeys.omen_key"), t);
             if ui
                 .checkbox(&mut cfg.hotkeys.capture_omen_key, i18n.t("common.enabled"))
                 .changed()
@@ -70,8 +71,8 @@ pub fn render(
     ui.add_space(8.0);
 
     // Global Shortcut Card
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new(i18n.t("hotkeys.global_shortcut")).strong().color(ACCENT_CYAN));
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("hotkeys.global_shortcut"), t);
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut cfg.hotkeys.global_toggle_shortcut);
 

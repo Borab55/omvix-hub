@@ -1,6 +1,6 @@
-use crate::theme::{ACCENT_CYAN, STATUS_OK, STATUS_WARN, card_frame, status_badge};
+use crate::theme::{STATUS_OK, STATUS_WARN, card_frame, section_title, status_badge};
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{RichText, Slider, Ui};
+use egui::{Slider, Ui};
 use omvix_core::{AppConfig, CpuBoostMode, I18n};
 
 pub fn render(
@@ -8,15 +8,16 @@ pub fn render(
     cfg: &mut AppConfig,
     st: &SharedState,
     i18n: &I18n,
-    dark: bool,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) {
+    let t = &cfg.general.custom_theme.clone();
+
     ui.heading(i18n.t("nav.tuning"));
     ui.add_space(6.0);
 
     // Security / VBS / HVCI Banner
-    card_frame(dark).show(ui, |ui| {
+    card_frame(t).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             if st.security.hvci_running || st.security.vbs_status == Some(2) {
                 status_badge(ui, "VBS / HVCI ACTIVE", STATUS_WARN);
@@ -40,8 +41,8 @@ pub fn render(
     ui.add_space(8.0);
 
     // CPU Turbo Boost Mode (Works without kernel driver!)
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new(i18n.t("tuning.cpu_boost")).strong().color(ACCENT_CYAN));
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("tuning.cpu_boost"), t);
         let cur = st
             .cpu_boost
             .or(cfg.tuning.cpu_boost_mode)
@@ -65,8 +66,8 @@ pub fn render(
     ui.add_space(8.0);
 
     // Custom Power Limits (PL1 / PL2)
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new("Custom CPU / Platform Power Limits").strong().color(ACCENT_CYAN));
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, format!("{} / {}", i18n.t("tuning.power_limit_pl1"), i18n.t("tuning.power_limit_pl2")), t);
         let pl1 = cfg.tuning.pl1_watts.get_or_insert(55);
         ui.horizontal(|ui| {
             ui.label(i18n.t("tuning.power_limit_pl1"));
@@ -89,8 +90,8 @@ pub fn render(
     ui.add_space(8.0);
 
     // Custom Temperature Limit (TCC) & Core Undervolt
-    card_frame(dark).show(ui, |ui| {
-        ui.label(RichText::new("Thermal Throttle (TCC) & Undervolt").strong().color(ACCENT_CYAN));
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, format!("{} / {}", i18n.t("tuning.temp_limit"), i18n.t("tuning.undervolt")), t);
         let tcc = cfg.tuning.tcc_temp_limit_c.get_or_insert(95);
         ui.horizontal(|ui| {
             ui.label(i18n.t("tuning.temp_limit"));

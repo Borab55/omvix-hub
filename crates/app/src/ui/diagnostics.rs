@@ -1,14 +1,14 @@
-use crate::theme::{ACCENT_CYAN, STATUS_OK, STATUS_WARN, card_frame, status_badge};
+use crate::theme::{STATUS_OK, STATUS_WARN, card_frame, section_title, status_badge};
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{RichText, ScrollArea, Ui};
-use omvix_core::I18n;
+use egui::{ScrollArea, Ui};
+use omvix_core::{CustomThemeConfig, I18n};
 use std::path::PathBuf;
 
 pub fn render(
     ui: &mut Ui,
     st: &SharedState,
     i18n: &I18n,
-    dark: bool,
+    t: &CustomThemeConfig,
     on_cmd: &mut dyn FnMut(WorkerCommand),
 ) {
     ui.horizontal(|ui| {
@@ -26,8 +26,8 @@ pub fn render(
 
     if let Some(diag) = &st.diagnostics {
         // System Identity & Board Match
-        card_frame(dark).show(ui, |ui| {
-            ui.label(RichText::new("Hardware & Firmware").strong().color(ACCENT_CYAN));
+        card_frame(t).show(ui, |ui| {
+            section_title(ui, i18n.t("diagnostics.hardware_firmware"), t);
             egui::Grid::new("diag_sys_grid")
                 .num_columns(2)
                 .spacing([20.0, 4.0])
@@ -72,8 +72,8 @@ pub fn render(
         ui.add_space(8.0);
 
         // Conflict Services Card
-        card_frame(dark).show(ui, |ui| {
-            ui.label(RichText::new(i18n.t("conflicts.title")).strong().color(ACCENT_CYAN));
+        card_frame(t).show(ui, |ui| {
+            section_title(ui, i18n.t("conflicts.title"), t);
             if diag.conflict_services.is_empty() {
                 status_badge(ui, &i18n.t("conflicts.none_detected"), STATUS_OK);
             } else {
@@ -94,11 +94,14 @@ pub fn render(
         ui.add_space(8.0);
 
         // WMI Probe Table
-        card_frame(dark).show(ui, |ui| {
-            ui.label(
-                RichText::new(format!("Read-Only WMI Probe ({})", diag.probes.len()))
-                    .strong()
-                    .color(ACCENT_CYAN),
+        card_frame(t).show(ui, |ui| {
+            section_title(
+                ui,
+                i18n.t_fmt(
+                    "diagnostics.probe_table",
+                    &[("count", &diag.probes.len().to_string())],
+                ),
+                t,
             );
             if diag.probes.is_empty() {
                 ui.weak("Run Omvix Hub as Administrator to inspect live WMI BIOS responses.");

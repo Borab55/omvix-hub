@@ -1,22 +1,45 @@
-use crate::theme::{ACCENT_CYAN, STATUS_OK, STATUS_WARN, card_frame, status_badge};
+use crate::theme::{STATUS_OK, STATUS_WARN, accent_color, card_frame, section_title, status_badge};
+use crate::ui::home::{apply_battery_profile, is_profile_active};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
-use omvix_core::{AppConfig, BatteryChargeMode, I18n};
+use omvix_core::{AppConfig, BatteryChargeMode, BatteryProfile, I18n};
+
+#[derive(Debug, Clone)]
+pub struct BatteryDraftState {
+    pub profile_name: String,
+    pub stop_pct: u8,
+    pub start_pct: u8,
+    pub mode: BatteryChargeMode,
+}
+
+impl Default for BatteryDraftState {
+    fn default() -> Self {
+        Self {
+            profile_name: String::new(),
+            stop_pct: 75,
+            start_pct: 70,
+            mode: BatteryChargeMode::Inhibit,
+        }
+    }
+}
 
 pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
     st: &SharedState,
     i18n: &I18n,
-    dark: bool,
+    draft: &mut BatteryDraftState,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) {
+    let t = &cfg.general.custom_theme.clone();
+    let accent = accent_color(t);
+
     ui.heading(i18n.t("nav.battery"));
     ui.add_space(6.0);
 
     if st.hp_charge_service_running {
-        card_frame(dark).show(ui, |ui| {
+        card_frame(t).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 status_badge(ui, "hp-charge-limit-rs", STATUS_WARN);
                 ui.label(i18n.t("battery.conflict_service_warning"));
@@ -26,14 +49,14 @@ pub fn render(
     }
 
     // Live Battery Status Card
-    card_frame(dark).show(ui, |ui| {
+    card_frame(t).show(ui, |ui| {
         if let Some(b) = &st.battery_status {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!("{}%", b.charge_percent))
                         .size(26.0)
                         .strong()
-                        .color(ACCENT_CYAN),
+                        .color(accent),
                 );
                 ui.add_space(10.0);
                 let src = if b.ac_connected {
@@ -41,9 +64,14 @@ pub fn render(
                 } else {
                     i18n.t("dashboard.power_source_dc")
                 };
+                let hex_suffix = b
+                    .raw_mode_hex
+                    .as_deref()
+                    .map(|h| format!(" [{h}]"))
+                    .unwrap_or_default();
                 status_badge(
                     ui,
-                    &format!("{src} | {:?}", b.current_mode),
+                    &format!("{src} | {:?}{hex_suffix}", b.current_mode),
                     if b.charging { STATUS_WARN } else { STATUS_OK },
                 );
             });
@@ -63,8 +91,36 @@ pub fn render(
                     );
                     ui.end_row();
 
+                    ui.label(i18n.t("battery.voltage"));
+                    ui.label(
+                        b.voltage_v
+                            .map(|v| format!("{v:.2} V"))
+                            .unwrap_or_else(|| "N/A".into()),
+                    );
+                    ui.end_row();
+
+                    ui.label(i18n.t("battery.remaining_cap"));
+                    ui.label(
+                        b.remaining_capacity_mwh
+                            .map(|m| format!("{m} mWh"))
+                            .unwrap_or_else(|| "N/A".into()),
+                    );
+                    ui.end_row();
+
+                    ui.label(i18n.t("battery.time_remaining"));
+                    ui.label(
+                        b.time_remaining_min
+                            .map(|m| format!("{}h {}m", m / 60, m % 60))
+                            .unwrap_or_else(|| "—".into()),
+                    );
+                    ui.end_row();
+
                     ui.label(i18n.t("battery.health"));
                     let cap_str = match (b.full_charge_capacity_mwh, b.design_capacity_mwh) {
+                        (Some(f), Some(d)) if d > 0 => {
+                            let health_pct = ((f as f32 / d as f32) * 100.0).clamp(0.0, 100.0);
+                            format!("{f} / {d} mWh ({health_pct:.1}%)")
+                        }
                         (Some(f), Some(d)) => format!("{f} / {d} mWh"),
                         _ => "N/A".into(),
                     };
@@ -80,27 +136,188 @@ pub fn render(
                     ui.end_row();
                 });
         } else {
-            ui.weak("Waiting for battery telemetry...");
+            ui.weak("...");
         }
     });
 
     ui.add_space(8.0);
 
-    // Charge Limiting Controls Card
-    card_frame(dark).show(ui, |ui| {
+    // Built-in Battery Charge Presets (inspired by Borab55/hp-charge-limiter)
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("battery.presets_title"), t);
+        ui.add_space(6.0);
+        let builtins = BatteryProfile::builtins();
+        ui.columns(2, |cols| {
+            for (idx, preset) in builtins.into_iter().enumerate() {
+                let col = &mut cols[idx % 2];
+                let (title_key, desc_key) = match preset.id.as_str() {
+                    "desktop" => ("battery.preset_desktop", "battery.preset_desktop_desc"),
+                    "balanced" => ("battery.preset_balanced", "battery.preset_balanced_desc"),
+                    "travel" => ("battery.preset_travel", "battery.preset_travel_desc"),
+                    "full" => ("battery.preset_full", "battery.preset_full_desc"),
+                    _ => ("battery.preset_balanced", "battery.preset_balanced_desc"),
+                };
+                let selected = is_profile_active(cfg, &preset);
+                col.vertical(|ui| {
+                    if ui
+                        .selectable_label(selected, RichText::new(i18n.t(title_key)).strong())
+                        .clicked()
+                    {
+                        apply_battery_profile(cfg, &preset);
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyBatteryNow);
+                    }
+                    ui.weak(i18n.t(desc_key));
+                    ui.add_space(4.0);
+                });
+            }
+        });
+    });
+
+    ui.add_space(8.0);
+
+    // Custom User Profiles Card
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("battery.custom_profiles"), t);
+        ui.add_space(4.0);
+
+        if cfg.battery.custom_profiles.is_empty() {
+            ui.weak(i18n.t("battery.no_custom_profiles"));
+        } else {
+            let mut apply_profile: Option<BatteryProfile> = None;
+            let mut delete_idx: Option<usize> = None;
+
+            for (idx, prof) in cfg.battery.custom_profiles.iter().enumerate() {
+                let is_active = cfg.battery.active_profile_id.as_deref() == Some(&prof.id);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .selectable_label(is_active, RichText::new(&prof.name).strong())
+                        .clicked()
+                    {
+                        apply_profile = Some(prof.clone());
+                    }
+                    ui.weak(format!(
+                        "{}% / {}%  •  {:?}",
+                        prof.stop_threshold_pct, prof.start_threshold_pct, prof.mode
+                    ));
+                    if ui.button(i18n.t("common.apply")).clicked() {
+                        apply_profile = Some(prof.clone());
+                    }
+                    if ui.button(i18n.t("battery.delete")).clicked() {
+                        delete_idx = Some(idx);
+                    }
+                });
+            }
+
+            if let Some(p) = apply_profile {
+                apply_battery_profile(cfg, &p);
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                on_cmd(WorkerCommand::ApplyBatteryNow);
+            }
+            if let Some(idx) = delete_idx {
+                let removed = cfg.battery.custom_profiles.remove(idx);
+                if cfg.battery.active_profile_id.as_deref() == Some(&removed.id) {
+                    cfg.battery.active_profile_id = None;
+                }
+                on_save();
+            }
+        }
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(i18n.t("battery.profile_name"));
+            ui.text_edit_singleline(&mut draft.profile_name);
+        });
         ui.horizontal(|ui| {
-            ui.label(RichText::new(i18n.t("battery.charge_limit")).strong().color(ACCENT_CYAN));
+            ui.label(i18n.t("battery.stop_threshold"));
+            ui.add(Slider::new(&mut draft.stop_pct, 50..=100).suffix("%"));
+        });
+        let draft_max_start = draft.stop_pct.saturating_sub(2).max(40);
+        if draft.start_pct > draft_max_start {
+            draft.start_pct = draft_max_start;
+        }
+        ui.horizontal(|ui| {
+            ui.label(i18n.t("battery.start_threshold"));
+            ui.add(Slider::new(&mut draft.start_pct, 40..=draft_max_start).suffix("%"));
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(i18n.t("battery.hold_mode"));
+            for (m, key) in [
+                (BatteryChargeMode::Inhibit, "battery.mode_inhibit"),
+                (BatteryChargeMode::Hold, "battery.mode_hold"),
+                (BatteryChargeMode::Auto, "battery.mode_auto"),
+            ] {
+                ui.selectable_value(&mut draft.mode, m, i18n.t(key));
+            }
+        });
+        if ui
+            .button(RichText::new(i18n.t("battery.save_profile")).strong())
+            .clicked()
+        {
+            let clean_name = draft.profile_name.trim();
+            let final_name = if clean_name.is_empty() {
+                format!("Custom {}%", draft.stop_pct)
+            } else {
+                clean_name.to_string()
+            };
+            let slug_base = final_name
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect::<String>()
+                .trim_matches('-')
+                .to_string();
+            let base = if slug_base.is_empty() {
+                "custom".to_string()
+            } else {
+                slug_base
+            };
+            let mut candidate = base.clone();
+            let mut n = 2usize;
+            while cfg.battery.custom_profiles.iter().any(|p| p.id == candidate)
+                || BatteryProfile::builtins().iter().any(|p| p.id == candidate)
+            {
+                candidate = format!("{base}-{n}");
+                n += 1;
+            }
+            let prof = BatteryProfile {
+                id: candidate,
+                name: final_name,
+                enabled: draft.mode != BatteryChargeMode::Auto,
+                stop_threshold_pct: draft.stop_pct,
+                start_threshold_pct: draft.start_pct,
+                mode: draft.mode,
+                builtin: false,
+            };
+            apply_battery_profile(cfg, &prof);
+            cfg.battery.custom_profiles.push(prof);
+            draft.profile_name.clear();
+            on_save();
+            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            on_cmd(WorkerCommand::ApplyBatteryNow);
+        }
+    });
+
+    ui.add_space(8.0);
+
+    // Manual Charge Limiting & Travel Mode Card
+    card_frame(t).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            section_title(ui, i18n.t("battery.charge_limit"), t);
             if ui
                 .checkbox(&mut cfg.battery.enabled, i18n.t("common.enabled"))
                 .changed()
             {
+                cfg.battery.active_profile_id = None;
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
             }
         });
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("battery.hold_mode"));
             for (m, key) in [
                 (BatteryChargeMode::Inhibit, "battery.mode_inhibit"),
@@ -112,13 +329,19 @@ pub fn render(
                     .clicked()
                 {
                     cfg.battery.mode = m;
+                    cfg.battery.active_profile_id = None;
                 }
             }
         });
 
         ui.horizontal(|ui| {
             ui.label(i18n.t("battery.stop_threshold"));
-            ui.add(Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100).suffix("%"));
+            if ui
+                .add(Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100).suffix("%"))
+                .changed()
+            {
+                cfg.battery.active_profile_id = None;
+            }
         });
 
         let max_start = cfg.battery.stop_threshold_pct.saturating_sub(2).max(40);
@@ -127,7 +350,12 @@ pub fn render(
         }
         ui.horizontal(|ui| {
             ui.label(i18n.t("battery.start_threshold"));
-            ui.add(Slider::new(&mut cfg.battery.start_threshold_pct, 40..=max_start).suffix("%"));
+            if ui
+                .add(Slider::new(&mut cfg.battery.start_threshold_pct, 40..=max_start).suffix("%"))
+                .changed()
+            {
+                cfg.battery.active_profile_id = None;
+            }
         });
 
         ui.add_space(8.0);
@@ -146,7 +374,10 @@ pub fn render(
             } else {
                 i18n.t("battery.one_time_full_charge")
             };
-            if ui.selectable_label(cfg.battery.one_time_full_charge, travel_btn_label).clicked() {
+            if ui
+                .selectable_label(cfg.battery.one_time_full_charge, travel_btn_label)
+                .clicked()
+            {
                 cfg.battery.one_time_full_charge = !cfg.battery.one_time_full_charge;
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
