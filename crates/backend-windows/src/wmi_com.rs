@@ -17,8 +17,9 @@ use windows::Win32::System::Variant::{
     VT_ARRAY, VT_I4, VT_TYPEMASK, VT_UI1, VT_UI4, VariantToUInt32,
 };
 use windows::Win32::System::Wmi::{
-    IWbemClassObject, IWbemLocator, IWbemServices, WBEM_E_ACCESS_DENIED, WBEM_FLAG_FORWARD_ONLY,
-    WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_GENERIC_FLAG_TYPE, WBEM_INFINITE, WbemLocator,
+    IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices, WBEM_E_ACCESS_DENIED,
+    WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_GENERIC_FLAG_TYPE, WBEM_INFINITE,
+    WbemLocator,
 };
 
 const RPC_C_AUTHN_WINNT: u32 = 10;
@@ -184,6 +185,19 @@ impl WmiConnection {
 
     pub fn class_exists(&self, class_name: &str) -> bool {
         self.get_object(class_name).is_ok()
+    }
+
+    pub fn exec_notification_query(&self, wql: &str) -> Result<IEnumWbemClassObject> {
+        unsafe {
+            self.services
+                .ExecNotificationQuery(
+                    &BSTR::from("WQL"),
+                    &BSTR::from(wql),
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                    None,
+                )
+                .map_err(|e| map_wmi_err(&self.namespace, wql, e))
+        }
     }
 
     pub fn exec_method(

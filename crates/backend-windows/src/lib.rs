@@ -1,11 +1,23 @@
 #[cfg(windows)]
+pub mod autostart;
+#[cfg(windows)]
 pub mod battery;
 #[cfg(windows)]
-mod system_info;
+pub mod display;
+#[cfg(windows)]
+pub mod gpu_mux;
+#[cfg(windows)]
+pub mod hotkeys;
+#[cfg(windows)]
+pub mod keyboard;
+#[cfg(windows)]
+pub mod system_info;
 #[cfg(windows)]
 pub mod telemetry;
 #[cfg(windows)]
 pub mod thermal_fan;
+#[cfg(windows)]
+pub mod tuning;
 #[cfg(windows)]
 pub mod wmi_bios;
 #[cfg(windows)]
@@ -20,9 +32,17 @@ use omvix_core::OmvixError;
 #[cfg(windows)]
 pub use battery::WindowsBatteryBackend;
 #[cfg(windows)]
+pub use display::WindowsDisplayBackend;
+#[cfg(windows)]
+pub use gpu_mux::WindowsGpuSwitchBackend;
+#[cfg(windows)]
+pub use keyboard::WindowsKeyboardBackend;
+#[cfg(windows)]
 pub use telemetry::WindowsTelemetryBackend;
 #[cfg(windows)]
 pub use thermal_fan::WindowsThermalFanBackend;
+#[cfg(windows)]
+pub use tuning::WindowsCpuTuningBackend;
 
 #[derive(Debug, Default)]
 pub struct WindowsDiagnosticsBackend;

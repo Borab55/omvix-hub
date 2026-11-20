@@ -1,12 +1,12 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryStatus, DiagnosticReport,
-    DiagnosticsBackend, FanMode, LogLevel, PerformanceMode, TelemetryBackend, TelemetrySnapshot,
-    ThermalFanBackend, init_logging, list_log_files, total_log_bytes,
+    DiagnosticsBackend, DisplayBackend, FanMode, LogLevel, PerformanceMode, TelemetryBackend,
+    TelemetrySnapshot, ThermalFanBackend, init_logging, list_log_files, total_log_bytes,
 };
 use omvix_windows::{
-    WindowsBatteryBackend, WindowsDiagnosticsBackend, WindowsTelemetryBackend,
-    WindowsThermalFanBackend,
+    WindowsBatteryBackend, WindowsCpuTuningBackend, WindowsDiagnosticsBackend,
+    WindowsDisplayBackend, WindowsTelemetryBackend, WindowsThermalFanBackend, system_info,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -56,6 +56,28 @@ enum Commands {
         #[command(subcommand)]
         action: BatteryAction,
     },
+    /// Display refresh rate diagnostics and switching.
+    Display {
+        #[command(subcommand)]
+        action: DisplayAction,
+    },
+    /// CPU Boost and VBS/HVCI undervolt tuning status.
+    Tuning {
+        #[command(subcommand)]
+        action: TuningAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DisplayAction {
+    /// List current resolution and supported refresh rates (Hz).
+    List,
+}
+
+#[derive(Subcommand)]
+enum TuningAction {
+    /// Show CPU Turbo Boost mode and VBS/HVCI/PawnIO undervolt lock status.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -284,6 +306,56 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 }
+            }
+        },
+        Commands::Display { action } => match action {
+            DisplayAction::List => match WindowsDisplayBackend::new().get_display_mode() {
+                Ok(info) => {
+                    println!("============================================================");
+                    println!(" Omvix Hub Display Modes");
+                    println!("============================================================");
+                    println!("Resolution   : {}x{}", info.width, info.height);
+                    println!("Current Hz   : {} Hz", info.current_hz);
+                    let hz_list = info
+                        .supported_hz
+                        .iter()
+                        .map(|h| format!("{h} Hz"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("Supported Hz : {hz_list}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    tracing::error!("Failed to enumerate display modes: {err}");
+                    eprintln!("Error: {err}");
+                    ExitCode::FAILURE
+                }
+            },
+        },
+        Commands::Tuning { action } => match action {
+            TuningAction::Status => {
+                let sec = system_info::collect_security_status();
+                let boost = WindowsCpuTuningBackend::new().read_cpu_boost_mode();
+                println!("============================================================");
+                println!(" Omvix Hub CPU Tuning Status");
+                println!("============================================================");
+                println!(
+                    "CPU Boost    : {}",
+                    boost
+                        .map(|b| format!("{b:?}"))
+                        .unwrap_or_else(|e| format!("Unknown ({e})"))
+                );
+                println!("Admin        : {}", sec.is_admin);
+                println!(
+                    "VBS Status   : {} (HVCI: {})",
+                    sec.vbs_status
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    sec.hvci_running
+                );
+                println!("PawnIO Ready : {}", sec.pawn_io_installed);
+                println!("Tuning Note  : {}", sec.undervolt_note);
+                ExitCode::SUCCESS
             }
         },
     }
