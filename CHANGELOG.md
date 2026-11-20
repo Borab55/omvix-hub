@@ -3,6 +3,17 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.3.1] - 2026-11-20
+
+### Fixed & Improved
+- **Compact Cockpit Overflow Calibration (`468 × 680` <-> `1080 × 680`):**
+  - Locked cockpit interior content width to `pane_width - 24` and card interior width to `content_w - 22`, computing all tile widths from `card_inner_w` so zero elements can overflow past the right card/window boundary.
+  - Added short cockpit-specific tile labels (`cockpit.fan_*`: `Auto / Max / Manual / Curve`, `Oto / Maks / Manuel / Eğri`; `cockpit.boost_*`: `Off / Enabled / Aggressive`, `Kapalı / Etkin / Agresif`; compact `{hz}Hz` when 5+ modes are present), tighter `tile_button` padding (`4×2`) with `.truncate()`, and tighter card margins (`10×6`) so all 5 cards (including **Battery Charge Limit**) fit cleanly without scrolling or clipping.
+- **Non-Resizable Fixed Cockpit Frame:**
+  - Disabled user border drag-resizing and removed the maximize button (`.with_resizable(false).with_maximize_button(false)`).
+- **Right-Anchored Leftward Drawer Expansion:**
+  - Pinned the compact cockpit on the **right** (`SidePanel::right`) and opened detail drawers on the **left** (`CentralPanel`), paired with an atomic Win32 right-edge-anchored resize (`win32_resize_anchored_right`) and updated `Compact >>` / `Daralt >>` collapse button so bottom-right docked windows expand smoothly to the left without shifting rightward.
+
 ## [0.3.0] - 2026-11-20
 
 ### Added & Changed

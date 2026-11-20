@@ -139,8 +139,8 @@ pub fn compact_card(t: &CustomThemeConfig) -> egui::Frame {
     egui::Frame::NONE
         .fill(rgb(t.card_bg))
         .stroke(Stroke::new(1.0_f32, rgb(t.card_border)))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::symmetric(11, 9))
+        .corner_radius(CornerRadius::same(9))
+        .inner_margin(Margin::symmetric(10, 6))
 }
 
 pub fn section_title(ui: &mut egui::Ui, text: impl Into<String>, t: &CustomThemeConfig) {
@@ -184,7 +184,7 @@ pub fn tile_button(
         )
     };
 
-    let mut rt = egui::RichText::new(label).size(13.0).color(text_color);
+    let mut rt = egui::RichText::new(label).size(12.5).color(text_color);
     if selected {
         rt = rt.strong();
     }
@@ -192,8 +192,13 @@ pub fn tile_button(
     let btn = egui::Button::new(rt)
         .fill(fill)
         .stroke(stroke)
-        .corner_radius(CornerRadius::same(8));
-    ui.add_sized([width, height], btn)
+        .corner_radius(CornerRadius::same(8))
+        .truncate();
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
+        ui.add_sized([width, height], btn)
+    })
+    .inner
 }
 
 pub fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
