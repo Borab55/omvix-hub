@@ -268,3 +268,74 @@ pub fn clickable_status_badge(ui: &mut egui::Ui, text: &str, color: Color32) -> 
         .corner_radius(CornerRadius::same(12));
     ui.add(btn)
 }
+
+/// Compact pill badge with a custom-painted vector warning triangle (`▲`) + count.
+pub fn clickable_warning_badge(
+    ui: &mut egui::Ui,
+    count: usize,
+    color: Color32,
+) -> egui::Response {
+    let galley = egui::WidgetText::from(
+        egui::RichText::new(count.to_string())
+            .size(12.0)
+            .color(color)
+            .strong(),
+    )
+    .into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+
+    let pad_x = 9.0_f32;
+    let tri_w = 12.0_f32;
+    let gap = 5.0_f32;
+    let width = (pad_x * 2.0 + tri_w + gap + galley.size().x).ceil();
+    let height = 22.0_f32;
+
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter_at(rect);
+        let fill_alpha = if resp.hovered() { 48 } else { 32 };
+        let stroke_w = if resp.hovered() { 1.3_f32 } else { 1.0_f32 };
+        let bg = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), fill_alpha);
+
+        painter.rect_filled(rect, CornerRadius::same(12), bg);
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(12),
+            Stroke::new(stroke_w, color),
+            egui::StrokeKind::Inside,
+        );
+
+        let cx = rect.left() + pad_x + tri_w * 0.5;
+        let cy = rect.center().y;
+        let top = egui::pos2(cx, cy - 5.2);
+        let bot_right = egui::pos2(cx + 5.8, cy + 4.6);
+        let bot_left = egui::pos2(cx - 5.8, cy + 4.6);
+        let tri_fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 44);
+        painter.add(egui::Shape::convex_polygon(
+            vec![top, bot_right, bot_left],
+            tri_fill,
+            Stroke::new(1.4_f32, color),
+        ));
+        painter.line_segment(
+            [egui::pos2(cx, cy - 1.8), egui::pos2(cx, cy + 1.2)],
+            Stroke::new(1.4_f32, color),
+        );
+        painter.circle_filled(egui::pos2(cx, cy + 2.9), 0.85, color);
+
+        let text_pos = egui::pos2(
+            rect.left() + pad_x + tri_w + gap,
+            cy - galley.size().y * 0.5,
+        );
+        painter.galley(text_pos, galley, color);
+    }
+
+    resp
+}

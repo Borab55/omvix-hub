@@ -1,6 +1,7 @@
 use crate::theme::{
-    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, clickable_status_badge, compact_card,
-    pill_button, rgb, section_title, status_badge, tile_button,
+    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, clickable_status_badge,
+    clickable_warning_badge, compact_card, pill_button, rgb, section_title, status_badge,
+    tile_button,
 };
 use crate::ui::{Drawer, ExtraSubTab};
 use crate::worker::{SharedState, WorkerCommand};
@@ -62,9 +63,9 @@ pub fn render(
         });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if st.security.is_admin {
-                status_badge(ui, "Admin", STATUS_OK);
-            } else if clickable_status_badge(ui, "Admin ?", STATUS_WARN).clicked() {
+            if !st.security.is_admin
+                && clickable_status_badge(ui, "Admin ?", STATUS_WARN).clicked()
+            {
                 actions.restart_admin = true;
             }
 
@@ -74,7 +75,11 @@ pub fn render(
                 .filter(|s| s.status.eq_ignore_ascii_case("Running"))
                 .count();
             if running_conflicts > 0
-                && clickable_status_badge(ui, &format!("! {running_conflicts}"), STATUS_WARN)
+                && clickable_warning_badge(ui, running_conflicts, STATUS_WARN)
+                    .on_hover_text(i18n.t_fmt(
+                        "conflicts.detected_summary",
+                        &[("count", &running_conflicts.to_string())],
+                    ))
                     .clicked()
             {
                 actions.open_extra_subtab = Some(ExtraSubTab::Diagnostics);
@@ -154,6 +159,10 @@ pub fn render(
             _ => fans,
         };
         let ram = match (st.telemetry.ram_used_gb, st.telemetry.ram_total_gb) {
+            (Some(u), Some(tot)) if tot > 0.0 => {
+                let pct = ((u / tot) * 100.0).clamp(0.0, 100.0);
+                format!("RAM {u:.1}/{tot:.0}G ({pct:.0}%)")
+            }
             (Some(u), Some(tot)) => format!("RAM {u:.1}/{tot:.0}G"),
             _ => "RAM —".into(),
         };

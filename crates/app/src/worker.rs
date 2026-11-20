@@ -2,6 +2,7 @@ use omvix_core::auto_profile::AutoProfileEngine;
 use omvix_core::battery_care::BatteryCareEngine;
 use omvix_core::thermal::{
     ThermalGuardDecision, ThermalSafetyGuard, effective_fan_curve_temp_c,
+    is_system_cool_for_zero_rpm,
 };
 use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryStatus, ConflictServiceInfo,
@@ -279,6 +280,17 @@ fn request_repaint_if_visible(ctx: &Option<egui::Context>, window_visible: &Arc<
     }
 }
 
+fn cool_hint_from_snapshot(snap: &TelemetrySnapshot) -> bool {
+    is_system_cool_for_zero_rpm(snap.cpu_temp_c, snap.gpu_temp_c, snap.chassis_temp_c)
+}
+
+fn current_cool_hint(state: &Arc<Mutex<SharedState>>) -> bool {
+    state
+        .lock()
+        .map(|st| cool_hint_from_snapshot(&st.telemetry))
+        .unwrap_or(false)
+}
+
 #[cfg(windows)]
 fn run_worker_loop(
     mut cfg: AppConfig,
@@ -403,6 +415,8 @@ fn run_worker_loop(
                         &mut battery_engine,
                         &mut thermal_guard,
                         &mut last_applied_bat_mode,
+                        &mut prev_curve_temp,
+                        &mut prev_curve_speed,
                     );
                     if should_shutdown {
                         return;
@@ -475,9 +489,11 @@ fn run_worker_loop(
                         }
                         ThermalGuardDecision::ReleaseEmergency => {
                             tracing::info!("Thermal safety guard releasing emergency Max Fan");
-                            let _ = thermal_be.set_fan_mode(
+                            let is_cool = cool_hint_from_snapshot(&snap);
+                            let _ = thermal_be.set_fan_mode_with_cool_hint(
                                 cfg.thermal_fan.fan_mode,
                                 Some(cfg.thermal_fan.manual_speed_pct),
+                                is_cool,
                             );
                             if let Ok(mut st) = state.lock() {
                                 st.thermal_guard_active = false;
@@ -505,11 +521,19 @@ fn run_worker_loop(
                             prev_curve_temp,
                             prev_curve_speed,
                         );
+                        let is_cool = cool_hint_from_snapshot(&snap);
                         if target_pct != prev_curve_speed {
-                            let _ = thermal_be.set_fan_mode(FanMode::CustomCurve, Some(target_pct));
+                            let _ = thermal_be.set_fan_mode_with_cool_hint(
+                                FanMode::CustomCurve,
+                                Some(target_pct),
+                                is_cool,
+                            );
                             prev_curve_speed = target_pct;
+                            prev_curve_temp = temp;
+                        } else if temp > prev_curve_temp {
+                            // Track rising peaks without shifting baseline down while hysteresis holds speed
+                            prev_curve_temp = temp;
                         }
-                        prev_curve_temp = temp;
                     }
                 }
 
@@ -552,7 +576,8 @@ fn run_worker_loop(
             && last_keep_alive.elapsed() >= Duration::from_secs(ka_secs)
         {
             last_keep_alive = Instant::now();
-            let _ = thermal_be.keep_alive_tick();
+            let is_cool = current_cool_hint(&state);
+            let _ = thermal_be.keep_alive_tick_with_cool_hint(is_cool);
         }
     }
 }
@@ -617,10 +642,26 @@ fn handle_worker_command(
     battery_engine: &mut BatteryCareEngine,
     thermal_guard: &mut ThermalSafetyGuard,
     last_applied_bat_mode: &mut Option<BatteryChargeMode>,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
 ) -> bool {
     match cmd {
         WorkerCommand::Shutdown => {
             tracing::info!("Background worker shutting down");
+            if cfg.thermal_fan.fan_mode != FanMode::Auto || thermal_guard.is_active() {
+                if let Err(err) = thermal_be.set_fan_mode(FanMode::Auto, None) {
+                    tracing::warn!("Failed to restore BIOS Auto fan on shutdown: {err}");
+                } else {
+                    tracing::info!("Restored BIOS Auto fan control on clean shutdown");
+                }
+            }
+            if cfg.battery.enabled && !cfg.battery.hold_when_shutdown {
+                if let Err(err) = battery_be.set_charge_mode(BatteryChargeMode::Auto) {
+                    tracing::warn!("Failed to restore normal battery charging on shutdown: {err}");
+                } else {
+                    tracing::info!("Restored normal battery charging (0x2B Auto) on clean shutdown");
+                }
+            }
             return true;
         }
         WorkerCommand::UpdateConfig(new_cfg) => {
@@ -652,7 +693,29 @@ fn handle_worker_command(
             if let Some(pct) = manual_speed_pct {
                 cfg.thermal_fan.manual_speed_pct = pct;
             }
-            let res = thermal_be.set_fan_mode(mode, manual_speed_pct);
+            let snap = state
+                .lock()
+                .map(|st| st.telemetry.clone())
+                .unwrap_or_default();
+            let is_cool = cool_hint_from_snapshot(&snap);
+            let target_pct = if mode == FanMode::CustomCurve {
+                if let Some(temp) = effective_fan_curve_temp_c(
+                    snap.cpu_temp_c,
+                    snap.gpu_temp_c,
+                    snap.chassis_temp_c,
+                    snap.cpu_power_w,
+                ) {
+                    let pct = cfg.thermal_fan.custom_curve.evaluate(temp, temp, 0);
+                    *prev_curve_temp = temp;
+                    *prev_curve_speed = pct;
+                    Some(pct)
+                } else {
+                    manual_speed_pct
+                }
+            } else {
+                manual_speed_pct
+            };
+            let res = thermal_be.set_fan_mode_with_cool_hint(mode, target_pct, is_cool);
             record_result(state, res, format!("Fan mode -> {mode:?}"));
         }
         WorkerCommand::ApplyBatteryNow => {
