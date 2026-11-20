@@ -30,15 +30,23 @@ impl Default for CustomThemeConfig {
 impl CustomThemeConfig {
     pub fn preset_dark_slate() -> Self {
         Self {
-            name: "Dark Slate".to_string(),
+            name: "Dark Graphite".to_string(),
             dark_base: true,
             accent: [0, 180, 216],
-            canvas_bg: [15, 20, 27],
-            sidebar_bg: [12, 17, 24],
-            card_bg: [22, 29, 39],
-            card_border: [38, 49, 64],
-            text_primary: [230, 237, 243],
+            canvas_bg: [22, 22, 24],
+            sidebar_bg: [18, 18, 20],
+            card_bg: [31, 31, 34],
+            card_border: [52, 52, 57],
+            text_primary: [238, 238, 240],
         }
+    }
+
+    /// Detects the pre-v0.3 bluish "Dark Slate" default palette for seamless migration
+    /// to neutral charcoal without overwriting user-customized themes.
+    pub fn is_legacy_bluish_dark_slate(&self) -> bool {
+        self.canvas_bg == [15, 20, 27]
+            && self.card_bg == [22, 29, 39]
+            && self.card_border == [38, 49, 64]
     }
 
     pub fn preset_clean_light() -> Self {
@@ -281,6 +289,8 @@ pub struct GeneralConfig {
     pub start_minimized: bool,
     pub start_with_windows: bool,
     pub show_tray_notice_on_close: bool,
+    pub dock_bottom_right: bool,
+    pub hide_on_focus_loss: bool,
     pub theme: String,
     pub telemetry_interval_ms: u64,
     pub custom_theme: CustomThemeConfig,
@@ -294,6 +304,8 @@ impl Default for GeneralConfig {
             start_minimized: false,
             start_with_windows: false,
             show_tray_notice_on_close: true,
+            dock_bottom_right: true,
+            hide_on_focus_loss: false,
             theme: "dark".to_string(),
             telemetry_interval_ms: 1000,
             custom_theme: CustomThemeConfig::preset_dark_slate(),
@@ -520,6 +532,8 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.general.language = "en".to_string();
         cfg.general.telemetry_interval_ms = 100;
+        cfg.general.dock_bottom_right = false;
+        cfg.general.hide_on_focus_loss = true;
         cfg.general.custom_theme = CustomThemeConfig::preset_omen_crimson();
         cfg.battery.enabled = true;
         cfg.battery.stop_threshold_pct = 80;
@@ -541,6 +555,8 @@ mod tests {
 
         assert_eq!(loaded.general.language, "en");
         assert_eq!(loaded.general.telemetry_interval_ms, 100);
+        assert!(!loaded.general.dock_bottom_right);
+        assert!(loaded.general.hide_on_focus_loss);
         assert_eq!(
             loaded.general.custom_theme,
             CustomThemeConfig::preset_omen_crimson()
@@ -571,5 +587,16 @@ mod tests {
         assert!(CustomThemeConfig::decode_share_code("").is_err());
         assert!(CustomThemeConfig::decode_share_code("INVALID|D|000000").is_err());
         assert!(CustomThemeConfig::decode_share_code("OMVIX1|D|zzzzzz|000000|000000|000000|000000|ffffff|Bad").is_err());
+    }
+
+    #[test]
+    fn detects_legacy_bluish_dark_slate() {
+        let old = CustomThemeConfig::decode_share_code(
+            "OMVIX1|D|00b4d8|0f141b|0c1118|161d27|263140|e6edf3|Dark Slate",
+        )
+        .unwrap();
+        assert!(old.is_legacy_bluish_dark_slate());
+        assert!(!CustomThemeConfig::preset_dark_slate().is_legacy_bluish_dark_slate());
+        assert!(!CustomThemeConfig::preset_omen_crimson().is_legacy_bluish_dark_slate());
     }
 }
