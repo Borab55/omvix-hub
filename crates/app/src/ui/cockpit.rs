@@ -1,6 +1,6 @@
 use crate::theme::{
-    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, clickable_status_badge, compact_card, rgb,
-    section_title, status_badge, tile_button,
+    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, clickable_status_badge, compact_card,
+    pill_button, rgb, section_title, status_badge, tile_button,
 };
 use crate::ui::{Drawer, ExtraSubTab};
 use crate::worker::{SharedState, WorkerCommand};
@@ -79,6 +79,10 @@ pub fn render(
             {
                 actions.open_extra_subtab = Some(ExtraSubTab::Diagnostics);
             }
+
+            if st.thermal_guard_active {
+                status_badge(ui, "MAX GUARD", STATUS_ERR);
+            }
         });
     });
 
@@ -94,16 +98,15 @@ pub fn render(
             .cpu_usage_pct
             .map(|v| format!("{v:.0}%"))
             .unwrap_or_else(|| "—".into());
-        let cpu_t = st
-            .telemetry
-            .cpu_temp_c
-            .map(|v| format!("{v:.0}°C"))
-            .unwrap_or_else(|| "—".into());
         let cpu_w = st
             .telemetry
             .cpu_power_w
             .map(|v| format!("{v:.0}W"))
             .unwrap_or_else(|| "—".into());
+        let cpu_line = match st.telemetry.cpu_temp_c {
+            Some(v) => format!("CPU {cpu_u} · {v:.0}°C · {cpu_w}"),
+            None => format!("CPU {cpu_u} · {cpu_w}"),
+        };
 
         let gpu_u = st
             .telemetry
@@ -122,11 +125,7 @@ pub fn render(
             .unwrap_or_else(|| "—".into());
 
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("CPU {cpu_u} · {cpu_t} · {cpu_w}"))
-                    .size(12.5)
-                    .strong(),
-            );
+            ui.label(RichText::new(cpu_line).size(12.5).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!("GPU {gpu_u} · {gpu_t} · {gpu_w}"))
@@ -147,6 +146,12 @@ pub fn render(
                 .collect::<Vec<_>>()
                 .join(" · ")
                 + " RPM"
+        };
+        let fans_and_chassis = match st.telemetry.chassis_temp_c {
+            Some(ch) if st.telemetry.cpu_temp_c.is_none() => {
+                format!("{fans} · {} {ch:.0}°C", i18n.t("cockpit.chassis_short"))
+            }
+            _ => fans,
         };
         let ram = match (st.telemetry.ram_used_gb, st.telemetry.ram_total_gb) {
             (Some(u), Some(tot)) => format!("RAM {u:.1}/{tot:.0}G"),
@@ -170,7 +175,7 @@ pub fn render(
             .unwrap_or_else(|| "Bat —".into());
 
         ui.horizontal(|ui| {
-            ui.weak(RichText::new(fans).size(11.0));
+            ui.weak(RichText::new(fans_and_chassis).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak(RichText::new(format!("{ram}  |  {bat}")).size(11.0));
             });
@@ -454,7 +459,7 @@ pub fn render(
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let travel_active = cfg.battery.one_time_full_charge;
                         let t_label = i18n.t("cockpit.travel_short");
-                        if ui.selectable_label(travel_active, t_label).clicked() {
+                        if pill_button(ui, &t_label, travel_active, t).clicked() {
                             cfg.battery.one_time_full_charge = !cfg.battery.one_time_full_charge;
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -489,16 +494,12 @@ pub fn render(
                 if !cfg.battery.custom_profiles.is_empty() {
                     ui.add_space(3.0);
                     ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
                         for custom in cfg.battery.custom_profiles.clone() {
                             let selected =
                                 cfg.battery.active_profile_id.as_deref() == Some(&custom.id);
-                            if ui
-                                .selectable_label(
-                                    selected,
-                                    format!("{} ({}%)", custom.name, custom.stop_threshold_pct),
-                                )
-                                .clicked()
-                            {
+                            let label = format!("{} ({}%)", custom.name, custom.stop_threshold_pct);
+                            if pill_button(ui, &label, selected, t).clicked() {
                                 apply_battery_profile(cfg, &custom);
                                 on_save();
                                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));

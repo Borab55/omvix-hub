@@ -1,4 +1,6 @@
-use crate::theme::{STATUS_OK, STATUS_WARN, accent_color, card_frame, section_title, status_badge};
+use crate::theme::{
+    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, card_frame, section_title, status_badge,
+};
 use crate::worker::{MetricStats, SharedState, WorkerCommand};
 use egui::{Color32, RichText, Ui};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
@@ -27,6 +29,13 @@ pub fn render(
 
     ui.heading(i18n.t("monitor.title"));
     ui.add_space(6.0);
+
+    if st.thermal_guard_active {
+        card_frame(t).show(ui, |ui| {
+            status_badge(ui, &i18n.t("monitor.thermal_guard_active"), STATUS_ERR);
+        });
+        ui.add_space(6.0);
+    }
 
     // Refresh Rate + Pause/Resume + Reset Stats bar
     card_frame(t).show(ui, |ui| {
@@ -73,11 +82,11 @@ pub fn render(
                 .cpu_usage_pct
                 .map(|v| format!("{v:.1}%"))
                 .unwrap_or_else(|| "—".into());
-            let temp = st
-                .telemetry
-                .cpu_temp_c
-                .map(|v| format!("{v:.0} °C"))
-                .unwrap_or_else(|| "—".into());
+            let temp = match (st.telemetry.cpu_temp_c, st.telemetry.chassis_temp_c) {
+                (Some(c), _) => format!("{c:.0} °C"),
+                (None, Some(ch)) => format!("{}: {ch:.0} °C", i18n.t("cockpit.chassis_short")),
+                (None, None) => "—".into(),
+            };
             let clk = st
                 .telemetry
                 .cpu_clock_mhz
@@ -99,6 +108,12 @@ pub fn render(
                 fmt_stats(&st.cpu_temp_stats, "°C"),
                 fmt_stats(&st.cpu_power_stats, "W"),
             ));
+            if st.telemetry.cpu_temp_c.is_none() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak(RichText::new(i18n.t("monitor.cpu_temp_pawnio_hint")).size(11.0));
+                    ui.hyperlink_to("pawnio.eu", "https://pawnio.eu");
+                });
+            }
         });
 
         // Card 2: GPU
@@ -263,6 +278,11 @@ pub fn render(
             .iter()
             .map(|&(x, y)| [x, y as f64])
             .collect();
+        let chassis_pts: PlotPoints<'_> = st
+            .chassis_temp_history
+            .iter()
+            .map(|&(x, y)| [x, y as f64])
+            .collect();
         let gpu_pts: PlotPoints<'_> = st
             .gpu_temp_history
             .iter()
@@ -276,13 +296,26 @@ pub fn render(
             .include_y(100.0)
             .allow_zoom(false)
             .allow_drag(false)
+            .allow_scroll(false)
+            .allow_boxed_zoom(false)
+            .allow_double_click_reset(false)
             .show(ui, |plot_ui| {
-                plot_ui.line(
-                    Line::new(cpu_pts)
-                        .name("CPU °C")
-                        .color(Color32::from_rgb(245, 158, 11))
-                        .width(2.0_f32),
-                );
+                if !st.cpu_temp_history.is_empty() {
+                    plot_ui.line(
+                        Line::new(cpu_pts)
+                            .name("CPU °C")
+                            .color(Color32::from_rgb(245, 158, 11))
+                            .width(2.0_f32),
+                    );
+                }
+                if !st.chassis_temp_history.is_empty() {
+                    plot_ui.line(
+                        Line::new(chassis_pts)
+                            .name("Chassis °C")
+                            .color(Color32::from_rgb(160, 165, 175))
+                            .width(1.6_f32),
+                    );
+                }
                 plot_ui.line(
                     Line::new(gpu_pts)
                         .name("GPU °C")
@@ -320,6 +353,9 @@ pub fn render(
             .include_y(100.0)
             .allow_zoom(false)
             .allow_drag(false)
+            .allow_scroll(false)
+            .allow_boxed_zoom(false)
+            .allow_double_click_reset(false)
             .show(ui, |plot_ui| {
                 plot_ui.line(
                     Line::new(cpu_pts)
@@ -370,6 +406,9 @@ pub fn render(
             .include_y(60.0)
             .allow_zoom(false)
             .allow_drag(false)
+            .allow_scroll(false)
+            .allow_boxed_zoom(false)
+            .allow_double_click_reset(false)
             .show(ui, |plot_ui| {
                 plot_ui.line(
                     Line::new(cpu_pwr)

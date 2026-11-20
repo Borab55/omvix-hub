@@ -443,12 +443,13 @@ fn print_telemetry(t: &TelemetrySnapshot) {
             .map(|v| format!("{v:.1} W (EMI)"))
             .unwrap_or_else(|| "N/A".to_string())
     );
-    println!(
-        "CPU Temp    : {}",
-        t.cpu_temp_c
-            .map(|v| format!("{v:.1} °C"))
-            .unwrap_or_else(|| "N/A (requires Admin/WMI)".to_string())
-    );
+    let cpu_temp_str = match (t.cpu_temp_c, t.chassis_temp_c) {
+        (Some(cpu), Some(ch)) => format!("{cpu:.1} °C (EC Chassis: {ch:.0} °C)"),
+        (Some(cpu), None) => format!("{cpu:.1} °C"),
+        (None, Some(ch)) => format!("N/A (EC Chassis: {ch:.0} °C)"),
+        (None, None) => "N/A".to_string(),
+    };
+    println!("CPU Temp    : {cpu_temp_str}");
     println!(
         "GPU         : {}",
         t.gpu_name.as_deref().unwrap_or("N/A")

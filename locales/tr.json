@@ -55,6 +55,7 @@
   "cockpit.boost_off": "Kapalı",
   "cockpit.boost_on": "Etkin",
   "cockpit.boost_aggressive": "Agresif",
+  "cockpit.chassis_short": "Kasa",
 
   "monitor.title": "Sistem İzleme",
   "monitor.refresh_rate": "Yenileme Hızı",
@@ -66,6 +67,9 @@
   "monitor.graph_usage": "Kullanım Grafiği (%)",
   "monitor.graph_power": "Güç Tüketimi Grafiği (W)",
   "monitor.cpu_power": "Paket Gücü (EMI)",
+  "monitor.chassis_temp": "Kasa / IR (EC 0x23)",
+  "monitor.cpu_temp_pawnio_hint": "Win11 HVCI altında gerçek CPU çekirdek °C için imzalı PawnIO + IntelMSR.bin gerekir (OGH gerekmez). EC 0x23 kasa sıcaklığını gösterir.",
+  "monitor.thermal_guard_active": "TERMAL KORUMA: Acil Maks Fan Aktif",
   "monitor.session_minmax": "Min / Maks / Ort",
   "monitor.gpu_vram": "VRAM Kullanımı",
   "monitor.gpu_clocks": "Çekirdek / Bellek Hızı",
@@ -109,6 +113,7 @@
   "fan.reset_curve": "Eğriyi Sıfırla",
   "fan.curve_temp": "Sıcaklık (°C)",
   "fan.curve_speed": "Hız (%)",
+  "fan.no_cpu_sensor_notice": "Doğrudan CPU çekirdek sensörü yok (PawnIO kurulu değil): eğri güvenle GPU + korumalı Kasa/Güç tahmini + 90°C/0-RPM Acil Koruması ile çalışır.",
 
   "battery.charge_limit": "Şarj Sınırlama",
   "battery.presets_title": "Hazır Şarj Profilleri",

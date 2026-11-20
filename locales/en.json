@@ -55,6 +55,7 @@
   "cockpit.boost_off": "Off",
   "cockpit.boost_on": "Enabled",
   "cockpit.boost_aggressive": "Aggressive",
+  "cockpit.chassis_short": "Sys",
 
   "monitor.title": "System Monitor",
   "monitor.refresh_rate": "Refresh Rate",
@@ -66,6 +67,9 @@
   "monitor.graph_usage": "Utilization History (%)",
   "monitor.graph_power": "Power Draw History (W)",
   "monitor.cpu_power": "Package Power (EMI)",
+  "monitor.chassis_temp": "Chassis / IR (EC 0x23)",
+  "monitor.cpu_temp_pawnio_hint": "Exact CPU die °C under Win11 HVCI requires signed PawnIO + IntelMSR.bin (no OGH needed). EC 0x23 shows chassis temp.",
+  "monitor.thermal_guard_active": "THERMAL GUARD: Emergency Max Fan Active",
   "monitor.session_minmax": "Min / Max / Avg",
   "monitor.gpu_vram": "VRAM Usage",
   "monitor.gpu_clocks": "Core / Mem Clocks",
@@ -109,6 +113,7 @@
   "fan.reset_curve": "Reset Curve",
   "fan.curve_temp": "Temp (°C)",
   "fan.curve_speed": "Speed (%)",
+  "fan.no_cpu_sensor_notice": "No direct CPU die sensor (PawnIO not installed): curve safely uses GPU + conservative Chassis/Power estimate + 90°C/0-RPM Emergency Guard.",
 
   "battery.charge_limit": "Charge Limiting",
   "battery.presets_title": "Quick Charge Presets",

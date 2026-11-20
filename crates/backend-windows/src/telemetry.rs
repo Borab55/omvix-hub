@@ -1,4 +1,5 @@
 use crate::emi::CpuEmiReader;
+use crate::pawnio::PawnIoCpuTempReader;
 use crate::wmi_bios::{HpWmiBios, OutputSize};
 use crate::wmi_com::{WmiConnection, get_u32};
 use chrono::Utc;
@@ -21,6 +22,7 @@ struct TelemetryState {
     nvml: Option<Nvml>,
     nvml_init_attempted: bool,
     emi: Option<CpuEmiReader>,
+    pawnio: Option<PawnIoCpuTempReader>,
     first_sample_done: bool,
     last_fast_refresh: Instant,
     last_disk_list_refresh: Instant,
@@ -28,7 +30,7 @@ struct TelemetryState {
     fan_count: Option<usize>,
     fan_max_rpms: Vec<u32>,
     cached_fan_rpms: Vec<u32>,
-    cached_cpu_temp_c: Option<f32>,
+    cached_chassis_temp_c: Option<f32>,
     cached_battery_rate_w: Option<f32>,
     cached_battery_voltage_v: Option<f32>,
     cached_battery_remaining_mwh: Option<u32>,
@@ -63,6 +65,7 @@ impl WindowsTelemetryBackend {
             DiskRefreshKind::nothing().with_io_usage(),
         );
         let emi = CpuEmiReader::open();
+        let pawnio = PawnIoCpuTempReader::open();
 
         Self {
             state: Mutex::new(TelemetryState {
@@ -72,6 +75,7 @@ impl WindowsTelemetryBackend {
                 nvml: None,
                 nvml_init_attempted: false,
                 emi,
+                pawnio,
                 first_sample_done: false,
                 last_fast_refresh: Instant::now(),
                 last_disk_list_refresh: Instant::now(),
@@ -79,7 +83,7 @@ impl WindowsTelemetryBackend {
                 fan_count: None,
                 fan_max_rpms: Vec::new(),
                 cached_fan_rpms: Vec::new(),
-                cached_cpu_temp_c: None,
+                cached_chassis_temp_c: None,
                 cached_battery_rate_w: None,
                 cached_battery_voltage_v: None,
                 cached_battery_remaining_mwh: None,
@@ -125,32 +129,35 @@ impl WindowsTelemetryBackend {
         let mut fan_count = cached_fan_count;
         let mut fan_max_rpms = cached_fan_max_rpms.to_vec();
         let mut fan_rpms = Vec::new();
-        let mut cpu_temp_c = None;
+        let mut chassis_temp_c = None;
 
         if let Ok((fc, max_rpms, rpms, temp)) = HpWmiBios::with_cached(|bios| {
-            let count = match cached_fan_count {
-                Some(n) => n,
-                None => bios
-                    .execute(0x20008, 0x10, &[0u8; 4], OutputSize::Size4)
-                    .ok()
-                    .filter(|r| r.return_code == 0 && !r.data.is_empty())
-                    .map(|r| (r.data[0] as usize).clamp(0, 4))
-                    .unwrap_or(2),
-            };
-
-            let resolved_max = if !cached_fan_max_rpms.is_empty() || count == 0 {
-                cached_fan_max_rpms.to_vec()
+            // Read fan count & table from 0x2F (NOT 0x10, because 0x10 arms HP firmware's
+            // 120-second user-defined fan timer on Victus S / OMEN boards!).
+            let (count, resolved_max) = if let (Some(c), false) =
+                (cached_fan_count, cached_fan_max_rpms.is_empty())
+            {
+                (c, cached_fan_max_rpms.to_vec())
             } else if let Ok(tbl) = bios.execute(0x20008, 0x2F, &[0u8; 4], OutputSize::Size128) {
                 if tbl.return_code == 0 {
-                    HpWmiBios::parse_max_fan_levels_from_table(&tbl.data)
+                    let parsed_count = tbl
+                        .data
+                        .first()
+                        .copied()
+                        .map(|b| (b as usize).clamp(1, 4))
+                        .unwrap_or(2);
+                    let max_rpms: Vec<u32> = HpWmiBios::parse_max_fan_levels_from_table(&tbl.data)
                         .into_iter()
                         .map(|lvl| u32::from(lvl) * 100)
-                        .collect()
+                        .collect();
+                    (parsed_count, max_rpms)
                 } else {
-                    vec![u32::from(DEFAULT_MAX_FAN_LEVEL) * 100; count]
+                    let c = cached_fan_count.unwrap_or(2);
+                    (c, vec![u32::from(DEFAULT_MAX_FAN_LEVEL) * 100; c])
                 }
             } else {
-                vec![u32::from(DEFAULT_MAX_FAN_LEVEL) * 100; count]
+                let c = cached_fan_count.unwrap_or(2);
+                (c, vec![u32::from(DEFAULT_MAX_FAN_LEVEL) * 100; c])
             };
 
             let mut current_rpms = Vec::new();
@@ -164,19 +171,20 @@ impl WindowsTelemetryBackend {
                 }
             }
 
-            let temp_c = bios
+            // EC 0x23 reports the board Chassis / IR thermal sensor, NOT CPU die temp.
+            let ch_temp = bios
                 .execute(0x20008, 0x23, &[0u8; 4], OutputSize::Size4)
                 .ok()
                 .filter(|r| r.return_code == 0 && !r.data.is_empty())
                 .map(|r| r.data[0] as f32)
                 .filter(|t| (15.0..=115.0).contains(t));
 
-            Ok((count, resolved_max, current_rpms, temp_c))
+            Ok((count, resolved_max, current_rpms, ch_temp))
         }) {
             fan_count = Some(fc);
             fan_max_rpms = max_rpms;
             fan_rpms = rpms;
-            cpu_temp_c = temp;
+            chassis_temp_c = temp;
         }
 
         let mut battery_rate_w = None;
@@ -205,23 +213,6 @@ impl WindowsTelemetryBackend {
                 }
             }
 
-            if cpu_temp_c.is_none() {
-                if let Ok(rows) =
-                    wmi.query("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature")
-                {
-                    let mut max_temp: Option<f32> = None;
-                    for row in rows {
-                        if let Some(tenths_kelvin) = get_u32(&row, "CurrentTemperature") {
-                            let celsius = (tenths_kelvin as f32 / 10.0) - 273.15;
-                            if (15.0..=115.0).contains(&celsius) {
-                                max_temp = Some(max_temp.map_or(celsius, |m| m.max(celsius)));
-                            }
-                        }
-                    }
-                    cpu_temp_c = max_temp;
-                }
-            }
-
             Ok(())
         });
 
@@ -229,7 +220,7 @@ impl WindowsTelemetryBackend {
             fan_count,
             fan_max_rpms,
             fan_rpms,
-            cpu_temp_c,
+            chassis_temp_c,
             battery_rate_w,
             battery_voltage_v,
             battery_remaining_mwh,
@@ -241,6 +232,7 @@ impl TelemetryBackend for WindowsTelemetryBackend {
     fn read_telemetry(&self) -> Result<TelemetrySnapshot> {
         let (
             cpu_usage_pct,
+            cpu_temp_c,
             cpu_clock_mhz,
             cpu_power_w,
             ram_used_gb,
@@ -264,7 +256,7 @@ impl TelemetryBackend for WindowsTelemetryBackend {
             cached_fc,
             cached_max_rpms,
             cached_rpms,
-            cached_temp,
+            cached_chassis_temp,
             cached_bat_rate,
             cached_bat_v,
             cached_bat_rem,
@@ -308,6 +300,7 @@ impl TelemetryBackend for WindowsTelemetryBackend {
             let ram_used_gb = Some(guard.sys.used_memory() as f32 / (1024.0 * 1024.0 * 1024.0));
 
             let cpu_power_w = guard.emi.as_mut().and_then(|e| e.sample_cpu_power_w());
+            let cpu_temp_c = guard.pawnio.as_mut().and_then(|p| p.read_package_temp_c());
 
             let mut total_rx = 0u64;
             let mut total_tx = 0u64;
@@ -387,6 +380,7 @@ impl TelemetryBackend for WindowsTelemetryBackend {
 
             (
                 cpu_usage_pct,
+                cpu_temp_c,
                 cpu_clock_mhz,
                 cpu_power_w,
                 ram_used_gb,
@@ -410,7 +404,7 @@ impl TelemetryBackend for WindowsTelemetryBackend {
                 guard.fan_count,
                 guard.fan_max_rpms.clone(),
                 guard.cached_fan_rpms.clone(),
-                guard.cached_cpu_temp_c,
+                guard.cached_chassis_temp_c,
                 guard.cached_battery_rate_w,
                 guard.cached_battery_voltage_v,
                 guard.cached_battery_remaining_mwh,
@@ -422,12 +416,12 @@ impl TelemetryBackend for WindowsTelemetryBackend {
         let (
             fan_rpms,
             fan_max_rpms,
-            cpu_temp_c,
+            chassis_temp_c,
             battery_rate_w,
             battery_voltage_v,
             battery_remaining_mwh,
         ) = if need_ec_poll {
-            let (fc, max_rpms, rpms, temp_c, rate_w, volt_v, rem_mwh) =
+            let (fc, max_rpms, rpms, ch_temp_c, rate_w, volt_v, rem_mwh) =
                 Self::poll_ec_and_wmi_tier(cached_fc, &cached_max_rpms);
 
             if let Ok(mut guard) = self.state.lock() {
@@ -441,8 +435,8 @@ impl TelemetryBackend for WindowsTelemetryBackend {
                 if !rpms.is_empty() {
                     guard.cached_fan_rpms = rpms.clone();
                 }
-                if temp_c.is_some() {
-                    guard.cached_cpu_temp_c = temp_c;
+                if ch_temp_c.is_some() {
+                    guard.cached_chassis_temp_c = ch_temp_c;
                 }
                 if rate_w.is_some() {
                     guard.cached_battery_rate_w = rate_w;
@@ -462,7 +456,7 @@ impl TelemetryBackend for WindowsTelemetryBackend {
                 } else {
                     max_rpms
                 },
-                temp_c.or(cached_temp),
+                ch_temp_c.or(cached_chassis_temp),
                 rate_w.or(cached_bat_rate),
                 volt_v.or(cached_bat_v),
                 rem_mwh.or(cached_bat_rem),
@@ -471,7 +465,7 @@ impl TelemetryBackend for WindowsTelemetryBackend {
             (
                 cached_rpms,
                 cached_max_rpms,
-                cached_temp,
+                cached_chassis_temp,
                 cached_bat_rate,
                 cached_bat_v,
                 cached_bat_rem,
@@ -495,6 +489,7 @@ impl TelemetryBackend for WindowsTelemetryBackend {
         Ok(TelemetrySnapshot {
             timestamp: Some(Utc::now()),
             cpu_temp_c,
+            chassis_temp_c,
             cpu_usage_pct,
             cpu_clock_mhz,
             cpu_power_w,

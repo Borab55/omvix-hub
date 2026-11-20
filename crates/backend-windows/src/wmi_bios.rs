@@ -252,14 +252,14 @@ impl HpWmiBios {
     pub fn probe_all_readonly(&self) -> Vec<WmiProbeEntry> {
         let probes: &[(&str, u32, u32, OutputSize)] = &[
             ("SystemDesignData", 0x20008, 0x28, OutputSize::Size128),
-            ("FanCount", 0x20008, 0x10, OutputSize::Size4),
+            ("FanTypeGet", 0x20008, 0x2C, OutputSize::Size128),
             ("FanLevelGet", 0x20008, 0x2D, OutputSize::Size128),
             ("FanTableGet", 0x20008, 0x2F, OutputSize::Size128),
             ("FanMaxGet", 0x20008, 0x26, OutputSize::Size4),
             ("GpuModeGet_New", 0x20008, 0x52, OutputSize::Size4),
             ("GpuModeGet_Legacy", 0x20008, 0x21, OutputSize::Size4),
             ("GpuPowerGet", 0x20008, 0x22, OutputSize::Size4),
-            ("ThermalTempGet_23", 0x20008, 0x23, OutputSize::Size4),
+            ("ChassisTempGet_23", 0x20008, 0x23, OutputSize::Size4),
             ("ThermalTempGet_01", 0x20008, 0x01, OutputSize::Size4),
             ("KeyboardType", 0x20009, 0x01, OutputSize::Size4),
             ("KeyboardColorTable", 0x20009, 0x02, OutputSize::Size128),

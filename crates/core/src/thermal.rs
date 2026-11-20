@@ -4,6 +4,9 @@ use crate::models::{PerformanceMode, ThermalProfileScheme};
 /// Default maximum WMI fan level step when firmware `FanMaxGet` (0x26) is unavailable.
 pub const DEFAULT_MAX_FAN_LEVEL: u8 = 55;
 
+/// Minimum safe non-zero WMI fan level (~1800 RPM) so manual/curve mode never stalls fans at 0 RPM.
+pub const MIN_SAFE_FAN_LEVEL: u8 = 18;
+
 /// Maps an abstract `PerformanceMode` and board `ThermalProfileScheme` to the HP BIOS WMI byte.
 pub fn thermal_profile_byte(scheme: ThermalProfileScheme, mode: PerformanceMode) -> u8 {
     match scheme {
@@ -27,6 +30,162 @@ pub fn fan_percent_to_wmi_level(speed_pct: u8, max_level: u8) -> u8 {
     let pct = speed_pct.clamp(0, 100) as f32;
     let max_l = max_level.max(1) as f32;
     ((pct / 100.0) * max_l).round().clamp(0.0, max_l) as u8
+}
+
+/// Converts a 0..=100 percentage into a safe non-zero WMI fan level (`MIN_SAFE_FAN_LEVEL..=max_level`).
+///
+/// HP Victus/OMEN firmware treats level `0x00` in `0x2E` as **fan OFF (0 RPM)** rather than BIOS Auto.
+pub fn safe_manual_wmi_level(speed_pct: u8, max_level: u8) -> u8 {
+    let max_l = max_level.max(1);
+    fan_percent_to_wmi_level(speed_pct, max_l).max(MIN_SAFE_FAN_LEVEL.min(max_l))
+}
+
+/// Maps HP EC chassis / IR sensor (`0x23`) readings to conservative CPU-curve thermal demand (°C).
+pub fn chassis_temp_to_thermal_demand_c(chassis_c: f32) -> f32 {
+    if chassis_c <= 38.0 {
+        52.0
+    } else if chassis_c <= 46.0 {
+        52.0 + ((chassis_c - 38.0) / 8.0) * (72.0 - 52.0)
+    } else if chassis_c <= 50.0 {
+        72.0 + ((chassis_c - 46.0) / 4.0) * (84.0 - 72.0)
+    } else if chassis_c < 54.0 {
+        84.0 + ((chassis_c - 50.0) / 4.0) * (94.0 - 84.0)
+    } else {
+        96.0
+    }
+}
+
+/// Computes the effective driving temperature (°C) for custom fan curves.
+///
+/// When direct CPU die telemetry (`cpu_temp_c`) is unavailable (e.g. PawnIO not installed under HVCI),
+/// conservatively folds in GPU temp, mapped EC chassis demand (`0x23`), and CPU package power floor.
+pub fn effective_fan_curve_temp_c(
+    cpu_temp_c: Option<f32>,
+    gpu_temp_c: Option<f32>,
+    chassis_temp_c: Option<f32>,
+    cpu_power_w: Option<f32>,
+) -> Option<f32> {
+    let mut temp = match (cpu_temp_c, gpu_temp_c) {
+        (Some(c), Some(g)) => Some(c.max(g)),
+        (Some(c), None) => Some(c),
+        (None, Some(g)) => Some(g),
+        (None, None) => None,
+    };
+
+    if cpu_temp_c.is_none() {
+        if let Some(ch) = chassis_temp_c {
+            let mapped = chassis_temp_to_thermal_demand_c(ch);
+            temp = Some(temp.map_or(mapped, |t| t.max(mapped)));
+        }
+        let power_floor = cpu_power_w.and_then(|w| {
+            if w >= 85.0 {
+                Some(92.0)
+            } else if w >= 65.0 {
+                Some(84.0)
+            } else if w >= 45.0 {
+                Some(72.0)
+            } else if w >= 30.0 {
+                Some(62.0)
+            } else {
+                None
+            }
+        });
+        if let Some(pf) = power_floor {
+            temp = Some(temp.map_or(pf, |t| t.max(pf)));
+        }
+    } else if let Some(ch) = chassis_temp_c {
+        if ch >= 50.0 {
+            let mapped = chassis_temp_to_thermal_demand_c(ch);
+            temp = Some(temp.map_or(mapped, |t| t.max(mapped)));
+        }
+    }
+
+    temp
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThermalGuardDecision {
+    NoChange,
+    EngageEmergencyMax(String),
+    ReleaseEmergency,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ThermalSafetyGuard {
+    active: bool,
+    stalled_polls: u8,
+    hold_ticks: u8,
+}
+
+impl ThermalSafetyGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn evaluate(
+        &mut self,
+        cpu_c: Option<f32>,
+        gpu_c: Option<f32>,
+        chassis_c: Option<f32>,
+        cpu_power_w: Option<f32>,
+        fan_rpms: &[u32],
+    ) -> ThermalGuardDecision {
+        let warm_for_stall = cpu_c.is_some_and(|t| t >= 70.0)
+            || gpu_c.is_some_and(|t| t >= 65.0)
+            || chassis_c.is_some_and(|t| t >= 46.0)
+            || cpu_power_w.is_some_and(|w| w >= 40.0);
+        let fans_stalled = !fan_rpms.is_empty() && fan_rpms.iter().all(|&r| r == 0);
+
+        self.stalled_polls = if warm_for_stall && fans_stalled {
+            self.stalled_polls.saturating_add(1)
+        } else {
+            0
+        };
+
+        let trigger_reason = if cpu_c.is_some_and(|t| t >= 90.0) {
+            Some("CPU >= 90°C".to_string())
+        } else if gpu_c.is_some_and(|t| t >= 86.0) {
+            Some("GPU >= 86°C".to_string())
+        } else if chassis_c.is_some_and(|t| t >= 54.0) {
+            Some("Chassis >= 54°C".to_string())
+        } else if self.stalled_polls >= 2 {
+            Some("Fans stalled at 0 RPM under load".to_string())
+        } else {
+            None
+        };
+
+        if let Some(reason) = trigger_reason {
+            self.hold_ticks = 0;
+            if !self.active {
+                self.active = true;
+                return ThermalGuardDecision::EngageEmergencyMax(reason);
+            }
+            return ThermalGuardDecision::NoChange;
+        }
+
+        if self.active {
+            let cooled = cpu_c.is_none_or(|t| t <= 80.0)
+                && gpu_c.is_none_or(|t| t <= 78.0)
+                && chassis_c.is_none_or(|t| t <= 48.0)
+                && !fans_stalled;
+            if cooled {
+                self.hold_ticks = self.hold_ticks.saturating_add(1);
+                if self.hold_ticks >= 5 {
+                    self.active = false;
+                    self.hold_ticks = 0;
+                    return ThermalGuardDecision::ReleaseEmergency;
+                }
+            } else {
+                self.hold_ticks = 0;
+            }
+        }
+
+        ThermalGuardDecision::NoChange
+    }
 }
 
 /// Determines the most likely `ThermalProfileScheme` from board ID and model/family strings.
@@ -105,6 +264,71 @@ mod tests {
         assert_eq!(
             resolve_scheme_from_identity("ZZZZ", "HP OMEN 16", "HP OMEN"),
             ThermalProfileScheme::OmenV1
+        );
+    }
+
+    #[test]
+    fn safe_manual_level_enforces_non_zero_floor() {
+        assert_eq!(safe_manual_wmi_level(0, 58), MIN_SAFE_FAN_LEVEL);
+        assert_eq!(safe_manual_wmi_level(10, 58), MIN_SAFE_FAN_LEVEL);
+        assert_eq!(safe_manual_wmi_level(100, 58), 58);
+        assert_eq!(safe_manual_wmi_level(50, 58), 29);
+        assert_eq!(safe_manual_wmi_level(0, 12), 12);
+    }
+
+    #[test]
+    fn effective_curve_temp_bridges_chassis_and_power_when_cpu_missing() {
+        let low = effective_fan_curve_temp_c(None, Some(48.0), Some(42.0), Some(18.0));
+        assert!((low.unwrap() - 62.0).abs() < 0.01);
+
+        let high_power = effective_fan_curve_temp_c(None, Some(54.0), Some(46.0), Some(90.0));
+        assert_eq!(high_power, Some(92.0));
+
+        let with_die = effective_fan_curve_temp_c(Some(68.0), Some(54.0), Some(46.0), Some(34.0));
+        assert_eq!(with_die, Some(68.0));
+    }
+
+    #[test]
+    fn thermal_safety_guard_engages_and_releases_with_hysteresis() {
+        let mut g = ThermalSafetyGuard::new();
+        assert_eq!(
+            g.evaluate(Some(91.0), Some(60.0), Some(47.0), Some(55.0), &[3200, 3200]),
+            ThermalGuardDecision::EngageEmergencyMax("CPU >= 90°C".to_string())
+        );
+        assert!(g.is_active());
+
+        // Still warm -> no release
+        for _ in 0..6 {
+            assert_eq!(
+                g.evaluate(Some(83.0), Some(60.0), Some(45.0), Some(30.0), &[5800, 5800]),
+                ThermalGuardDecision::NoChange
+            );
+        }
+        assert!(g.is_active());
+
+        // Cool below 80C -> releases after 5 consecutive cool ticks
+        for _ in 0..4 {
+            assert_eq!(
+                g.evaluate(Some(72.0), Some(55.0), Some(43.0), Some(20.0), &[5800, 5800]),
+                ThermalGuardDecision::NoChange
+            );
+        }
+        assert_eq!(
+            g.evaluate(Some(72.0), Some(55.0), Some(43.0), Some(20.0), &[5800, 5800]),
+            ThermalGuardDecision::ReleaseEmergency
+        );
+        assert!(!g.is_active());
+
+        // Stalled fans (0 RPM) under load engages on 2nd consecutive poll
+        assert_eq!(
+            g.evaluate(None, Some(54.0), Some(46.0), Some(45.0), &[0, 0]),
+            ThermalGuardDecision::NoChange
+        );
+        assert_eq!(
+            g.evaluate(None, Some(54.0), Some(46.0), Some(45.0), &[0, 0]),
+            ThermalGuardDecision::EngageEmergencyMax(
+                "Fans stalled at 0 RPM under load".to_string()
+            )
         );
     }
 }
