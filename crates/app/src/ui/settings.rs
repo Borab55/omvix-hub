@@ -17,6 +17,7 @@ pub struct SettingsThemeDraft {
 pub struct SettingsActions {
     pub language_changed: bool,
     pub theme_changed: bool,
+    pub dock_changed: bool,
 }
 
 pub fn render(
@@ -30,6 +31,7 @@ pub fn render(
     let mut actions = SettingsActions {
         language_changed: false,
         theme_changed: false,
+        dock_changed: false,
     };
     let theme_snapshot = cfg.general.custom_theme.clone();
 
@@ -92,6 +94,25 @@ pub fn render(
             .checkbox(
                 &mut cfg.general.minimize_to_tray_on_close,
                 i18n.t("common.minimize_to_tray_on_close"),
+            )
+            .changed()
+        {
+            on_save();
+        }
+        if ui
+            .checkbox(
+                &mut cfg.general.dock_bottom_right,
+                i18n.t("settings.dock_bottom_right"),
+            )
+            .changed()
+        {
+            on_save();
+            actions.dock_changed = true;
+        }
+        if ui
+            .checkbox(
+                &mut cfg.general.hide_on_focus_loss,
+                i18n.t("settings.hide_on_focus_loss"),
             )
             .changed()
         {

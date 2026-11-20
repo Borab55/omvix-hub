@@ -1,5 +1,5 @@
 use crate::theme::{STATUS_OK, STATUS_WARN, accent_color, card_frame, section_title, status_badge};
-use crate::ui::home::{apply_battery_profile, is_profile_active};
+use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
 use omvix_core::{AppConfig, BatteryChargeMode, BatteryProfile, I18n};
