@@ -361,7 +361,7 @@ pub fn interactive_fan_curve(
         (MIN_TEMP + nx * TEMP_SPAN, ny * 100.0)
     };
 
-    // Draw safe 1800 RPM floor band (~31% on 5800 RPM Victus S table)
+    // Highlight sub-1800 RPM quiet zone (0 RPM allowed only when cool; auto-guarded under load)
     let floor_top_y = pct_to_y(31.0);
     let floor_rect = Rect::from_min_max(
         Pos2::new(plot_rect.left(), floor_top_y),
@@ -375,7 +375,7 @@ pub fn interactive_fan_curve(
     painter.text(
         Pos2::new(plot_rect.left() + 6.0, plot_rect.bottom() - 4.0),
         Align2::LEFT_BOTTOM,
-        "Safe floor (>=1800 RPM / Level 18)",
+        "<1800 RPM (0 RPM allowed when cool; auto-guarded)",
         FontId::proportional(10.0),
         Color32::from_rgba_unmultiplied(245, 158, 11, 175),
     );

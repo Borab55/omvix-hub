@@ -284,9 +284,42 @@ fn win32_drawer_anchor_pos(
     None
 }
 
+#[cfg(windows)]
+fn try_shell_elevate_self() -> std::result::Result<(), ()> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, PCWSTR};
+
+    let Ok(exe) = std::env::current_exe() else {
+        return Err(());
+    };
+    let verb = HSTRING::from("runas");
+    let file = HSTRING::from(exe.to_string_lossy().as_ref());
+    let params = HSTRING::from("--no-elevate");
+    let res = unsafe {
+        ShellExecuteW(
+            HWND::default(),
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if res.0 as isize > 32 {
+        Ok(())
+    } else {
+        tracing::warn!("ShellExecuteW(runas) declined or failed: {:?}", res.0);
+        Err(())
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let smoke_test = args.iter().any(|a| a == "--smoke-test");
+    #[cfg(windows)]
+    let no_elevate = args.iter().any(|a| a == "--no-elevate");
 
     let cfg_path = AppConfig::default_config_path();
     let mut cfg = AppConfig::load_from_path(&cfg_path).unwrap_or_default();
@@ -314,15 +347,36 @@ fn main() {
     }
 
     #[cfg(windows)]
-    let single_instance = match SingleInstanceGuard::acquire() {
-        Ok(guard) => Some(guard),
-        Err(()) => {
-            tracing::info!("Another Omvix Hub instance is already running; focusing existing window");
-            restore_existing_instance_window();
-            if let Some(h) = &log_handle {
-                h.flush();
+    let single_instance = {
+        let mut guard = match SingleInstanceGuard::acquire() {
+            Ok(g) => g,
+            Err(()) => {
+                tracing::info!(
+                    "Another Omvix Hub instance is already running; focusing existing window"
+                );
+                restore_existing_instance_window();
+                if let Some(h) = &log_handle {
+                    h.flush();
+                }
+                return;
             }
-            return;
+        };
+
+        if !no_elevate && !omvix_windows::system_info::is_process_elevated() {
+            guard.release();
+            if try_shell_elevate_self().is_ok() {
+                tracing::info!("Launched elevated Omvix Hub instance; exiting non-admin launcher");
+                if let Some(h) = &log_handle {
+                    h.flush();
+                }
+                return;
+            }
+            tracing::info!(
+                "UAC elevation declined on startup; continuing in non-admin telemetry mode"
+            );
+            SingleInstanceGuard::acquire().ok()
+        } else {
+            Some(guard)
         }
     };
 
@@ -522,9 +576,9 @@ impl OmvixApp {
                                 win32_set_visible(hwnd_raw, true);
                                 win32_post_close(hwnd_raw);
                                 wake_again.request_repaint();
-                                thread::sleep(Duration::from_millis(450));
+                                thread::sleep(Duration::from_millis(1500));
                             } else {
-                                thread::sleep(Duration::from_millis(450));
+                                thread::sleep(Duration::from_millis(1500));
                             }
                             tracing::warn!("Tray quit watchdog forcing clean process termination");
                             std::process::exit(0);
@@ -762,35 +816,15 @@ impl OmvixApp {
     fn restart_as_admin(&mut self, ctx: &egui::Context) {
         #[cfg(windows)]
         {
-            use windows::Win32::Foundation::HWND;
-            use windows::Win32::UI::Shell::ShellExecuteW;
-            use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-            use windows::core::{HSTRING, PCWSTR};
-
             // Release global hotkeys & single-instance mutex BEFORE spawning elevated process.
             self.stop_hotkeys();
             if let Some(guard) = &mut self.single_instance {
                 guard.release();
             }
 
-            if let Ok(exe) = std::env::current_exe() {
-                let verb = HSTRING::from("runas");
-                let file = HSTRING::from(exe.to_string_lossy().as_ref());
-                let res = unsafe {
-                    ShellExecuteW(
-                        HWND::default(),
-                        PCWSTR(verb.as_ptr()),
-                        PCWSTR(file.as_ptr()),
-                        PCWSTR::null(),
-                        PCWSTR::null(),
-                        SW_SHOWNORMAL,
-                    )
-                };
-                if res.0 as isize > 32 {
-                    self.begin_quit(ctx);
-                    return;
-                }
-                tracing::warn!("ShellExecuteW(runas) declined or failed: {:?}", res.0);
+            if try_shell_elevate_self().is_ok() {
+                self.begin_quit(ctx);
+                return;
             }
 
             // User cancelled UAC or launch failed -> restore mutex and hotkeys.

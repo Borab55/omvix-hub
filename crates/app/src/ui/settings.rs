@@ -132,21 +132,30 @@ pub fn render(
             on_save();
         }
 
-        if ui
-            .checkbox(
-                &mut cfg.general.start_with_windows,
-                i18n.t("common.start_with_windows"),
-            )
-            .changed()
-        {
-            #[cfg(windows)]
-            if let Ok(exe) = std::env::current_exe() {
-                if let Err(err) = autostart::set_autostart(cfg.general.start_with_windows, &exe) {
-                    tracing::warn!("Autostart update failed: {err}");
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .checkbox(
+                    &mut cfg.general.start_with_windows,
+                    i18n.t("common.start_with_windows"),
+                )
+                .changed()
+            {
+                #[cfg(windows)]
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Err(err) = autostart::set_autostart(cfg.general.start_with_windows, &exe)
+                    {
+                        tracing::warn!("Autostart update failed: {err}");
+                        draft.status_msg = Some((err.to_string(), true));
+                    }
                 }
+                on_save();
             }
-            on_save();
-        }
+            #[cfg(windows)]
+            if autostart::is_elevated_task_autostart_enabled() {
+                status_badge(ui, &i18n.t("settings.autostart_elevated_badge"), STATUS_OK);
+            }
+        });
+        ui.weak(RichText::new(i18n.t("settings.autostart_admin_note")).size(11.0));
     });
 
     ui.add_space(8.0);

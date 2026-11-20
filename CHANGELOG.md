@@ -3,6 +3,25 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.4.1] - 2026-11-21
+
+### Added & Improved
+- **Smart Thermal Guard (`< 1800 RPM` / `>= 90°C`) & Cool-Idle 0-RPM Support (`core/thermal.rs`, `thermal_fan.rs`, `worker.rs`, `charts.rs`):**
+  - Added `is_system_cool_for_zero_rpm` and `smart_manual_wmi_level`: when sensors are cool (`CPU < 65°C`, `GPU < 60°C`, `Chassis < 46°C`), manual and curve modes allow true `0%` (0 RPM) and `< 1800 RPM` quiet speeds instead of unconditionally clamping to `1800 RPM`. When warm or sensors are missing, `MIN_SAFE_FAN_LEVEL` (`18`) is enforced.
+  - Upgraded `ThermalSafetyGuard` to engage **Emergency Max Fan** immediately at `CPU >= 90°C`, `GPU >= 86°C`, or `Chassis >= 54°C`, or on 2 consecutive polls where any fan runs `< 1800 RPM` while under thermal load (`CPU >= 78°C`, `GPU >= 74°C`, `Chassis >= 48°C`, or `CPU Power >= 55W`), releasing cleanly only after 5 consecutive cool polls (`<= 78°C / 74°C / 46°C` and all fans `>= 1800 RPM`).
+  - Fixed downward curve hysteresis baseline bug in `worker.rs` so slow 1°C/step cooling properly tracks peak baseline and transitions downward smoothly once `hysteresis_c` is cleared.
+- **Clean Exit Safety Restores (`worker.rs`, `battery.rs`, `main.rs`):**
+  - On clean application **Quit** (`WorkerCommand::Shutdown`), restores `FanMode::Auto` whenever Manual/Curve/Max or Emergency Guard was active, avoiding a 120-second wait on fixed speeds or 0 RPM after exit.
+  - Wired `battery.hold_when_shutdown` into `battery.rs` UI and `worker.rs` shutdown: when unchecked (default), quitting Omvix Hub cleanly restores `0x2B Auto` normal charging (while Hiding to tray keeps the charge limit active).
+- **Auto-Admin Elevation & UAC-Free Startup (`autostart.rs`, `main.rs`, `settings.rs`):**
+  - Automatically requests UAC elevation (`ShellExecuteW("runas", "--no-elevate")`) on interactive non-admin launch, falling back gracefully to non-admin telemetry mode if declined (and never prompting during `--smoke-test`).
+  - Upgraded **Start with Windows** (`autostart.rs`) to register an elevated **Windows Task Scheduler** (`OmvixHub`, `RunLevel = HighestAvailable`, battery-safe, `PT0S` unlimited execution) when running as Admin — starting Omvix Hub as Administrator on login with **zero UAC popup** (and removing both scheduled task + legacy `HKCU\Run` when disabled).
+- **UI & Header Polish (`cockpit.rs`, `theme.rs`, `performance.rs`, `locales/en.json`, `locales/tr.json`):**
+  - Removed redundant green `Admin` badge when elevated; kept clickable amber `Admin ?` badge only when not elevated.
+  - Replaced plain `! N` conflict counter with a custom-painted vector **warning triangle badge** (`clickable_warning_badge`).
+  - Added live RAM usage percentage (`RAM X.X/16G (XX%)`) in the cockpit telemetry strip.
+  - Moved fan Keep-Alive & Hysteresis controls with inline explanations into a collapsible **Advanced Fan Settings** section in `Performance & Fans`.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added & Improved

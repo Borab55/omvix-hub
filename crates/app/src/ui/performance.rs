@@ -222,27 +222,8 @@ pub fn render(
             });
         }
 
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(&mut cfg.thermal_fan.keep_alive_enabled, i18n.t("fan.keep_alive"))
-                .changed()
-            {
-                on_save();
-                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-            }
-            ui.add_space(10.0);
-            ui.label(i18n.t("fan.hysteresis"));
-            if ui
-                .add(Slider::new(&mut cfg.thermal_fan.custom_curve.hysteresis_c, 1..=10).suffix("°C"))
-                .changed()
-            {
-                on_save();
-                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-            }
-        });
-
         if cfg.thermal_fan.fan_mode == FanMode::CustomCurve {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             if st.telemetry.cpu_temp_c.is_none() {
                 ui.colored_label(
                     crate::theme::STATUS_WARN,
@@ -315,5 +296,33 @@ pub fn render(
                 }
             });
         }
+
+        ui.add_space(6.0);
+        ui.collapsing(i18n.t("fan.advanced_settings"), |ui| {
+            if ui
+                .checkbox(&mut cfg.thermal_fan.keep_alive_enabled, i18n.t("fan.keep_alive"))
+                .changed()
+            {
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            }
+            ui.weak(RichText::new(i18n.t("fan.keep_alive_desc")).size(11.0));
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                ui.label(i18n.t("fan.hysteresis"));
+                if ui
+                    .add(
+                        Slider::new(&mut cfg.thermal_fan.custom_curve.hysteresis_c, 1..=10)
+                            .suffix("°C"),
+                    )
+                    .changed()
+                {
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                }
+            });
+            ui.weak(RichText::new(i18n.t("fan.hysteresis_desc")).size(11.0));
+        });
     });
 }
