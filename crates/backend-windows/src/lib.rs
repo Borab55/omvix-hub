@@ -1,4 +1,6 @@
 #[cfg(windows)]
+pub mod battery;
+#[cfg(windows)]
 mod system_info;
 #[cfg(windows)]
 pub mod telemetry;
@@ -15,6 +17,8 @@ use omvix_core::{DiagnosticReport, DiagnosticsBackend, Result};
 #[cfg(not(windows))]
 use omvix_core::OmvixError;
 
+#[cfg(windows)]
+pub use battery::WindowsBatteryBackend;
 #[cfg(windows)]
 pub use telemetry::WindowsTelemetryBackend;
 #[cfg(windows)]
