@@ -1,0 +1,141 @@
+use crate::theme::{ACCENT_CYAN, STATUS_WARN, card_frame, status_badge};
+use crate::worker::{SharedState, WorkerCommand};
+use egui::{Color32, RichText, Slider, Ui};
+use omvix_core::{AppConfig, GpuMode, I18n, KeyboardType, RgbColor};
+
+pub fn render(
+    ui: &mut Ui,
+    cfg: &mut AppConfig,
+    st: &SharedState,
+    i18n: &I18n,
+    dark: bool,
+    on_cmd: &mut dyn FnMut(WorkerCommand),
+    on_save: &mut dyn FnMut(),
+) {
+    ui.heading(i18n.t("nav.lighting_display"));
+    ui.add_space(6.0);
+
+    // Keyboard Backlight & RGB Card
+    card_frame(dark).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(i18n.t("lighting.keyboard")).strong().color(ACCENT_CYAN));
+            status_badge(ui, &format!("{:?}", st.keyboard_type), ACCENT_CYAN);
+        });
+
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut cfg.lighting.enabled, i18n.t("common.enabled"));
+            ui.add_space(10.0);
+            ui.label(i18n.t("lighting.brightness"));
+            ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
+        });
+
+        let zone_count = match st.keyboard_type {
+            KeyboardType::FourZoneRgb => 4,
+            KeyboardType::WhiteBacklight => 0,
+            _ => 1,
+        };
+
+        if zone_count > 0 {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for z in 0..zone_count {
+                    let c = &mut cfg.lighting.zones[z];
+                    let mut srgb = [c.r, c.g, c.b];
+                    ui.label(i18n.t_fmt("lighting.zone", &[("index", &(z + 1).to_string())]));
+                    if ui.color_edit_button_srgb(&mut srgb).changed() {
+                        *c = RgbColor {
+                            r: srgb[0],
+                            g: srgb[1],
+                            b: srgb[2],
+                        };
+                    }
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Presets:");
+                for (label, rgb) in [
+                    ("Cyan", RgbColor { r: 0, g: 180, b: 216 }),
+                    ("White", RgbColor { r: 245, g: 245, b: 255 }),
+                    ("Crimson", RgbColor { r: 220, g: 38, b: 38 }),
+                    ("Emerald", RgbColor { r: 34, g: 197, b: 94 }),
+                ] {
+                    if ui.button(label).clicked() {
+                        cfg.lighting.zones = [rgb; 4];
+                        cfg.lighting.enabled = true;
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyLighting);
+                    }
+                }
+            });
+        }
+
+        ui.add_space(6.0);
+        if ui
+            .button(RichText::new(i18n.t("common.apply")).strong())
+            .clicked()
+        {
+            on_save();
+            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            on_cmd(WorkerCommand::ApplyLighting);
+        }
+    });
+
+    ui.add_space(8.0);
+
+    // Display Refresh Rate Card
+    card_frame(dark).show(ui, |ui| {
+        ui.label(RichText::new(i18n.t("display.refresh_rate")).strong().color(ACCENT_CYAN));
+        if let Some(disp) = &st.display_mode {
+            ui.label(format!(
+                "{}x{} @ {}",
+                disp.width,
+                disp.height,
+                i18n.t_fmt("display.hz", &[("hz", &disp.current_hz.to_string())])
+            ));
+            ui.horizontal_wrapped(|ui| {
+                for &hz in &disp.supported_hz {
+                    let selected = disp.current_hz == hz;
+                    if ui
+                        .selectable_label(
+                            selected,
+                            i18n.t_fmt("display.hz", &[("hz", &hz.to_string())]),
+                        )
+                        .clicked()
+                    {
+                        on_cmd(WorkerCommand::SetRefreshRate(hz));
+                    }
+                }
+            });
+        } else {
+            ui.weak("Enumerating display modes...");
+        }
+    });
+
+    ui.add_space(8.0);
+
+    // GPU MUX Switch Card
+    card_frame(dark).show(ui, |ui| {
+        ui.label(RichText::new(i18n.t("gpu.mux_switch")).strong().color(ACCENT_CYAN));
+        let cur = st.gpu_mode.unwrap_or(GpuMode::Unknown);
+        ui.horizontal_wrapped(|ui| {
+            for (mode, key) in [
+                (GpuMode::Hybrid, "gpu.mode_hybrid"),
+                (GpuMode::Discrete, "gpu.mode_discrete"),
+                (GpuMode::Optimus, "gpu.mode_optimus"),
+            ] {
+                if ui.selectable_label(cur == mode, i18n.t(key)).clicked() {
+                    cfg.tuning.preferred_gpu_mode = Some(mode);
+                    on_save();
+                    on_cmd(WorkerCommand::SetGpuMode(mode));
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new(i18n.t("gpu.reboot_required")).color(Color32::from_rgb(245, 158, 11)));
+        if !st.security.is_admin {
+            ui.colored_label(STATUS_WARN, i18n.t("tuning.admin_required_warning"));
+        }
+    });
+}

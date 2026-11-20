@@ -7,7 +7,13 @@
   "app.tray.mode_eco": "Mode: Eco",
   "app.tray.mode_balanced": "Mode: Balanced",
   "app.tray.mode_performance": "Mode: Performance",
+  "app.tray.fan_auto": "Fan: Auto",
+  "app.tray.fan_max": "Fan: Max",
+  "app.tray.toggle_battery_limit": "Toggle Battery Limit",
   "app.close_to_tray_notice": "Omvix Hub is still running in the system tray.",
+  "app.restart_as_admin": "Restart as Administrator",
+  "app.admin_active": "Administrator Active",
+  "app.non_admin_banner": "Running without Administrator privileges. Live telemetry & display Hz work; HP WMI BIOS writes (fans, thermal, 0x2B battery limit, RGB, MUX) require Administrator.",
 
   "nav.dashboard": "Dashboard",
   "nav.performance_fans": "Performance & Fans",
@@ -46,6 +52,11 @@
   "fan.rpm": "{rpm} RPM",
   "fan.hysteresis": "Hysteresis (°C)",
   "fan.keep_alive": "Keep-Alive Guard (prevents 2-min BIOS reset)",
+  "fan.manual_speed": "Manual Speed (%)",
+  "fan.add_point": "Add Point",
+  "fan.reset_curve": "Reset Curve",
+  "fan.curve_temp": "Temp (°C)",
+  "fan.curve_speed": "Speed (%)",
 
   "battery.charge_limit": "Charge Limiting",
   "battery.stop_threshold": "Stop Charging At (%)",
@@ -55,7 +66,9 @@
   "battery.mode_inhibit": "Inhibit (Stop at Threshold)",
   "battery.mode_hold": "Hold (Maintain Limit)",
   "battery.one_time_full_charge": "One-Time 100% Charge (Travel Mode)",
+  "battery.travel_mode_desc": "Temporarily allows charging to 100% once, then restores your charge limit when full or unplugged.",
   "battery.one_time_active": "Travel charge active — will revert after reaching 100% or unplugging.",
+  "battery.conflict_service_warning": "External `hp-charge-limit-rs` service is running. Background auto-writes are paused to avoid conflicts; click Apply to override manually.",
   "battery.wear_level": "Battery Wear",
   "battery.health": "Battery Health",
   "battery.wattage": "Charge / Discharge Rate",
@@ -101,6 +114,7 @@
   "logs.current_usage": "Current Log Usage",
   "logs.open_folder": "Open Log Folder",
   "logs.clear_logs": "Clear Logs",
+  "logs.preview": "Recent Log Tail",
 
   "diagnostics.title": "Hardware & WMI Diagnostics",
   "diagnostics.board_id": "Motherboard ID",
@@ -108,9 +122,15 @@
   "diagnostics.export_json": "Export Diagnostic Report (JSON)",
   "diagnostics.run_probe": "Re-run WMI Probe",
 
+  "settings.theme": "Theme",
+  "settings.theme_dark": "Dark Slate",
+  "settings.theme_light": "Clean Light",
+  "settings.start_minimized": "Start Minimized to Tray",
+
   "common.language": "Language",
   "common.apply": "Apply",
   "common.reset": "Reset",
+  "common.refresh": "Refresh",
   "common.save": "Save",
   "common.cancel": "Cancel",
   "common.enabled": "Enabled",
@@ -118,6 +138,8 @@
   "common.supported": "Supported",
   "common.unsupported": "Unsupported",
   "common.unknown": "Unknown",
+  "common.status_ok": "OK",
+  "common.status_error": "Error",
   "common.start_with_windows": "Start with Windows",
   "common.minimize_to_tray_on_close": "Minimize to Tray When Closed"
 }

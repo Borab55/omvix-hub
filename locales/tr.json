@@ -7,7 +7,13 @@
   "app.tray.mode_eco": "Mod: Eco",
   "app.tray.mode_balanced": "Mod: Dengeli",
   "app.tray.mode_performance": "Mod: Performans",
+  "app.tray.fan_auto": "Fan: Otomatik",
+  "app.tray.fan_max": "Fan: Maksimum",
+  "app.tray.toggle_battery_limit": "Şarj Sınırını Aç/Kapat",
   "app.close_to_tray_notice": "Omvix Hub sistem tepsisinde çalışmaya devam ediyor.",
+  "app.restart_as_admin": "Yönetici Olarak Yeniden Başlat",
+  "app.admin_active": "Yönetici Yetkisi Aktif",
+  "app.non_admin_banner": "Uygulama şu an Yönetici yetkisi olmadan çalışıyor. Canlı telemetri ve ekran Hz çalışır; HP WMI BIOS yazma işlemleri (fan, termal mod, 0x2B şarj sınırı, RGB, MUX) için Yönetici yetkisi gerekir.",
 
   "nav.dashboard": "Özet Paneli",
   "nav.performance_fans": "Performans & Fanlar",
@@ -46,6 +52,11 @@
   "fan.rpm": "{rpm} RPM",
   "fan.hysteresis": "Histerezis (°C)",
   "fan.keep_alive": "Canlı Tutma Koruması (2 dk BIOS sıfırlamasını önler)",
+  "fan.manual_speed": "Manuel Hız (%)",
+  "fan.add_point": "Nokta Ekle",
+  "fan.reset_curve": "Eğriyi Sıfırla",
+  "fan.curve_temp": "Sıcaklık (°C)",
+  "fan.curve_speed": "Hız (%)",
 
   "battery.charge_limit": "Şarj Sınırlama",
   "battery.stop_threshold": "Şarjı Durdurma Sınırı (%)",
@@ -55,7 +66,9 @@
   "battery.mode_inhibit": "Sınırla (Eşikte Durdur)",
   "battery.mode_hold": "Tut (Limiti Koru)",
   "battery.one_time_full_charge": "Tek Seferlik %100 Şarj (Seyahat Modu)",
+  "battery.travel_mode_desc": "Tek seferliğine %100'e kadar şarj edilmesine izin verir; dolduğunda veya priz çıkarıldığında önceki limite döner.",
   "battery.one_time_active": "Seyahat şarjı aktif — %100'e ulaşınca veya prizden çıkınca önceki limite döner.",
+  "battery.conflict_service_warning": "Harici `hp-charge-limit-rs` servisi şu an çalışıyor. Çakışmayı önlemek için otomatik yazma duraklatıldı; manuel uygulamak için Uygula'ya basın.",
   "battery.wear_level": "Batarya Aşınması",
   "battery.health": "Batarya Sağlığı",
   "battery.wattage": "Şarj / Deşarj Gücü",
@@ -101,6 +114,7 @@
   "logs.current_usage": "Mevcut Log Kullanımı",
   "logs.open_folder": "Log Klasörünü Aç",
   "logs.clear_logs": "Logları Temizle",
+  "logs.preview": "Son Log Kayıtları",
 
   "diagnostics.title": "Donanım & WMI Tanı",
   "diagnostics.board_id": "Anakart ID",
@@ -108,9 +122,15 @@
   "diagnostics.export_json": "Tanı Raporunu Dışa Aktar (JSON)",
   "diagnostics.run_probe": "WMI Taramasını Yenile",
 
+  "settings.theme": "Tema",
+  "settings.theme_dark": "Koyu Slate",
+  "settings.theme_light": "Açık Tema",
+  "settings.start_minimized": "Tepside Küçültülmüş Başlat",
+
   "common.language": "Dil",
   "common.apply": "Uygula",
   "common.reset": "Sıfırla",
+  "common.refresh": "Yenile",
   "common.save": "Kaydet",
   "common.cancel": "İptal",
   "common.enabled": "Etkin",
@@ -118,6 +138,8 @@
   "common.supported": "Destekleniyor",
   "common.unsupported": "Desteklenmiyor",
   "common.unknown": "Bilinmiyor",
+  "common.status_ok": "Başarılı",
+  "common.status_error": "Hata",
   "common.start_with_windows": "Windows ile Başlat",
   "common.minimize_to_tray_on_close": "Kapatılınca Sistem Tepsisine Küçült"
 }
