@@ -3,6 +3,21 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.4.0] - 2026-11-20
+
+### Added & Improved
+- **Zero-Flicker Dual-Viewport Drawer & Exact DWM Bottom-Right Lock (`main.rs`, `app/Cargo.toml`):**
+  - Replaced single-window resize expansion with a secondary `ctx.show_viewport_immediate` detail window anchored strictly to the **left** of the stationary compact cockpit (`468 × 728` cockpit + `632 × 728` drawer), eliminating frame stretch/jitter on open/close.
+  - Switched `win32_dock_bottom_right` to `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` and enforced active position lock while visible so the visible frame sits cleanly in the bottom-right corner without Win11 shadow margins.
+- **Native `egui::Painter` Area Charts & Direct-Drag 8-Point Fan Curve (`charts.rs`, `performance.rs`, `monitor.rs`, `models.rs`):**
+  - Replaced `egui_plot` widgets with custom high-DPI `egui::Painter` telemetry area charts (translucent gradient fills, vertical hover crosshairs, floating value pills) and zero scroll-wheel interception.
+  - Added direct touch/mouse drag-and-drop **8-point fan curve editor** (`35°C..=95°C`) with monotonic temperature clamping, live operating-point vertical indicator, `Min 1800 RPM` floor visualization, and floating `°C -> % (~RPM)` readout.
+- **1-Click Signed PawnIO Installer (`pawnio.rs`, `telemetry.rs`, `monitor.rs`, `settings.rs`, `worker.rs`):**
+  - Added background installer downloading `PawnIO_setup.exe` (Authenticode signature verified) + `IntelMSR.bin` module directly into `%LOCALAPPDATA%\OmvixHub\pawnio` and hot-reloading CPU package die temperature without restarting.
+- **UI Polish & Factory Defaults Reset (`cockpit.rs`, `settings.rs`, `worker.rs`):**
+  - Increased cockpit bottom footer vertical spacing (`10 px` gap between drawer tiles and `Gizle` / `Çıkış` row).
+  - Added 2-step **Restore All Defaults** action in Settings resetting BIOS Auto fans, Balanced mode, 100% normal charging (`0x2B Auto`), Windows Aggressive Boost, max native Hz, white keyboard backlight, Windows autostart removal, and `config.toml` defaults.
+
 ## [0.3.3] - 2026-11-20
 
 ### Fixed

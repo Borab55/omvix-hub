@@ -200,7 +200,7 @@ pub fn render(
 
     // 3. Width-locked middle cockpit controls (fits cleanly without horizontal or vertical overflow)
     let avail_h = ui.available_height();
-    let reserve_footer = 62.0_f32;
+    let reserve_footer = 76.0_f32;
     egui::ScrollArea::vertical()
         .id_salt("cockpit_middle_scroll")
         .max_width(content_w)
@@ -559,15 +559,16 @@ pub fn render(
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().button_padding = egui::vec2(9.0, 3.0);
                 if ui
-                    .small_button(RichText::new(i18n.t("cockpit.quit")).size(11.0))
+                    .small_button(RichText::new(i18n.t("cockpit.quit")).size(11.5))
                     .clicked()
                 {
                     actions.quit_app = true;
                 }
                 if ui
-                    .small_button(RichText::new(i18n.t("cockpit.hide_to_tray")).size(11.0))
+                    .small_button(RichText::new(i18n.t("cockpit.hide_to_tray")).size(11.5))
                     .clicked()
                 {
                     actions.hide_to_tray = true;
@@ -575,7 +576,7 @@ pub fn render(
             });
         });
 
-        ui.add_space(4.0);
+        ui.add_space(10.0);
 
         let drawers = [
             (Drawer::Monitor, i18n.t("drawer.monitor")),
@@ -593,6 +594,7 @@ pub fn render(
                 }
             }
         });
+        ui.add_space(4.0);
     });
 
     actions
