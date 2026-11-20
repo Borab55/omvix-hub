@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Borab55"]
@@ -29,7 +29,6 @@ sysinfo = "0.33"
 nvml-wrapper = "0.10"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
 egui = "0.31"
-egui_plot = "0.31"
 tray-icon = "0.19"
 
 [profile.release]

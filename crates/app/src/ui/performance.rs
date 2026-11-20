@@ -1,7 +1,8 @@
-use crate::theme::{accent_color, card_frame, section_title};
+use crate::theme::{card_frame, pill_button, section_title};
+use crate::ui::charts::interactive_fan_curve;
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{Color32, RichText, Slider, Ui};
-use egui_plot::{Line, Plot, PlotPoints, Points};
+use egui::{RichText, Slider, Ui};
+use omvix_core::thermal::effective_fan_curve_temp_c;
 use omvix_core::{AppConfig, FanCurve, FanCurvePoint, FanMode, I18n, PerformanceMode};
 
 pub fn render(
@@ -13,7 +14,6 @@ pub fn render(
     on_save: &mut dyn FnMut(),
 ) {
     let t = &cfg.general.custom_theme.clone();
-    let accent = accent_color(t);
 
     ui.heading(i18n.t("nav.performance_fans"));
     ui.add_space(6.0);
@@ -21,6 +21,7 @@ pub fn render(
     // Thermal / Performance Mode Card
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("thermal.mode"), t);
+        ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             for (mode, key) in [
                 (PerformanceMode::Eco, "thermal.mode_eco"),
@@ -29,7 +30,7 @@ pub fn render(
                 (PerformanceMode::Performance, "thermal.mode_performance"),
             ] {
                 let selected = cfg.thermal_fan.performance_mode == mode;
-                if ui.selectable_label(selected, i18n.t(key)).clicked() {
+                if pill_button(ui, &i18n.t(key), selected, t).clicked() {
                     cfg.thermal_fan.performance_mode = mode;
                     on_save();
                     on_cmd(WorkerCommand::SetPerformanceMode(mode));
@@ -186,6 +187,7 @@ pub fn render(
     // Fan Control Card + Interactive Custom Curve
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("fan.mode"), t);
+        ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             for (mode, key) in [
                 (FanMode::Auto, "fan.mode_auto"),
@@ -194,7 +196,7 @@ pub fn render(
                 (FanMode::CustomCurve, "fan.mode_curve"),
             ] {
                 let selected = cfg.thermal_fan.fan_mode == mode;
-                if ui.selectable_label(selected, i18n.t(key)).clicked() {
+                if pill_button(ui, &i18n.t(key), selected, t).clicked() {
                     cfg.thermal_fan.fan_mode = mode;
                     on_save();
                     on_cmd(WorkerCommand::SetFanMode {
@@ -240,7 +242,7 @@ pub fn render(
         });
 
         if cfg.thermal_fan.fan_mode == FanMode::CustomCurve {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             if st.telemetry.cpu_temp_c.is_none() {
                 ui.colored_label(
                     crate::theme::STATUS_WARN,
@@ -248,64 +250,55 @@ pub fn render(
                 );
                 ui.add_space(4.0);
             }
+            ui.weak(RichText::new(i18n.t("fan.curve_drag_hint")).size(11.5));
+            ui.add_space(4.0);
             cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
 
-            let line_pts: PlotPoints<'_> = cfg
-                .thermal_fan
-                .custom_curve
-                .points
-                .iter()
-                .map(|p| [p.temp_c as f64, p.speed_pct as f64])
-                .collect();
-            let scatter_pts: PlotPoints<'_> = cfg
-                .thermal_fan
-                .custom_curve
-                .points
-                .iter()
-                .map(|p| [p.temp_c as f64, p.speed_pct as f64])
-                .collect();
+            let live_temp = effective_fan_curve_temp_c(
+                st.telemetry.cpu_temp_c,
+                st.telemetry.gpu_temp_c,
+                st.telemetry.chassis_temp_c,
+                st.telemetry.cpu_power_w,
+            );
+            let max_rpm = st.telemetry.fan_max_rpms.first().copied().unwrap_or(5800);
 
-            Plot::new("fan_curve_plot")
-                .height(190.0)
-                .include_x(25.0)
-                .include_x(105.0)
-                .include_y(0.0)
-                .include_y(105.0)
-                .allow_zoom(false)
-                .allow_drag(false)
-                .allow_scroll(false)
-                .allow_boxed_zoom(false)
-                .allow_double_click_reset(false)
-                .show(ui, |plot_ui| {
-                    plot_ui.line(Line::new(line_pts).color(accent).width(2.0_f32));
-                    plot_ui.points(
-                        Points::new(scatter_pts)
-                            .color(Color32::from_rgb(245, 158, 11))
-                            .radius(4.5_f32),
-                    );
-                });
+            let edit = interactive_fan_curve(
+                ui,
+                &mut cfg.thermal_fan.custom_curve.points,
+                live_temp,
+                max_rpm,
+                t,
+            );
+            if edit.committed {
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            }
 
             ui.add_space(6.0);
-            let mut remove_idx: Option<usize> = None;
-            let num_pts = cfg.thermal_fan.custom_curve.points.len();
-            for (idx, pt) in cfg.thermal_fan.custom_curve.points.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("#{}", idx + 1));
-                    ui.label(i18n.t("fan.curve_temp"));
-                    ui.add(egui::DragValue::new(&mut pt.temp_c).range(30..=100).suffix("°C"));
-                    ui.label(i18n.t("fan.curve_speed"));
-                    ui.add(Slider::new(&mut pt.speed_pct, 0..=100).suffix("%"));
-                    if num_pts > 2 && ui.button("×").clicked() {
-                        remove_idx = Some(idx);
-                    }
-                });
-            }
-            if let Some(idx) = remove_idx {
-                cfg.thermal_fan.custom_curve.points.remove(idx);
-            }
+            ui.collapsing(i18n.t("fan.curve_manual_table"), |ui| {
+                let mut remove_idx: Option<usize> = None;
+                let num_pts = cfg.thermal_fan.custom_curve.points.len();
+                for (idx, pt) in cfg.thermal_fan.custom_curve.points.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("#{}", idx + 1));
+                        ui.label(i18n.t("fan.curve_temp"));
+                        ui.add(egui::DragValue::new(&mut pt.temp_c).range(30..=100).suffix("°C"));
+                        ui.label(i18n.t("fan.curve_speed"));
+                        ui.add(Slider::new(&mut pt.speed_pct, 0..=100).suffix("%"));
+                        if num_pts > 2 && ui.button("×").clicked() {
+                            remove_idx = Some(idx);
+                        }
+                    });
+                }
+                if let Some(idx) = remove_idx {
+                    cfg.thermal_fan.custom_curve.points.remove(idx);
+                }
+            });
 
+            ui.add_space(6.0);
+            let num_pts = cfg.thermal_fan.custom_curve.points.len();
             ui.horizontal(|ui| {
-                if ui.button(i18n.t("fan.add_point")).clicked() && num_pts < 10 {
+                if num_pts < 8 && ui.button(i18n.t("fan.add_point")).clicked() {
                     cfg.thermal_fan
                         .custom_curve
                         .points
@@ -313,6 +306,8 @@ pub fn render(
                 }
                 if ui.button(i18n.t("fan.reset_curve")).clicked() {
                     cfg.thermal_fan.custom_curve = FanCurve::default();
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }
                 if ui.button(RichText::new(i18n.t("common.apply")).strong()).clicked() {
                     on_save();

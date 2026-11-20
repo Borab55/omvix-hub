@@ -1,5 +1,8 @@
+use omvix_core::{OmvixError, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -42,16 +45,138 @@ pub fn median3(a: f32, b: f32, c: f32) -> f32 {
     vals[1]
 }
 
+/// Directory where Omvix Hub stores verified PawnIO module binaries (`IntelMSR.bin`, etc.).
+pub fn pawnio_module_dir() -> PathBuf {
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data).join("OmvixHub").join("pawnio");
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            return dir.join("pawnio");
+        }
+    }
+    PathBuf::from("pawnio")
+}
+
+/// Checks whether the PawnIO kernel driver device is reachable or installed on this machine.
+pub fn is_pawnio_driver_installed() -> bool {
+    let wide_path: Vec<u16> = PAWNIO_DEVICE_PATH
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    if let Ok(handle) = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            0xC000_0000u32,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0x80),
+            None,
+        )
+    } {
+        if handle != INVALID_HANDLE_VALUE && !handle.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return true;
+        }
+    }
+
+    Path::new(r"C:\Program Files\PawnIO\PawnIOUtil.exe").exists()
+        || Path::new(r"C:\Program Files\PawnIO").is_dir()
+}
+
+/// Returns true when a local `IntelMSR.bin` PawnIO module is already present.
+pub fn has_intel_msr_module() -> bool {
+    find_intel_msr_module().is_some()
+}
+
+/// Downloads and verifies Microsoft-signed PawnIO installer + `IntelMSR.bin` module from GitHub releases.
+pub fn install_pawnio_and_module() -> Result<String> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let dir = pawnio_module_dir();
+    let skip_driver = is_pawnio_driver_installed();
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$dir = $env:OMVIX_PAWNIO_DIR
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$headers = @{ 'User-Agent' = 'OmvixHub' }
+$reboot = $false
+
+if ($env:OMVIX_SKIP_DRIVER -ne '1') {
+    $rel = Invoke-RestMethod 'https://api.github.com/repos/namazso/PawnIO.Setup/releases/latest' -Headers $headers -TimeoutSec 25
+    $asset = $rel.assets | Where-Object { $_.name -like '*PawnIO_setup*.exe' } | Select-Object -First 1
+    if (-not $asset) { throw 'PawnIO_setup.exe asset not found in latest release' }
+    $exe = Join-Path $dir 'PawnIO_setup.exe'
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $exe -Headers $headers -TimeoutSec 60
+    $sig = Get-AuthenticodeSignature -FilePath $exe
+    if ($sig.Status -ne 'Valid') {
+        Remove-Item -Force -ErrorAction SilentlyContinue $exe
+        throw ('Invalid Authenticode signature on PawnIO_setup.exe: ' + $sig.Status)
+    }
+    $proc = Start-Process -FilePath $exe -ArgumentList '-install','-silent' -Verb RunAs -Wait -PassThru
+    $code = $proc.ExitCode
+    Remove-Item -Force -ErrorAction SilentlyContinue $exe
+    if ($code -notin @(0, 183, 3010)) {
+        throw ('PawnIO_setup.exe failed with exit code ' + $code)
+    }
+    if ($code -eq 3010) { $reboot = $true }
+}
+
+$mrel = Invoke-RestMethod 'https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest' -Headers $headers -TimeoutSec 25
+$masset = $mrel.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
+if (-not $masset) { throw 'PawnIO.Modules release zip not found' }
+$zip = Join-Path $dir 'modules.zip'
+$tmp = Join-Path $dir 'tmp_extract'
+Invoke-WebRequest -Uri $masset.browser_download_url -OutFile $zip -Headers $headers -TimeoutSec 60
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
+Expand-Archive -Path $zip -DestinationPath $tmp -Force
+foreach ($name in @('IntelMSR.bin','AMDFamily17.bin','COPYING')) {
+    $found = Get-ChildItem -Path $tmp -Filter $name -Recurse -File | Select-Object -First 1
+    if ($found) { Copy-Item -Force $found.FullName (Join-Path $dir $name) }
+}
+Remove-Item -Force -ErrorAction SilentlyContinue $zip
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
+if (-not (Test-Path (Join-Path $dir 'IntelMSR.bin'))) {
+    throw 'IntelMSR.bin missing after module extraction'
+}
+Write-Output ('OK:REBOOT=' + $reboot)
+"#;
+
+    let out = Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .env("OMVIX_PAWNIO_DIR", &dir)
+        .env("OMVIX_SKIP_DRIVER", if skip_driver { "1" } else { "0" })
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| OmvixError::DriverRequired(format!("Failed to launch PowerShell: {e}")))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        tracing::warn!(%detail, "PawnIO installation failed");
+        return Err(OmvixError::DriverRequired(format!(
+            "PawnIO install failed: {detail}"
+        )));
+    }
+
+    let needs_reboot = stdout.contains("REBOOT=True");
+    tracing::info!(dir = %dir.display(), needs_reboot, "PawnIO + IntelMSR.bin installed");
+    if needs_reboot {
+        Ok("PawnIO installed (reboot recommended if sensor stays inactive)".to_string())
+    } else {
+        Ok("PawnIO & IntelMSR.bin ready".to_string())
+    }
+}
+
 fn find_intel_msr_module() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(
-            PathBuf::from(local_app_data)
-                .join("OmvixHub")
-                .join("pawnio")
-                .join("IntelMSR.bin"),
-        );
-    }
+    candidates.push(pawnio_module_dir().join("IntelMSR.bin"));
     candidates.push(PathBuf::from(
         r"C:\Program Files\PawnIO\modules\IntelMSR.bin",
     ));

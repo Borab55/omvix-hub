@@ -1,9 +1,10 @@
 use crate::theme::{
-    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, card_frame, section_title, status_badge,
+    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, card_frame, pill_button, section_title,
+    status_badge,
 };
+use crate::ui::charts::{ChartSeries, telemetry_area_chart};
 use crate::worker::{MetricStats, SharedState, WorkerCommand};
 use egui::{Color32, RichText, Ui};
-use egui_plot::{Legend, Line, Plot, PlotPoints};
 use omvix_core::{AppConfig, I18n};
 
 const REFRESH_OPTIONS_MS: &[(u64, &str)] = &[
@@ -76,7 +77,12 @@ pub fn render(
     ui.columns(2, |cols| {
         // Card 1: CPU
         card_frame(t).show(&mut cols[0], |ui| {
-            section_title(ui, i18n.t("dashboard.cpu"), t);
+            ui.horizontal(|ui| {
+                section_title(ui, i18n.t("dashboard.cpu"), t);
+                if st.pawnio_cpu_active {
+                    status_badge(ui, "PawnIO", STATUS_OK);
+                }
+            });
             let usage = st
                 .telemetry
                 .cpu_usage_pct
@@ -109,9 +115,15 @@ pub fn render(
                 fmt_stats(&st.cpu_power_stats, "W"),
             ));
             if st.telemetry.cpu_temp_c.is_none() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak(RichText::new(i18n.t("monitor.cpu_temp_pawnio_hint")).size(11.0));
-                    ui.hyperlink_to("pawnio.eu", "https://pawnio.eu");
+                ui.add_space(4.0);
+                ui.weak(RichText::new(i18n.t("monitor.cpu_temp_pawnio_hint")).size(11.0));
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    if st.pawnio_installing {
+                        ui.weak(i18n.t("monitor.installing_pawnio"));
+                    } else if pill_button(ui, &i18n.t("monitor.install_pawnio"), true, t).clicked() {
+                        on_cmd(WorkerCommand::InstallPawnIo);
+                    }
                 });
             }
         });
@@ -273,56 +285,42 @@ pub fn render(
     // Graph 1: Temperature (°C)
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("monitor.graph_temperature"), t);
-        let cpu_pts: PlotPoints<'_> = st
-            .cpu_temp_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
-        let chassis_pts: PlotPoints<'_> = st
-            .chassis_temp_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
-        let gpu_pts: PlotPoints<'_> = st
-            .gpu_temp_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
+        let cpu_pts: Vec<(f64, f32)> = st.cpu_temp_history.iter().copied().collect();
+        let chassis_pts: Vec<(f64, f32)> = st.chassis_temp_history.iter().copied().collect();
+        let gpu_pts: Vec<(f64, f32)> = st.gpu_temp_history.iter().copied().collect();
 
-        Plot::new("monitor_temp_plot")
-            .height(165.0)
-            .legend(Legend::default())
-            .include_y(25.0)
-            .include_y(100.0)
-            .allow_zoom(false)
-            .allow_drag(false)
-            .allow_scroll(false)
-            .allow_boxed_zoom(false)
-            .allow_double_click_reset(false)
-            .show(ui, |plot_ui| {
-                if !st.cpu_temp_history.is_empty() {
-                    plot_ui.line(
-                        Line::new(cpu_pts)
-                            .name("CPU °C")
-                            .color(Color32::from_rgb(245, 158, 11))
-                            .width(2.0_f32),
-                    );
-                }
-                if !st.chassis_temp_history.is_empty() {
-                    plot_ui.line(
-                        Line::new(chassis_pts)
-                            .name("Chassis °C")
-                            .color(Color32::from_rgb(160, 165, 175))
-                            .width(1.6_f32),
-                    );
-                }
-                plot_ui.line(
-                    Line::new(gpu_pts)
-                        .name("GPU °C")
-                        .color(accent)
-                        .width(2.0_f32),
-                );
-            });
+        telemetry_area_chart(
+            ui,
+            "monitor_temp_chart",
+            175.0,
+            20.0,
+            105.0,
+            "°C",
+            &[
+                ChartSeries {
+                    name: "CPU",
+                    color: Color32::from_rgb(245, 158, 11),
+                    unit: "°C",
+                    points: &cpu_pts,
+                    fill_alpha: 34,
+                },
+                ChartSeries {
+                    name: "GPU",
+                    color: accent,
+                    unit: "°C",
+                    points: &gpu_pts,
+                    fill_alpha: 30,
+                },
+                ChartSeries {
+                    name: &i18n.t("cockpit.chassis_short"),
+                    color: Color32::from_rgb(160, 165, 175),
+                    unit: "°C",
+                    points: &chassis_pts,
+                    fill_alpha: 20,
+                },
+            ],
+            t,
+        );
     });
 
     ui.add_space(8.0);
@@ -330,52 +328,42 @@ pub fn render(
     // Graph 2: Utilization (%)
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("monitor.graph_usage"), t);
-        let cpu_pts: PlotPoints<'_> = st
-            .cpu_usage_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
-        let gpu_pts: PlotPoints<'_> = st
-            .gpu_load_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
-        let ram_pts: PlotPoints<'_> = st
-            .ram_usage_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
+        let cpu_pts: Vec<(f64, f32)> = st.cpu_usage_history.iter().copied().collect();
+        let gpu_pts: Vec<(f64, f32)> = st.gpu_load_history.iter().copied().collect();
+        let ram_pts: Vec<(f64, f32)> = st.ram_usage_history.iter().copied().collect();
 
-        Plot::new("monitor_usage_plot")
-            .height(165.0)
-            .legend(Legend::default())
-            .include_y(0.0)
-            .include_y(100.0)
-            .allow_zoom(false)
-            .allow_drag(false)
-            .allow_scroll(false)
-            .allow_boxed_zoom(false)
-            .allow_double_click_reset(false)
-            .show(ui, |plot_ui| {
-                plot_ui.line(
-                    Line::new(cpu_pts)
-                        .name("CPU %")
-                        .color(Color32::from_rgb(34, 197, 94))
-                        .width(2.0_f32),
-                );
-                plot_ui.line(
-                    Line::new(gpu_pts)
-                        .name("GPU %")
-                        .color(accent)
-                        .width(2.0_f32),
-                );
-                plot_ui.line(
-                    Line::new(ram_pts)
-                        .name("RAM %")
-                        .color(Color32::from_rgb(168, 85, 247))
-                        .width(1.6_f32),
-                );
-            });
+        telemetry_area_chart(
+            ui,
+            "monitor_usage_chart",
+            175.0,
+            0.0,
+            100.0,
+            "%",
+            &[
+                ChartSeries {
+                    name: "CPU",
+                    color: Color32::from_rgb(34, 197, 94),
+                    unit: "%",
+                    points: &cpu_pts,
+                    fill_alpha: 32,
+                },
+                ChartSeries {
+                    name: "GPU",
+                    color: accent,
+                    unit: "%",
+                    points: &gpu_pts,
+                    fill_alpha: 28,
+                },
+                ChartSeries {
+                    name: "RAM",
+                    color: Color32::from_rgb(168, 85, 247),
+                    unit: "%",
+                    points: &ram_pts,
+                    fill_alpha: 16,
+                },
+            ],
+            t,
+        );
     });
 
     ui.add_space(8.0);
@@ -383,52 +371,42 @@ pub fn render(
     // Graph 3: Power (W)
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("monitor.graph_power"), t);
-        let cpu_pwr: PlotPoints<'_> = st
-            .cpu_power_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
-        let gpu_pwr: PlotPoints<'_> = st
-            .gpu_power_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
-        let bat_pwr: PlotPoints<'_> = st
-            .battery_power_history
-            .iter()
-            .map(|&(x, y)| [x, y as f64])
-            .collect();
+        let cpu_pwr: Vec<(f64, f32)> = st.cpu_power_history.iter().copied().collect();
+        let gpu_pwr: Vec<(f64, f32)> = st.gpu_power_history.iter().copied().collect();
+        let bat_pwr: Vec<(f64, f32)> = st.battery_power_history.iter().copied().collect();
 
-        Plot::new("monitor_power_plot")
-            .height(165.0)
-            .legend(Legend::default())
-            .include_y(0.0)
-            .include_y(60.0)
-            .allow_zoom(false)
-            .allow_drag(false)
-            .allow_scroll(false)
-            .allow_boxed_zoom(false)
-            .allow_double_click_reset(false)
-            .show(ui, |plot_ui| {
-                plot_ui.line(
-                    Line::new(cpu_pwr)
-                        .name("CPU W")
-                        .color(Color32::from_rgb(249, 115, 22))
-                        .width(2.0_f32),
-                );
-                plot_ui.line(
-                    Line::new(gpu_pwr)
-                        .name("GPU W")
-                        .color(accent)
-                        .width(2.0_f32),
-                );
-                plot_ui.line(
-                    Line::new(bat_pwr)
-                        .name("Bat |W|")
-                        .color(Color32::from_rgb(34, 197, 94))
-                        .width(1.6_f32),
-                );
-            });
+        telemetry_area_chart(
+            ui,
+            "monitor_power_chart",
+            175.0,
+            0.0,
+            60.0,
+            "W",
+            &[
+                ChartSeries {
+                    name: "CPU",
+                    color: Color32::from_rgb(249, 115, 22),
+                    unit: "W",
+                    points: &cpu_pwr,
+                    fill_alpha: 34,
+                },
+                ChartSeries {
+                    name: "GPU",
+                    color: accent,
+                    unit: "W",
+                    points: &gpu_pwr,
+                    fill_alpha: 28,
+                },
+                ChartSeries {
+                    name: "Bat",
+                    color: Color32::from_rgb(34, 197, 94),
+                    unit: "W",
+                    points: &bat_pwr,
+                    fill_alpha: 18,
+                },
+            ],
+            t,
+        );
     });
 }
 

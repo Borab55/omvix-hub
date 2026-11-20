@@ -7,7 +7,7 @@ use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryStatus, ConflictServiceInfo,
     CpuBoostMode, CpuTuningBackend, DiagnosticReport, DiagnosticsBackend, DisplayBackend,
     DisplayModeInfo, FanMode, GpuMode, GpuSwitchBackend, KeyboardBackend, KeyboardType,
-    PerformanceMode, Result, SecurityStatus, TelemetryBackend, TelemetrySnapshot,
+    PerformanceMode, Result, RgbColor, SecurityStatus, TelemetryBackend, TelemetrySnapshot,
     ThermalFanBackend,
 };
 use std::collections::VecDeque;
@@ -99,6 +99,8 @@ pub struct SharedState {
     pub gpu_usage_stats: MetricStats,
     pub telemetry_paused: bool,
     pub thermal_guard_active: bool,
+    pub pawnio_installing: bool,
+    pub pawnio_cpu_active: bool,
     pub battery_status: Option<BatteryStatus>,
     pub display_mode: Option<DisplayModeInfo>,
     pub diagnostics: Option<DiagnosticReport>,
@@ -132,6 +134,8 @@ impl Default for SharedState {
             gpu_usage_stats: MetricStats::new(),
             telemetry_paused: false,
             thermal_guard_active: false,
+            pawnio_installing: false,
+            pawnio_cpu_active: false,
             battery_status: None,
             display_mode: None,
             diagnostics: None,
@@ -198,6 +202,9 @@ pub enum WorkerCommand {
     },
     SetTccLimit(u8),
     SetUndervolt(i16),
+    InstallPawnIo,
+    ReloadPawnIo,
+    RestoreAllDefaults,
     RefreshDiagnostics,
     ExportDiagnostics(PathBuf),
     Shutdown,
@@ -224,9 +231,10 @@ impl BackgroundWorker {
         }
         let state = Arc::new(Mutex::new(initial_state));
         let state_bg = Arc::clone(&state);
+        let tx_bg = tx.clone();
 
         let join = thread::spawn(move || {
-            run_worker_loop(initial_config, state_bg, rx, ctx, window_visible);
+            run_worker_loop(initial_config, state_bg, rx, tx_bg, ctx, window_visible);
         });
 
         Self {
@@ -276,6 +284,7 @@ fn run_worker_loop(
     mut cfg: AppConfig,
     state: Arc<Mutex<SharedState>>,
     rx: mpsc::Receiver<WorkerCommand>,
+    self_tx: Sender<WorkerCommand>,
     ctx: Option<egui::Context>,
     window_visible: Arc<AtomicBool>,
 ) {
@@ -307,6 +316,7 @@ fn run_worker_loop(
             }
             st.display_mode = disp;
             st.cpu_boost = boost;
+            st.pawnio_cpu_active = telemetry_be.is_pawnio_active();
         }
         request_repaint_if_visible(&ctx, &window_visible);
     }
@@ -379,7 +389,11 @@ fn run_worker_loop(
                         cmd,
                         &mut cfg,
                         &state,
+                        &self_tx,
+                        &ctx,
+                        &window_visible,
                         &diag_be,
+                        &telemetry_be,
                         &thermal_be,
                         &battery_be,
                         &kbd_be,
@@ -387,6 +401,7 @@ fn run_worker_loop(
                         &display_be,
                         &tuning_be,
                         &mut battery_engine,
+                        &mut thermal_guard,
                         &mut last_applied_bat_mode,
                     );
                     if should_shutdown {
@@ -588,7 +603,11 @@ fn handle_worker_command(
     cmd: WorkerCommand,
     cfg: &mut AppConfig,
     state: &Arc<Mutex<SharedState>>,
+    self_tx: &Sender<WorkerCommand>,
+    ctx: &Option<egui::Context>,
+    window_visible: &Arc<AtomicBool>,
     diag_be: &WindowsDiagnosticsBackend,
+    telemetry_be: &WindowsTelemetryBackend,
     thermal_be: &WindowsThermalFanBackend,
     battery_be: &WindowsBatteryBackend,
     kbd_be: &WindowsKeyboardBackend,
@@ -596,6 +615,7 @@ fn handle_worker_command(
     display_be: &WindowsDisplayBackend,
     tuning_be: &WindowsCpuTuningBackend,
     battery_engine: &mut BatteryCareEngine,
+    thermal_guard: &mut ThermalSafetyGuard,
     last_applied_bat_mode: &mut Option<BatteryChargeMode>,
 ) -> bool {
     match cmd {
@@ -702,6 +722,103 @@ fn handle_worker_command(
             let res = tuning_be.set_core_undervolt_mv(mv);
             record_result(state, res, format!("Core undervolt -> {mv} mV"));
         }
+        WorkerCommand::InstallPawnIo => {
+            let already_running = state
+                .lock()
+                .map(|mut st| {
+                    if st.pawnio_installing {
+                        true
+                    } else {
+                        st.pawnio_installing = true;
+                        st.set_toast("Downloading & installing signed PawnIO driver...", false);
+                        false
+                    }
+                })
+                .unwrap_or(true);
+            if !already_running {
+                let state_bg = Arc::clone(state);
+                let tx_bg = self_tx.clone();
+                let ctx_bg = ctx.clone();
+                let vis_bg = Arc::clone(window_visible);
+                thread::spawn(move || {
+                    let res = omvix_windows::pawnio::install_pawnio_and_module();
+                    match res {
+                        Ok(msg) => {
+                            if let Ok(mut st) = state_bg.lock() {
+                                st.pawnio_installing = false;
+                                st.set_toast(msg, false);
+                            }
+                            let _ = tx_bg.send(WorkerCommand::ReloadPawnIo);
+                        }
+                        Err(err) => {
+                            if let Ok(mut st) = state_bg.lock() {
+                                st.pawnio_installing = false;
+                                st.set_toast(err.to_string(), true);
+                            }
+                        }
+                    }
+                    request_repaint_if_visible(&ctx_bg, &vis_bg);
+                });
+            }
+        }
+        WorkerCommand::ReloadPawnIo => {
+            let active = telemetry_be.reload_pawnio();
+            let sec = system_info::collect_security_status();
+            if let Ok(mut st) = state.lock() {
+                st.pawnio_cpu_active = active;
+                st.security = sec;
+                if active {
+                    st.set_toast("PawnIO CPU die temperature sensor active", false);
+                } else {
+                    st.set_toast(
+                        "PawnIO installed; reboot may be needed to activate sensor",
+                        true,
+                    );
+                }
+            }
+        }
+        WorkerCommand::RestoreAllDefaults => {
+            *thermal_guard = ThermalSafetyGuard::new();
+            let _ = thermal_be.set_fan_mode(FanMode::Auto, None);
+            let _ = thermal_be.set_performance_mode(PerformanceMode::Balanced);
+            *last_applied_bat_mode = None;
+            let _ = battery_be.set_charge_mode(BatteryChargeMode::Auto);
+            let _ = tuning_be.set_cpu_boost_mode(CpuBoostMode::Aggressive);
+            let _ = kbd_be.set_backlight(
+                true,
+                100,
+                &[RgbColor {
+                    r: 245,
+                    g: 245,
+                    b: 255,
+                }; 4],
+            );
+            let disp = display_be.get_display_mode().ok();
+            if let Some(ref d) = disp {
+                if let Some(&max_hz) = d.supported_hz.iter().max() {
+                    let _ = display_be.set_refresh_rate(max_hz);
+                }
+            }
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = omvix_windows::autostart::set_autostart(false, &exe);
+            }
+            let refreshed_disp = display_be.get_display_mode().ok();
+            let refreshed_boost = tuning_be.read_cpu_boost_mode().ok();
+            let refreshed_bat = battery_be.get_battery_status().ok();
+            if let Ok(mut st) = state.lock() {
+                st.thermal_guard_active = false;
+                if refreshed_disp.is_some() {
+                    st.display_mode = refreshed_disp;
+                }
+                if refreshed_boost.is_some() {
+                    st.cpu_boost = refreshed_boost;
+                }
+                if refreshed_bat.is_some() {
+                    st.battery_status = refreshed_bat;
+                }
+                st.set_toast("All hardware & app settings restored to defaults", false);
+            }
+        }
         WorkerCommand::RefreshDiagnostics => {
             let res = diag_be.collect_diagnostics();
             match res {
@@ -751,6 +868,7 @@ fn run_worker_loop(
     _cfg: AppConfig,
     _state: Arc<Mutex<SharedState>>,
     rx: mpsc::Receiver<WorkerCommand>,
+    _self_tx: Sender<WorkerCommand>,
     _ctx: Option<egui::Context>,
     _window_visible: Arc<AtomicBool>,
 ) {

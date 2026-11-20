@@ -91,6 +91,22 @@ impl WindowsTelemetryBackend {
         }
     }
 
+    pub fn reload_pawnio(&self) -> bool {
+        let reader = PawnIoCpuTempReader::open();
+        let active = reader.is_some();
+        if let Ok(mut guard) = self.state.lock() {
+            guard.pawnio = reader;
+        }
+        active
+    }
+
+    pub fn is_pawnio_active(&self) -> bool {
+        self.state
+            .lock()
+            .map(|g| g.pawnio.is_some())
+            .unwrap_or(false)
+    }
+
     fn read_win32_power() -> (Option<bool>, Option<u8>, Option<u32>) {
         let mut status = SYSTEM_POWER_STATUS::default();
         if unsafe { GetSystemPowerStatus(&mut status) }.is_err() {
