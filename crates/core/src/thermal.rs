@@ -4,8 +4,11 @@ use crate::models::{PerformanceMode, ThermalProfileScheme};
 /// Default maximum WMI fan level step when firmware `FanMaxGet` (0x26) is unavailable.
 pub const DEFAULT_MAX_FAN_LEVEL: u8 = 55;
 
-/// Minimum safe non-zero WMI fan level (~1800 RPM) so manual/curve mode never stalls fans at 0 RPM.
+/// Minimum safe non-zero WMI fan level (~1800 RPM) enforced when temperatures are elevated.
 pub const MIN_SAFE_FAN_LEVEL: u8 = 18;
+
+/// Minimum fan RPM expected under warm load before the thermal guard overrides to Max Fan.
+pub const MIN_GUARD_FAN_RPM: u32 = 1800;
 
 /// Maps an abstract `PerformanceMode` and board `ThermalProfileScheme` to the HP BIOS WMI byte.
 pub fn thermal_profile_byte(scheme: ThermalProfileScheme, mode: PerformanceMode) -> u8 {
@@ -38,6 +41,31 @@ pub fn fan_percent_to_wmi_level(speed_pct: u8, max_level: u8) -> u8 {
 pub fn safe_manual_wmi_level(speed_pct: u8, max_level: u8) -> u8 {
     let max_l = max_level.max(1);
     fan_percent_to_wmi_level(speed_pct, max_l).max(MIN_SAFE_FAN_LEVEL.min(max_l))
+}
+
+/// Returns `true` when at least one thermal sensor is available and all present sensors are cool
+/// enough to safely allow 0 RPM / sub-1800 RPM silent fan curves (`CPU < 65°C`, `GPU < 60°C`, `Chassis < 46°C`).
+pub fn is_system_cool_for_zero_rpm(
+    cpu_c: Option<f32>,
+    gpu_c: Option<f32>,
+    chassis_c: Option<f32>,
+) -> bool {
+    let has_any = cpu_c.is_some() || gpu_c.is_some() || chassis_c.is_some();
+    has_any
+        && cpu_c.is_none_or(|t| t < 65.0)
+        && gpu_c.is_none_or(|t| t < 60.0)
+        && chassis_c.is_none_or(|t| t < 46.0)
+}
+
+/// Maps a 0..=100 fan speed percentage into a WMI fan level step, allowing 0 RPM / sub-1800 RPM
+/// speeds only while the system is cool (`allow_zero_rpm == true`) and enforcing `MIN_SAFE_FAN_LEVEL`
+/// otherwise.
+pub fn smart_manual_wmi_level(speed_pct: u8, max_level: u8, allow_zero_rpm: bool) -> u8 {
+    if allow_zero_rpm {
+        fan_percent_to_wmi_level(speed_pct, max_level)
+    } else {
+        safe_manual_wmi_level(speed_pct, max_level)
+    }
 }
 
 /// Maps HP EC chassis / IR sensor (`0x23`) readings to conservative CPU-curve thermal demand (°C).
@@ -113,7 +141,7 @@ pub enum ThermalGuardDecision {
 #[derive(Debug, Clone, Default)]
 pub struct ThermalSafetyGuard {
     active: bool,
-    stalled_polls: u8,
+    low_rpm_polls: u8,
     hold_ticks: u8,
 }
 
@@ -134,14 +162,15 @@ impl ThermalSafetyGuard {
         cpu_power_w: Option<f32>,
         fan_rpms: &[u32],
     ) -> ThermalGuardDecision {
-        let warm_for_stall = cpu_c.is_some_and(|t| t >= 70.0)
-            || gpu_c.is_some_and(|t| t >= 65.0)
-            || chassis_c.is_some_and(|t| t >= 46.0)
-            || cpu_power_w.is_some_and(|w| w >= 40.0);
-        let fans_stalled = !fan_rpms.is_empty() && fan_rpms.iter().all(|&r| r == 0);
+        let warm_for_low_rpm = cpu_c.is_some_and(|t| t >= 78.0)
+            || gpu_c.is_some_and(|t| t >= 74.0)
+            || chassis_c.is_some_and(|t| t >= 48.0)
+            || cpu_power_w.is_some_and(|w| w >= 55.0);
+        let fans_below_safe_rpm =
+            !fan_rpms.is_empty() && fan_rpms.iter().any(|&r| r < MIN_GUARD_FAN_RPM);
 
-        self.stalled_polls = if warm_for_stall && fans_stalled {
-            self.stalled_polls.saturating_add(1)
+        self.low_rpm_polls = if warm_for_low_rpm && fans_below_safe_rpm {
+            self.low_rpm_polls.saturating_add(1)
         } else {
             0
         };
@@ -152,8 +181,8 @@ impl ThermalSafetyGuard {
             Some("GPU >= 86°C".to_string())
         } else if chassis_c.is_some_and(|t| t >= 54.0) {
             Some("Chassis >= 54°C".to_string())
-        } else if self.stalled_polls >= 2 {
-            Some("Fans stalled at 0 RPM under load".to_string())
+        } else if self.low_rpm_polls >= 2 {
+            Some("Fan < 1800 RPM under thermal load".to_string())
         } else {
             None
         };
@@ -168,10 +197,10 @@ impl ThermalSafetyGuard {
         }
 
         if self.active {
-            let cooled = cpu_c.is_none_or(|t| t <= 80.0)
-                && gpu_c.is_none_or(|t| t <= 78.0)
-                && chassis_c.is_none_or(|t| t <= 48.0)
-                && !fans_stalled;
+            let cooled = cpu_c.is_none_or(|t| t <= 78.0)
+                && gpu_c.is_none_or(|t| t <= 74.0)
+                && chassis_c.is_none_or(|t| t <= 46.0)
+                && !fans_below_safe_rpm;
             if cooled {
                 self.hold_ticks = self.hold_ticks.saturating_add(1);
                 if self.hold_ticks >= 5 {
@@ -277,6 +306,22 @@ mod tests {
     }
 
     #[test]
+    fn cool_check_and_smart_level_allow_zero_rpm_only_when_cool() {
+        assert!(is_system_cool_for_zero_rpm(Some(50.0), Some(45.0), Some(38.0)));
+        assert!(is_system_cool_for_zero_rpm(None, Some(52.0), None));
+        assert!(!is_system_cool_for_zero_rpm(None, None, None));
+        assert!(!is_system_cool_for_zero_rpm(Some(65.0), Some(45.0), Some(38.0)));
+        assert!(!is_system_cool_for_zero_rpm(Some(55.0), Some(60.0), Some(38.0)));
+        assert!(!is_system_cool_for_zero_rpm(Some(55.0), Some(45.0), Some(46.0)));
+
+        assert_eq!(smart_manual_wmi_level(0, 58, true), 0);
+        assert_eq!(smart_manual_wmi_level(15, 58, true), 9);
+        assert_eq!(smart_manual_wmi_level(0, 58, false), MIN_SAFE_FAN_LEVEL);
+        assert_eq!(smart_manual_wmi_level(15, 58, false), MIN_SAFE_FAN_LEVEL);
+        assert_eq!(smart_manual_wmi_level(60, 58, false), 35);
+    }
+
+    #[test]
     fn effective_curve_temp_bridges_chassis_and_power_when_cpu_missing() {
         let low = effective_fan_curve_temp_c(None, Some(48.0), Some(42.0), Some(18.0));
         assert!((low.unwrap() - 62.0).abs() < 0.01);
@@ -291,13 +336,28 @@ mod tests {
     #[test]
     fn thermal_safety_guard_engages_and_releases_with_hysteresis() {
         let mut g = ThermalSafetyGuard::new();
+
+        // Cool idle with 0 RPM or < 1800 RPM must NOT trip the guard
+        for _ in 0..4 {
+            assert_eq!(
+                g.evaluate(Some(52.0), Some(45.0), Some(39.0), Some(14.0), &[0, 0]),
+                ThermalGuardDecision::NoChange
+            );
+            assert_eq!(
+                g.evaluate(Some(58.0), Some(48.0), Some(41.0), Some(20.0), &[1200, 1200]),
+                ThermalGuardDecision::NoChange
+            );
+        }
+        assert!(!g.is_active());
+
+        // CPU >= 90°C triggers immediately even when fans are already above 1800 RPM
         assert_eq!(
             g.evaluate(Some(91.0), Some(60.0), Some(47.0), Some(55.0), &[3200, 3200]),
             ThermalGuardDecision::EngageEmergencyMax("CPU >= 90°C".to_string())
         );
         assert!(g.is_active());
 
-        // Still warm -> no release
+        // Still warm (> 78°C) -> no release even after 6 ticks
         for _ in 0..6 {
             assert_eq!(
                 g.evaluate(Some(83.0), Some(60.0), Some(45.0), Some(30.0), &[5800, 5800]),
@@ -306,7 +366,7 @@ mod tests {
         }
         assert!(g.is_active());
 
-        // Cool below 80C -> releases after 5 consecutive cool ticks
+        // Cool <= 78C and fans >= 1800 RPM -> releases after 5 consecutive cool ticks
         for _ in 0..4 {
             assert_eq!(
                 g.evaluate(Some(72.0), Some(55.0), Some(43.0), Some(20.0), &[5800, 5800]),
@@ -319,16 +379,26 @@ mod tests {
         );
         assert!(!g.is_active());
 
-        // Stalled fans (0 RPM) under load engages on 2nd consecutive poll
+        // Sub-1800 RPM fan under thermal load engages on 2nd consecutive poll
         assert_eq!(
-            g.evaluate(None, Some(54.0), Some(46.0), Some(45.0), &[0, 0]),
+            g.evaluate(Some(80.0), Some(54.0), Some(46.0), Some(60.0), &[1400, 1600]),
             ThermalGuardDecision::NoChange
         );
         assert_eq!(
-            g.evaluate(None, Some(54.0), Some(46.0), Some(45.0), &[0, 0]),
+            g.evaluate(Some(80.0), Some(54.0), Some(46.0), Some(60.0), &[1400, 1600]),
             ThermalGuardDecision::EngageEmergencyMax(
-                "Fans stalled at 0 RPM under load".to_string()
+                "Fan < 1800 RPM under thermal load".to_string()
             )
         );
+        assert!(g.is_active());
+
+        // Must NOT release while fan is still < 1800 RPM even if temps cooled
+        for _ in 0..6 {
+            assert_eq!(
+                g.evaluate(Some(70.0), Some(50.0), Some(42.0), Some(20.0), &[1500, 2200]),
+                ThermalGuardDecision::NoChange
+            );
+        }
+        assert!(g.is_active());
     }
 }

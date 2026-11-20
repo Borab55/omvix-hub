@@ -353,6 +353,19 @@ pub fn render(
             }
         });
 
+        ui.add_space(6.0);
+        if ui
+            .checkbox(
+                &mut cfg.battery.hold_when_shutdown,
+                i18n.t("battery.hold_when_shutdown"),
+            )
+            .changed()
+        {
+            on_save();
+            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+        }
+        ui.weak(RichText::new(i18n.t("battery.hold_when_shutdown_desc")).size(11.0));
+
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
             if ui
