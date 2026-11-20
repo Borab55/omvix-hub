@@ -3,6 +3,11 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.3.3] - 2026-11-20
+
+### Fixed
+- **Windows Startup Hotfix (`main.rs`):** Restored `wgpu`'s default enabled backends (`Vulkan` via `PowerPreference::LowPower`) by removing the `Backends::DX12` override (`eframe 0.31`'s default `wgpu` feature set does not compile `wgpu/dx12`, which caused `Failed to create surface for any enabled backend`).
+
 ## [0.3.2] - 2026-11-20
 
 ### Fixed & Added (Critical Thermal Safety, Sensor Clarity & UI Polish)
