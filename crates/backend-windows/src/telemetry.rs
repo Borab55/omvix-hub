@@ -20,9 +20,12 @@ struct TelemetryState {
     networks: Networks,
     disks: Disks,
     nvml: Option<Nvml>,
-    nvml_init_attempted: bool,
+    nvml_last_attempt: Option<Instant>,
+    nvml_attempts: u8,
     emi: Option<CpuEmiReader>,
     pawnio: Option<PawnIoCpuTempReader>,
+    pawnio_last_attempt: Option<Instant>,
+    pawnio_attempts: u8,
     first_sample_done: bool,
     last_fast_refresh: Instant,
     last_disk_list_refresh: Instant,
@@ -34,6 +37,16 @@ struct TelemetryState {
     cached_battery_rate_w: Option<f32>,
     cached_battery_voltage_v: Option<f32>,
     cached_battery_remaining_mwh: Option<u32>,
+}
+
+/// Returns `true` when lazy driver/SDK initialization (NVML or PawnIO) should be attempted or retried.
+pub fn should_retry_init(
+    attempts: u8,
+    max_attempts: u8,
+    last_attempt: Option<Instant>,
+    cooldown: Duration,
+) -> bool {
+    attempts < max_attempts && last_attempt.is_none_or(|t| t.elapsed() >= cooldown)
 }
 
 /// Dual-tier Windows telemetry provider:
@@ -73,9 +86,12 @@ impl WindowsTelemetryBackend {
                 networks,
                 disks,
                 nvml: None,
-                nvml_init_attempted: false,
+                nvml_last_attempt: None,
+                nvml_attempts: 0,
                 emi,
                 pawnio,
+                pawnio_last_attempt: None,
+                pawnio_attempts: 0,
                 first_sample_done: false,
                 last_fast_refresh: Instant::now(),
                 last_disk_list_refresh: Instant::now(),
@@ -96,6 +112,8 @@ impl WindowsTelemetryBackend {
         let active = reader.is_some();
         if let Ok(mut guard) = self.state.lock() {
             guard.pawnio = reader;
+            guard.pawnio_attempts = 0;
+            guard.pawnio_last_attempt = None;
         }
         active
     }
@@ -244,8 +262,17 @@ impl WindowsTelemetryBackend {
     }
 }
 
-impl TelemetryBackend for WindowsTelemetryBackend {
-    fn read_telemetry(&self) -> Result<TelemetrySnapshot> {
+impl WindowsTelemetryBackend {
+    /// Reads a telemetry snapshot with optional throttling for background/tray battery savings.
+    ///
+    /// - `include_heavy_io == false`: skips disk and network interface refreshes when hidden in tray.
+    /// - `allow_nvml == false`: avoids initializing or polling NVML while hidden on battery so an
+    ///   idle Optimus dGPU stays asleep in D3cold.
+    pub fn read_telemetry_with_options(
+        &self,
+        include_heavy_io: bool,
+        allow_nvml: bool,
+    ) -> Result<TelemetrySnapshot> {
         let (
             cpu_usage_pct,
             cpu_temp_c,
@@ -295,18 +322,48 @@ impl TelemetryBackend for WindowsTelemetryBackend {
             let dt_secs = guard.last_fast_refresh.elapsed().as_secs_f32().max(0.05);
             guard.sys.refresh_cpu_all();
             guard.sys.refresh_memory();
-            guard.networks.refresh(false);
 
-            if guard.last_disk_list_refresh.elapsed() >= Duration::from_secs(15) {
-                guard
-                    .disks
-                    .refresh_specifics(true, DiskRefreshKind::nothing().with_io_usage());
-                guard.last_disk_list_refresh = Instant::now();
-            } else {
-                for d in guard.disks.list_mut() {
-                    d.refresh_specifics(DiskRefreshKind::nothing().with_io_usage());
+            let (net_rx_mb_s, net_tx_mb_s, disk_read_mb_s, disk_write_mb_s) = if include_heavy_io {
+                guard.networks.refresh(false);
+
+                if guard.last_disk_list_refresh.elapsed() >= Duration::from_secs(15) {
+                    guard
+                        .disks
+                        .refresh_specifics(true, DiskRefreshKind::nothing().with_io_usage());
+                    guard.last_disk_list_refresh = Instant::now();
+                } else {
+                    for d in guard.disks.list_mut() {
+                        d.refresh_specifics(DiskRefreshKind::nothing().with_io_usage());
+                    }
                 }
-            }
+
+                let mut total_rx = 0u64;
+                let mut total_tx = 0u64;
+                for (iface, data) in &guard.networks {
+                    if iface.contains("Loopback") {
+                        continue;
+                    }
+                    total_rx = total_rx.saturating_add(data.received());
+                    total_tx = total_tx.saturating_add(data.transmitted());
+                }
+
+                let mut total_disk_r = 0u64;
+                let mut total_disk_w = 0u64;
+                for disk in guard.disks.list() {
+                    let usage = disk.usage();
+                    total_disk_r = total_disk_r.saturating_add(usage.read_bytes);
+                    total_disk_w = total_disk_w.saturating_add(usage.written_bytes);
+                }
+
+                (
+                    Some((total_rx as f32 / (1024.0 * 1024.0)) / dt_secs),
+                    Some((total_tx as f32 / (1024.0 * 1024.0)) / dt_secs),
+                    Some((total_disk_r as f32 / (1024.0 * 1024.0)) / dt_secs),
+                    Some((total_disk_w as f32 / (1024.0 * 1024.0)) / dt_secs),
+                )
+            } else {
+                (None, None, None, None)
+            };
             guard.last_fast_refresh = Instant::now();
 
             let cpu_usage_pct = Some(guard.sys.global_cpu_usage());
@@ -316,42 +373,21 @@ impl TelemetryBackend for WindowsTelemetryBackend {
             let ram_used_gb = Some(guard.sys.used_memory() as f32 / (1024.0 * 1024.0 * 1024.0));
 
             let cpu_power_w = guard.emi.as_mut().and_then(|e| e.sample_cpu_power_w());
+
+            if guard.pawnio.is_none()
+                && crate::pawnio::has_intel_msr_module()
+                && should_retry_init(
+                    guard.pawnio_attempts,
+                    3,
+                    guard.pawnio_last_attempt,
+                    Duration::from_secs(30),
+                )
+            {
+                guard.pawnio_attempts = guard.pawnio_attempts.saturating_add(1);
+                guard.pawnio_last_attempt = Some(Instant::now());
+                guard.pawnio = PawnIoCpuTempReader::open();
+            }
             let cpu_temp_c = guard.pawnio.as_mut().and_then(|p| p.read_package_temp_c());
-
-            let mut total_rx = 0u64;
-            let mut total_tx = 0u64;
-            for (iface, data) in &guard.networks {
-                if iface.contains("Loopback") {
-                    continue;
-                }
-                total_rx = total_rx.saturating_add(data.received());
-                total_tx = total_tx.saturating_add(data.transmitted());
-            }
-            let net_rx_mb_s = Some((total_rx as f32 / (1024.0 * 1024.0)) / dt_secs);
-            let net_tx_mb_s = Some((total_tx as f32 / (1024.0 * 1024.0)) / dt_secs);
-
-            let mut total_disk_r = 0u64;
-            let mut total_disk_w = 0u64;
-            for disk in guard.disks.list() {
-                let usage = disk.usage();
-                total_disk_r = total_disk_r.saturating_add(usage.read_bytes);
-                total_disk_w = total_disk_w.saturating_add(usage.written_bytes);
-            }
-            let disk_read_mb_s = Some((total_disk_r as f32 / (1024.0 * 1024.0)) / dt_secs);
-            let disk_write_mb_s = Some((total_disk_w as f32 / (1024.0 * 1024.0)) / dt_secs);
-
-            if !guard.nvml_init_attempted {
-                guard.nvml_init_attempted = true;
-                match Nvml::init() {
-                    Ok(nvml) => {
-                        tracing::info!("Initialized NVIDIA NVML telemetry");
-                        guard.nvml = Some(nvml);
-                    }
-                    Err(err) => {
-                        tracing::debug!("NVML initialization skipped/unavailable: {err}");
-                    }
-                }
-            }
 
             let mut gpu_name = None;
             let mut gpu_temp_c = None;
@@ -365,28 +401,54 @@ impl TelemetryBackend for WindowsTelemetryBackend {
             let mut gpu_pstate = None;
             let mut gpu_throttle_reason = None;
 
-            if let Some(nvml) = &guard.nvml {
-                if let Ok(device) = nvml.device_by_index(0) {
-                    gpu_name = device.name().ok();
-                    gpu_temp_c = device.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f32);
-                    gpu_usage_pct = device.utilization_rates().ok().map(|u| u.gpu as f32);
-                    gpu_power_w = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
-                    gpu_power_limit_w = device
-                        .enforced_power_limit()
-                        .or_else(|_| device.power_management_limit())
-                        .ok()
-                        .map(|mw| mw as f32 / 1000.0);
-                    gpu_clock_mhz = device.clock_info(Clock::Graphics).ok();
-                    gpu_mem_clock_mhz = device.clock_info(Clock::Memory).ok();
-                    if let Ok(mem) = device.memory_info() {
-                        gpu_mem_used_mb = Some((mem.used / (1024 * 1024)) as u32);
-                        gpu_mem_total_mb = Some((mem.total / (1024 * 1024)) as u32);
+            if allow_nvml {
+                if guard.nvml.is_none()
+                    && should_retry_init(
+                        guard.nvml_attempts,
+                        5,
+                        guard.nvml_last_attempt,
+                        Duration::from_secs(30),
+                    )
+                {
+                    guard.nvml_attempts = guard.nvml_attempts.saturating_add(1);
+                    guard.nvml_last_attempt = Some(Instant::now());
+                    match Nvml::init() {
+                        Ok(nvml) => {
+                            tracing::info!("Initialized NVIDIA NVML telemetry");
+                            guard.nvml = Some(nvml);
+                        }
+                        Err(err) => {
+                            tracing::debug!(
+                                attempt = guard.nvml_attempts,
+                                "NVML initialization skipped/unavailable: {err}"
+                            );
+                        }
                     }
-                    gpu_pstate = device.performance_state().ok().map(format_pstate);
-                    gpu_throttle_reason = device
-                        .current_throttle_reasons()
-                        .ok()
-                        .and_then(format_throttle_reasons);
+                }
+
+                if let Some(nvml) = &guard.nvml {
+                    if let Ok(device) = nvml.device_by_index(0) {
+                        gpu_name = device.name().ok();
+                        gpu_temp_c = device.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f32);
+                        gpu_usage_pct = device.utilization_rates().ok().map(|u| u.gpu as f32);
+                        gpu_power_w = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
+                        gpu_power_limit_w = device
+                            .enforced_power_limit()
+                            .or_else(|_| device.power_management_limit())
+                            .ok()
+                            .map(|mw| mw as f32 / 1000.0);
+                        gpu_clock_mhz = device.clock_info(Clock::Graphics).ok();
+                        gpu_mem_clock_mhz = device.clock_info(Clock::Memory).ok();
+                        if let Ok(mem) = device.memory_info() {
+                            gpu_mem_used_mb = Some((mem.used / (1024 * 1024)) as u32);
+                            gpu_mem_total_mb = Some((mem.total / (1024 * 1024)) as u32);
+                        }
+                        gpu_pstate = device.performance_state().ok().map(format_pstate);
+                        gpu_throttle_reason = device
+                            .current_throttle_reasons()
+                            .ok()
+                            .and_then(format_throttle_reasons);
+                    }
                 }
             }
 
@@ -535,6 +597,32 @@ impl TelemetryBackend for WindowsTelemetryBackend {
             net_rx_mb_s,
             net_tx_mb_s,
         })
+    }
+}
+
+impl TelemetryBackend for WindowsTelemetryBackend {
+    fn read_telemetry(&self) -> Result<TelemetrySnapshot> {
+        self.read_telemetry_with_options(true, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_init_respects_cooldown_and_max_attempts() {
+        let cd = Duration::from_secs(30);
+        // First attempt allowed
+        assert!(should_retry_init(0, 5, None, cd));
+        // Inside cooldown -> blocked
+        let recent = Some(Instant::now());
+        assert!(!should_retry_init(1, 5, recent, cd));
+        // Past cooldown -> allowed
+        let old = Some(Instant::now() - Duration::from_secs(31));
+        assert!(should_retry_init(1, 5, old, cd));
+        // Reached max attempts -> blocked permanently
+        assert!(!should_retry_init(5, 5, old, cd));
     }
 }
 

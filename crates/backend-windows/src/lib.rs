@@ -17,6 +17,8 @@ pub mod keyboard;
 #[cfg(windows)]
 pub mod pawnio;
 #[cfg(windows)]
+pub mod power_events;
+#[cfg(windows)]
 pub mod system_info;
 #[cfg(windows)]
 pub mod telemetry;
