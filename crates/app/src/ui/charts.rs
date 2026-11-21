@@ -361,6 +361,30 @@ pub fn interactive_fan_curve(
         (MIN_TEMP + nx * TEMP_SPAN, ny * 100.0)
     };
 
+    // Highlight R2 high-temperature fan safety floor (>= 80°C requires >= 50%)
+    let safe_x = temp_to_x(80.0);
+    let safe_y = pct_to_y(50.0);
+    let safety_floor_rect = Rect::from_min_max(
+        Pos2::new(safe_x, safe_y),
+        Pos2::new(plot_rect.right(), plot_rect.bottom()),
+    );
+    painter.rect_filled(
+        safety_floor_rect,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(239, 68, 68, 22),
+    );
+    painter.line_segment(
+        [Pos2::new(safe_x, safe_y), Pos2::new(plot_rect.right(), safe_y)],
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(239, 68, 68, 120)),
+    );
+    painter.text(
+        Pos2::new(plot_rect.right() - 4.0, safe_y - 3.0),
+        Align2::RIGHT_BOTTOM,
+        "Min 50% @ >= 80°C",
+        FontId::proportional(9.5),
+        Color32::from_rgba_unmultiplied(239, 68, 68, 180),
+    );
+
     // Highlight sub-1800 RPM quiet zone (0 RPM allowed only when cool; auto-guarded under load)
     let floor_top_y = pct_to_y(31.0);
     let floor_rect = Rect::from_min_max(
@@ -467,10 +491,33 @@ pub fn interactive_fan_curve(
                 } else {
                     points[idx].temp_c
                 };
-                let new_p = raw_p.round().clamp(0.0, 100.0) as u8;
+                let floor_p = if new_t >= 80 { 50 } else { 0 };
+                let new_p = (raw_p.round().clamp(0.0, 100.0) as u8).max(floor_p);
                 if points[idx].temp_c != new_t || points[idx].speed_pct != new_p {
                     points[idx].temp_c = new_t;
                     points[idx].speed_pct = new_p;
+                    for pt in points.iter_mut().skip(idx + 1) {
+                        if pt.speed_pct < new_p {
+                            pt.speed_pct = new_p;
+                        }
+                    }
+                    for j in (0..idx).rev() {
+                        let floor = if points[j].temp_c >= 80 { 50 } else { 0 };
+                        let cap = points[j + 1].speed_pct;
+                        if points[j].speed_pct > cap {
+                            points[j].speed_pct = cap.max(floor);
+                        }
+                    }
+                    let mut running_max = 0u8;
+                    for pt in points.iter_mut() {
+                        if pt.temp_c >= 80 {
+                            pt.speed_pct = pt.speed_pct.max(50);
+                        }
+                        if pt.speed_pct < running_max {
+                            pt.speed_pct = running_max;
+                        }
+                        running_max = pt.speed_pct;
+                    }
                     res.changed = true;
                 }
             }

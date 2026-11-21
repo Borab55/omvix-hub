@@ -84,6 +84,8 @@ enum TuningAction {
 enum BatteryAction {
     /// Show battery level, capacity, wear, charge rate, and active charge mode.
     Status,
+    /// Restore normal 0x2B Auto battery charging immediately (recovery command).
+    Auto,
     /// Set battery charge-limiting mode (requires Administrator).
     SetMode {
         #[arg(value_enum)]
@@ -289,6 +291,17 @@ fn main() -> ExitCode {
                 }
                 Err(err) => {
                     tracing::error!("Failed to read battery status: {err}");
+                    eprintln!("Error: {err}");
+                    ExitCode::FAILURE
+                }
+            },
+            BatteryAction::Auto => match WindowsBatteryBackend::new().set_charge_mode(BatteryChargeMode::Auto) {
+                Ok(()) => {
+                    println!("Restored battery charge mode: Auto (0x2B normal charging)");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    tracing::error!("Failed to restore Auto battery charge mode: {err}");
                     eprintln!("Error: {err}");
                     ExitCode::FAILURE
                 }

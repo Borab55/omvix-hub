@@ -83,6 +83,20 @@ pub fn render(
                     &format!("{src} | {:?}{hex_suffix}", b.current_mode),
                     if b.charging { STATUS_WARN } else { STATUS_OK },
                 );
+                let off_badge_key = if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
+                    "battery.when_off_hold_short"
+                } else {
+                    "battery.when_off_auto_short"
+                };
+                status_badge(
+                    ui,
+                    &i18n.t(off_badge_key),
+                    if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
+                        STATUS_WARN
+                    } else {
+                        STATUS_OK
+                    },
+                );
             });
 
             ui.add(egui::ProgressBar::new(b.charge_percent as f32 / 100.0).show_percentage());
@@ -489,6 +503,16 @@ pub fn render(
             });
 
         ui.add_space(8.0);
+        if cfg.battery.enabled
+            && cfg.battery.hold_when_shutdown
+            && svc.state != BatteryServiceState::Running
+        {
+            ui.colored_label(
+                accent,
+                RichText::new(i18n.t("battery.service_recommended_note")).size(11.5),
+            );
+            ui.add_space(4.0);
+        }
         if st.battery_service_busy {
             ui.colored_label(STATUS_WARN, i18n.t("battery.service_busy"));
         }
@@ -574,5 +598,16 @@ pub fn render(
                 }
             }
         });
+    });
+
+    ui.add_space(8.0);
+
+    // R5 Recovery Guide Card
+    card_frame(t).show(ui, |ui| {
+        section_title(ui, i18n.t("battery.recovery_title"), t);
+        ui.add_space(4.0);
+        ui.weak(RichText::new(i18n.t("battery.recovery_desc")).size(11.0));
+        ui.add_space(3.0);
+        ui.monospace("omvix-cli.exe battery auto");
     });
 }

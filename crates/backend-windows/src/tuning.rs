@@ -1,5 +1,6 @@
-use crate::system_info::collect_security_status;
+use crate::system_info::{collect_security_status, collect_system_identity};
 use crate::wmi_bios::{HpWmiBios, OutputSize, describe_wmi_return_code};
+use omvix_core::boards::lookup_board;
 use omvix_core::{CpuBoostMode, CpuTuningBackend, OmvixError, Result};
 use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
 use windows::Win32::System::Power::{
@@ -8,6 +9,32 @@ use windows::Win32::System::Power::{
 };
 use windows::Win32::System::Registry::HKEY;
 use windows::core::GUID;
+
+/// Builds the 4-byte HP WMI `0x20008 / 0x29` power limit payload `[PL1, PL2, PL4=0xFF, TPP=0xFF]`.
+/// `None` encodes `0xFF` ("leave unchanged") instead of overwriting firmware defaults (R4 / B1).
+pub fn build_power_limit_wmi_payload(
+    pl1_watts: Option<u16>,
+    pl2_watts: Option<u16>,
+) -> Result<[u8; 4]> {
+    if pl1_watts.is_none() && pl2_watts.is_none() {
+        return Err(OmvixError::Config(
+            "Select at least one power limit (PL1 or PL2) to apply.".to_string(),
+        ));
+    }
+    let pl1 = pl1_watts.map(|w| w.clamp(15, 200));
+    let mut pl2 = pl2_watts.map(|w| w.clamp(15, 200));
+    if let (Some(p1), Some(ref mut p2)) = (pl1, &mut pl2) {
+        if *p2 < p1 {
+            *p2 = p1;
+        }
+    }
+    Ok([
+        pl1.map(|w| w as u8).unwrap_or(0xFF),
+        pl2.map(|w| w as u8).unwrap_or(0xFF),
+        0xFF,
+        0xFF,
+    ])
+}
 
 // Processor power settings subgroup GUID: 54533251-82be-4824-96c1-47b60b740d00
 const SUB_PROCESSOR: GUID = GUID::from_u128(0x54533251_82be_4824_96c1_47b60b740d00);
@@ -141,21 +168,37 @@ impl CpuTuningBackend for WindowsCpuTuningBackend {
     }
 
     fn set_power_limits(&self, pl1_watts: Option<u16>, pl2_watts: Option<u16>) -> Result<()> {
-        let pl1 = pl1_watts.map(|w| w.clamp(15, 200)).unwrap_or(55);
-        let pl2 = pl2_watts.map(|w| w.clamp(15, 200)).unwrap_or(115);
+        let identity = collect_system_identity()?;
+        if lookup_board(&identity.board_id).is_none() {
+            return Err(OmvixError::UnsupportedHardware(format!(
+                "Power limit WMI command (0x29) is disabled on unrecognized motherboard '{}'.",
+                identity.board_id
+            )));
+        }
 
-        if let Ok(bios) = HpWmiBios::connect() {
-            let payload = [pl1 as u8, pl2 as u8, 0xFF, 0xFF];
+        let payload = build_power_limit_wmi_payload(pl1_watts, pl2_watts)?;
+
+        let wmi_res = HpWmiBios::with_cached(|bios| {
             let resp = bios.execute(0x20008, 0x29, &payload, OutputSize::Size0)?;
             if resp.return_code == 0 {
-                tracing::info!(pl1, pl2, "Applied CPU/Platform power limits via HP WMI 0x29");
+                Ok(())
+            } else {
+                Err(OmvixError::WmiCallFailed {
+                    command: 0x20008,
+                    command_type: 0x29,
+                    return_code: resp.return_code,
+                    message: describe_wmi_return_code(resp.return_code),
+                })
+            }
+        });
+        match wmi_res {
+            Ok(()) => {
+                tracing::info!(?payload, "Applied CPU/Platform power limits via HP WMI 0x29");
                 return Ok(());
             }
-            tracing::warn!(
-                rc = resp.return_code,
-                msg = %describe_wmi_return_code(resp.return_code),
-                "HP WMI 0x29 power limit command rejected; checking MSR fallback"
-            );
+            Err(err) => {
+                tracing::warn!("HP WMI 0x29 power limit command failed: {err}");
+            }
         }
 
         self.verify_msr_unlocked()?;
@@ -179,5 +222,27 @@ impl CpuTuningBackend for WindowsCpuTuningBackend {
         Err(OmvixError::UnsupportedHardware(format!(
             "Core undervolt ({clamped} mV, MSR 0x150) requires PawnIO MSR module bridge"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn power_limit_payload_uses_0xff_for_unset_fields_and_clamps() {
+        assert_eq!(
+            build_power_limit_wmi_payload(Some(45), None).unwrap(),
+            [45, 0xFF, 0xFF, 0xFF]
+        );
+        assert_eq!(
+            build_power_limit_wmi_payload(None, Some(95)).unwrap(),
+            [0xFF, 95, 0xFF, 0xFF]
+        );
+        assert_eq!(
+            build_power_limit_wmi_payload(Some(80), Some(60)).unwrap(),
+            [80, 80, 0xFF, 0xFF]
+        );
+        assert!(build_power_limit_wmi_payload(None, None).is_err());
     }
 }

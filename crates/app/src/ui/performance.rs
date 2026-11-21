@@ -1,9 +1,12 @@
-use crate::theme::{card_frame, pill_button, section_title};
+use crate::theme::{STATUS_WARN, card_frame, pill_button, section_title, status_badge};
 use crate::ui::charts::interactive_fan_curve;
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
-use omvix_core::thermal::effective_fan_curve_temp_c;
+use omvix_core::thermal::{
+    MAX_GUARD_CPU_TEMP_C, MAX_GUARD_SUSTAIN_SECS, MIN_GUARD_CPU_TEMP_C, MIN_GUARD_SUSTAIN_SECS,
+    effective_fan_curve_temp_c,
+};
 use omvix_core::{AppConfig, FanCurve, FanCurvePoint, FanMode, I18n, PerformanceMode};
 
 pub fn render(
@@ -18,6 +21,16 @@ pub fn render(
 
     ui.heading(i18n.t("nav.performance_fans"));
     ui.add_space(6.0);
+
+    if !st.fan_conflict_services.is_empty() {
+        card_frame(t).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                status_badge(ui, &st.fan_conflict_services.join(", "), STATUS_WARN);
+                ui.label(i18n.t("fan.conflict_service_warning"));
+            });
+        });
+        ui.add_space(6.0);
+    }
 
     // Thermal / Performance Mode Card
     card_frame(t).show(ui, |ui| {
@@ -233,8 +246,11 @@ pub fn render(
             ui.add_space(4.0);
             if st.telemetry.cpu_temp_c.is_none() {
                 ui.colored_label(
-                    crate::theme::STATUS_WARN,
-                    i18n.t("fan.no_cpu_sensor_notice"),
+                    STATUS_WARN,
+                    i18n.t_fmt(
+                        "fan.no_cpu_sensor_notice",
+                        &[("temp", &cfg.thermal_fan.guard_cpu_temp_c.to_string())],
+                    ),
                 );
                 ui.add_space(4.0);
             }
@@ -258,6 +274,7 @@ pub fn render(
                 t,
             );
             if edit.committed {
+                let _ = cfg.thermal_fan.custom_curve.normalize();
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
             }
@@ -294,7 +311,7 @@ pub fn render(
                     cfg.thermal_fan.custom_curve.points.remove(idx);
                 }
                 if table_committed {
-                    cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
+                    let _ = cfg.thermal_fan.custom_curve.normalize();
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }
@@ -308,7 +325,7 @@ pub fn render(
                         .custom_curve
                         .points
                         .push(FanCurvePoint { temp_c: 75, speed_pct: 75 });
-                    cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
+                    let _ = cfg.thermal_fan.custom_curve.normalize();
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }
@@ -344,6 +361,37 @@ pub fn render(
                 }
             });
             ui.weak(RichText::new(i18n.t("fan.hysteresis_desc")).size(11.0));
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                ui.label(i18n.t("fan.guard_cpu_temp"));
+                let temp_resp = ui.add(
+                    Slider::new(
+                        &mut cfg.thermal_fan.guard_cpu_temp_c,
+                        MIN_GUARD_CPU_TEMP_C..=MAX_GUARD_CPU_TEMP_C,
+                    )
+                    .suffix("°C"),
+                );
+                if control_committed(ui, "perf_guard_cpu_temp", &temp_resp) {
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(i18n.t("fan.guard_sustain_secs"));
+                let dur_resp = ui.add(
+                    Slider::new(
+                        &mut cfg.thermal_fan.guard_sustain_secs,
+                        MIN_GUARD_SUSTAIN_SECS..=MAX_GUARD_SUSTAIN_SECS,
+                    )
+                    .suffix(" s"),
+                );
+                if control_committed(ui, "perf_guard_sustain", &dur_resp) {
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                }
+            });
+            ui.weak(RichText::new(i18n.t("fan.guard_desc")).size(11.0));
         });
     });
 }
