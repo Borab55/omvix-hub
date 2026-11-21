@@ -320,5 +320,13 @@
   "common.status_ok": "Başarılı",
   "common.status_error": "Hata",
   "common.start_with_windows": "Windows ile Başlat",
-  "common.minimize_to_tray_on_close": "Kapatılınca Sistem Tepsisine Küçült"
+  "common.minimize_to_tray_on_close": "Kapatılınca Sistem Tepsisine Küçült",
+
+  "safe_mode.badge": "GÜVENLİ MOD",
+  "safe_mode.banner_title": "Güvenli Mod Aktif — Donanım Yazma Kapalı",
+  "safe_mode.reason_cli": "--safe bayrağı ile başlatıldı. Hiçbir BIOS, fan, batarya veya ekran ayarı uygulanmadı.",
+  "safe_mode.reason_shift": "Açılışta Shift tuşuna basılı tutuldu. Donanıma hiçbir ayar yazılmadı.",
+  "safe_mode.reason_crash_loop": "Otomatik koruma: son 3 açılışta donanım ayarları uygulandıktan sonraki 60 sn içinde beklenmedik kapanma tespit edildi. Donanım yazma durduruldu.",
+  "safe_mode.exit_btn": "Güvenli Moddan Çık",
+  "safe_mode.open_settings": "Ayarlar / Sıfırla"
 }

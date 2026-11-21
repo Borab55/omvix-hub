@@ -2,6 +2,7 @@ pub mod auto_profile;
 pub mod battery_care;
 pub mod boards;
 pub mod config;
+pub mod crash_guard;
 pub mod error;
 pub mod i18n;
 pub mod logging;
@@ -10,6 +11,7 @@ pub mod thermal;
 pub mod traits;
 
 pub use config::{AppConfig, BatteryProfile, CustomThemeConfig};
+pub use crash_guard::{CrashGuardState, SafeModeReason, crash_guard_path_for};
 pub use error::{OmvixError, Result};
 pub use i18n::I18n;
 pub use logging::{

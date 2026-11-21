@@ -320,5 +320,13 @@
   "common.status_ok": "OK",
   "common.status_error": "Error",
   "common.start_with_windows": "Start with Windows",
-  "common.minimize_to_tray_on_close": "Minimize to Tray When Closed"
+  "common.minimize_to_tray_on_close": "Minimize to Tray When Closed",
+
+  "safe_mode.badge": "SAFE MODE",
+  "safe_mode.banner_title": "Safe Mode Active — Hardware Writes Disabled",
+  "safe_mode.reason_cli": "Started with --safe flag. No BIOS, fan, battery, or display settings were applied.",
+  "safe_mode.reason_shift": "Shift key was held during startup. No settings were written to hardware.",
+  "safe_mode.reason_crash_loop": "Automatic recovery: the last 3 launches exited unexpectedly within 60s after applying hardware settings. Hardware writes are paused.",
+  "safe_mode.exit_btn": "Exit Safe Mode",
+  "safe_mode.open_settings": "Settings / Reset"
 }

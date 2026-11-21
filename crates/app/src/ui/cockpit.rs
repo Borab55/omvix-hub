@@ -8,7 +8,7 @@ use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, CornerRadius, RichText, Slider, Stroke, Ui};
 use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, PerformanceMode,
-    RgbColor,
+    RgbColor, SafeModeReason,
 };
 use std::time::Duration;
 
@@ -92,6 +92,9 @@ pub fn render(
             }
             if st.sensor_loss_active {
                 status_badge(ui, &i18n.t("cockpit.sensor_loss_badge"), STATUS_ERR);
+            }
+            if st.safe_mode.is_some() {
+                status_badge(ui, &i18n.t("safe_mode.badge"), STATUS_WARN);
             }
         });
     });
@@ -214,6 +217,34 @@ pub fn render(
                 STATUS_ERR,
                 RichText::new(i18n.t("app.worker_dead_warning")).size(11.5).strong(),
             );
+        });
+    }
+
+    if let Some(reason) = st.safe_mode {
+        ui.add_space(4.0);
+        compact_card(t).show(ui, |ui| {
+            ui.set_width(card_inner_w);
+            ui.set_max_width(card_inner_w);
+            ui.colored_label(
+                STATUS_WARN,
+                RichText::new(i18n.t("safe_mode.banner_title"))
+                    .size(11.5)
+                    .strong(),
+            );
+            let reason_key = match reason {
+                SafeModeReason::CliFlag => "safe_mode.reason_cli",
+                SafeModeReason::ShiftHeld => "safe_mode.reason_shift",
+                SafeModeReason::CrashLoop => "safe_mode.reason_crash_loop",
+            };
+            ui.weak(RichText::new(i18n.t(reason_key)).size(10.5));
+            ui.horizontal_wrapped(|ui| {
+                if pill_button(ui, &i18n.t("safe_mode.exit_btn"), false, t).clicked() {
+                    on_cmd(WorkerCommand::ExitSafeMode);
+                }
+                if ui.small_button(i18n.t("safe_mode.open_settings")).clicked() {
+                    actions.open_extra_subtab = Some(ExtraSubTab::Settings);
+                }
+            });
         });
     }
 

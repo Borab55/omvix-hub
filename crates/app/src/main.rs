@@ -10,6 +10,10 @@ use crate::ui::{Drawer, ExtraSubTab, FansPowerSubTab};
 use crate::worker::{BackgroundWorker, SharedState, WorkerCommand};
 use egui::Margin;
 use omvix_core::config::OmenKeyAction;
+use omvix_core::crash_guard::{
+    CrashGuardState, SafeModeReason, crash_guard_path_for, current_unix_secs,
+    resolve_startup_safe_mode,
+};
 use omvix_core::{AppConfig, CustomThemeConfig, I18n, LogHandle, PerformanceMode, init_logging};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::path::PathBuf;
@@ -289,7 +293,19 @@ fn win32_drawer_anchor_pos(
 }
 
 #[cfg(windows)]
-fn try_shell_elevate_self() -> std::result::Result<(), ()> {
+fn is_shift_held_at_startup() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
+    let state = unsafe { GetAsyncKeyState(i32::from(VK_SHIFT.0)) };
+    ((state as u16) & 0x8000) != 0
+}
+
+#[cfg(not(windows))]
+fn is_shift_held_at_startup() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn try_shell_elevate_self(forward_safe: bool) -> std::result::Result<(), ()> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -300,7 +316,11 @@ fn try_shell_elevate_self() -> std::result::Result<(), ()> {
     };
     let verb = HSTRING::from("runas");
     let file = HSTRING::from(exe.to_string_lossy().as_ref());
-    let params = HSTRING::from("--no-elevate");
+    let params = HSTRING::from(if forward_safe {
+        "--no-elevate --safe"
+    } else {
+        "--no-elevate"
+    });
     let res = unsafe {
         ShellExecuteW(
             HWND::default(),
@@ -370,6 +390,8 @@ fn main() {
     }
 
     let smoke_test = args.iter().any(|a| a == "--smoke-test");
+    let cli_safe = args.iter().any(|a| a == "--safe");
+    let shift_held = !smoke_test && is_shift_held_at_startup();
     #[cfg(windows)]
     let no_elevate = args.iter().any(|a| a == "--no-elevate");
 
@@ -433,7 +455,7 @@ fn main() {
 
         if !no_elevate && !omvix_windows::system_info::is_process_elevated() {
             guard.release();
-            if try_shell_elevate_self().is_ok() {
+            if try_shell_elevate_self(cli_safe || shift_held).is_ok() {
                 tracing::info!("Launched elevated Omvix Hub instance; exiting non-admin launcher");
                 if let Some(h) = &log_handle {
                     h.flush();
@@ -449,8 +471,24 @@ fn main() {
         }
     };
 
+    let crash_guard_path = crash_guard_path_for(&cfg_path);
+    let mut crash_guard_state = CrashGuardState::load_from_path(&crash_guard_path);
+    let safe_mode_reason = resolve_startup_safe_mode(cli_safe, shift_held, &crash_guard_state);
+    crash_guard_state.record_launch_start(current_unix_secs());
+    if let Err(err) = crash_guard_state.save_to_path(&crash_guard_path) {
+        tracing::warn!("Failed saving startup crash guard state: {err}");
+    }
+    if let Some(reason) = safe_mode_reason {
+        tracing::warn!(
+            ?reason,
+            "Starting Omvix Hub in Safe Mode (all hardware writes disabled)"
+        );
+    }
+    let crash_guard = Arc::new(Mutex::new(crash_guard_state));
+
     tracing::info!(lang = %i18n.active_language(), "Launching Omvix Hub desktop GUI");
 
+    let start_visible = !cfg.general.start_minimized || safe_mode_reason.is_some();
     let (rgba, icon_w, icon_h) = build_tray_icon_rgba();
     let viewport = egui::ViewportBuilder::default()
         .with_title("Omvix Hub")
@@ -458,7 +496,7 @@ fn main() {
         .with_min_inner_size([440.0, 580.0])
         .with_resizable(false)
         .with_maximize_button(false)
-        .with_visible(!cfg.general.start_minimized)
+        .with_visible(start_visible)
         .with_icon(Arc::new(egui::IconData {
             rgba,
             width: icon_w,
@@ -524,6 +562,9 @@ fn main() {
                 tray_ctrl,
                 log_handle,
                 hwnd_atomic,
+                safe_mode_reason,
+                crash_guard,
+                crash_guard_path,
                 #[cfg(windows)]
                 single_instance,
             )))
@@ -569,6 +610,8 @@ struct OmvixApp {
     power_listener: Option<PowerEventHandle>,
     #[cfg(windows)]
     single_instance: Option<SingleInstanceGuard>,
+    crash_guard: Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: PathBuf,
     log_handle: Option<LogHandle>,
 }
 
@@ -583,9 +626,12 @@ impl OmvixApp {
         tray: Option<TrayController>,
         log_handle: Option<LogHandle>,
         hwnd_atomic: Arc<AtomicIsize>,
+        initial_safe_mode: Option<SafeModeReason>,
+        crash_guard: Arc<Mutex<CrashGuardState>>,
+        crash_guard_path: PathBuf,
         #[cfg(windows)] single_instance: Option<SingleInstanceGuard>,
     ) -> Self {
-        let initial_visible = !cfg.general.start_minimized;
+        let initial_visible = !cfg.general.start_minimized || initial_safe_mode.is_some();
         let window_visible = Arc::new(AtomicBool::new(initial_visible));
         let force_quit = Arc::new(AtomicBool::new(false));
         let clean_quit_started = Arc::new(AtomicBool::new(false));
@@ -593,7 +639,14 @@ impl OmvixApp {
             &cfg.hotkeys.omen_key_action,
         )));
 
-        let worker = BackgroundWorker::spawn(cfg.clone(), Some(ctx.clone()), Arc::clone(&window_visible));
+        let worker = BackgroundWorker::spawn(
+            cfg.clone(),
+            Some(ctx.clone()),
+            Arc::clone(&window_visible),
+            initial_safe_mode,
+            Arc::clone(&crash_guard),
+            crash_guard_path.clone(),
+        );
         let state = worker.state();
         if !config_warnings.is_empty() {
             let joined = config_warnings.join(" | ");
@@ -715,6 +768,8 @@ impl OmvixApp {
             power_listener: None,
             #[cfg(windows)]
             single_instance,
+            crash_guard,
+            crash_guard_path,
             log_handle,
         };
         #[cfg(windows)]
@@ -899,6 +954,10 @@ impl OmvixApp {
         if let Some(w) = self.worker.take() {
             w.shutdown();
         }
+        if let Ok(mut cg) = self.crash_guard.lock() {
+            cg.mark_clean_exit(current_unix_secs());
+            let _ = cg.save_to_path(&self.crash_guard_path);
+        }
         #[cfg(windows)]
         if let Some(mut guard) = self.single_instance.take() {
             guard.release();
@@ -917,18 +976,24 @@ impl OmvixApp {
                     self.sync_window_visibility(ctx, visible);
                 }
                 AppSignal::TrayPerfChanged(mode) => {
-                    self.cfg.thermal_fan.performance_mode = mode;
-                    self.save_config();
+                    if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
+                        self.cfg.thermal_fan.performance_mode = mode;
+                        self.save_config();
+                    }
                 }
                 AppSignal::TrayFanChanged(mode) => {
-                    self.cfg.thermal_fan.fan_mode = mode;
-                    self.save_config();
+                    if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
+                        self.cfg.thermal_fan.fan_mode = mode;
+                        self.save_config();
+                    }
                 }
                 AppSignal::TrayBatteryToggled => {
-                    self.cfg.battery.enabled = !self.cfg.battery.enabled;
-                    self.save_config();
-                    self.send_cmd(WorkerCommand::UpdateConfig(self.cfg.clone()));
-                    self.send_cmd(WorkerCommand::ApplyBatteryNow);
+                    if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
+                        self.cfg.battery.enabled = !self.cfg.battery.enabled;
+                        self.save_config();
+                        self.send_cmd(WorkerCommand::UpdateConfig(self.cfg.clone()));
+                        self.send_cmd(WorkerCommand::ApplyBatteryNow);
+                    }
                 }
                 AppSignal::OmenKeyNonToggle => match self.cfg.hotkeys.omen_key_action {
                     OmenKeyAction::ToggleWindow => {}
@@ -950,7 +1015,13 @@ impl OmvixApp {
                 guard.release();
             }
 
-            if try_shell_elevate_self().is_ok() {
+            let in_safe_mode = self
+                .state
+                .lock()
+                .ok()
+                .and_then(|st| st.safe_mode)
+                .is_some();
+            if try_shell_elevate_self(in_safe_mode).is_ok() {
                 self.begin_quit(ctx);
                 return;
             }
