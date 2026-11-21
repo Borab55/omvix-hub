@@ -209,6 +209,9 @@ pub enum WorkerCommand {
     SetUndervolt(i16),
     InstallPawnIo,
     ReloadPawnIo,
+    SystemSuspending(Sender<()>),
+    SystemShuttingDown(Sender<()>),
+    SystemResumed,
     InstallBatteryService,
     StartBatteryService,
     StopBatteryService,
@@ -440,13 +443,30 @@ fn run_worker_loop(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
 
-        // Periodic telemetry poll
+        // Periodic telemetry poll (throttled to >= 1.0s & Optimus-safe when hidden in tray)
         let interval_ms = cfg.general.telemetry_interval_ms.clamp(100, 10_000);
-        if last_telemetry.elapsed() >= Duration::from_millis(interval_ms) {
+        let visible = window_visible.load(Ordering::Relaxed);
+        let effective_interval_ms = if visible {
+            interval_ms
+        } else {
+            interval_ms.max(1000)
+        };
+        if last_telemetry.elapsed() >= Duration::from_millis(effective_interval_ms) {
             last_telemetry = Instant::now();
-            if let Ok(snap) = telemetry_be.read_telemetry() {
+            let on_battery = state
+                .lock()
+                .ok()
+                .and_then(|s| s.telemetry.ac_connected)
+                == Some(false);
+            if let Ok(snap) =
+                telemetry_be.read_telemetry_with_options(visible, visible || !on_battery)
+            {
                 let t = started.elapsed().as_secs_f64();
+                let pawnio_active = telemetry_be.is_pawnio_active();
                 if let Ok(mut st) = state.lock() {
+                    if snap.cpu_temp_c.is_some() || pawnio_active {
+                        st.pawnio_cpu_active = pawnio_active;
+                    }
                     if !st.telemetry_paused {
                         record_snapshot(&mut st, &snap, t);
                     } else {
@@ -661,34 +681,72 @@ fn handle_worker_command(
     match cmd {
         WorkerCommand::Shutdown => {
             tracing::info!("Background worker shutting down");
-            if cfg.thermal_fan.fan_mode != FanMode::Auto || thermal_guard.is_active() {
-                if let Err(err) = thermal_be.set_fan_mode(FanMode::Auto, None) {
-                    tracing::warn!("Failed to restore BIOS Auto fan on shutdown: {err}");
-                } else {
-                    tracing::info!("Restored BIOS Auto fan control on clean shutdown");
-                }
-            }
-            if !omvix_windows::battery_service::is_service_running() && cfg.battery.enabled {
-                if !cfg.battery.hold_when_shutdown {
-                    if let Err(err) = battery_be.set_charge_mode(BatteryChargeMode::Auto) {
-                        tracing::warn!("Failed to restore normal battery charging on shutdown: {err}");
-                    } else {
-                        tracing::info!("Restored normal battery charging (0x2B Auto) on clean shutdown");
-                    }
-                } else if let Ok(bat) = battery_be.get_battery_status() {
-                    if !cfg.battery.one_time_full_charge
-                        && bat.charge_percent >= 40
-                        && bat.charge_percent >= cfg.battery.start_threshold_pct
-                    {
-                        if let Err(err) = battery_be.set_charge_mode(BatteryChargeMode::Hold) {
-                            tracing::warn!("Failed to apply Hold mode on clean shutdown: {err}");
-                        } else {
-                            tracing::info!("Applied battery Hold (0x0300) on clean shutdown");
-                        }
-                    }
-                }
-            }
+            apply_off_state_safety(
+                cfg,
+                thermal_guard,
+                thermal_be,
+                battery_be,
+                "clean shutdown",
+            );
             return true;
+        }
+        WorkerCommand::SystemSuspending(ack) => {
+            tracing::info!("System suspending -> applying Fan Auto & Battery off-state safety");
+            apply_off_state_safety(
+                cfg,
+                thermal_guard,
+                thermal_be,
+                battery_be,
+                "system suspend",
+            );
+            let _ = ack.send(());
+        }
+        WorkerCommand::SystemShuttingDown(ack) => {
+            tracing::info!("System shutting down -> applying Fan Auto & Battery off-state safety");
+            apply_off_state_safety(
+                cfg,
+                thermal_guard,
+                thermal_be,
+                battery_be,
+                "system shutdown",
+            );
+            let _ = ack.send(());
+        }
+        WorkerCommand::SystemResumed => {
+            tracing::info!("System resumed from sleep/standby -> restoring Omvix hardware state");
+            *thermal_guard = ThermalSafetyGuard::new();
+            *last_applied_bat_mode = None;
+            let _ = thermal_be.set_performance_mode(cfg.thermal_fan.performance_mode);
+
+            let snap = state
+                .lock()
+                .map(|st| st.telemetry.clone())
+                .unwrap_or_default();
+            let is_cool = cool_hint_from_snapshot(&snap);
+            let target_pct = resolve_fan_target_pct(
+                cfg,
+                &snap,
+                cfg.thermal_fan.fan_mode,
+                Some(cfg.thermal_fan.manual_speed_pct),
+                prev_curve_temp,
+                prev_curve_speed,
+            );
+            let _ = thermal_be.set_fan_mode_with_cool_hint(
+                cfg.thermal_fan.fan_mode,
+                target_pct,
+                is_cool,
+            );
+            if cfg.lighting.enabled {
+                let _ = kbd_be.set_backlight(
+                    true,
+                    cfg.lighting.brightness_pct,
+                    &cfg.lighting.zones,
+                );
+            }
+            if let Ok(mut st) = state.lock() {
+                st.thermal_guard_active = false;
+            }
+            tracing::info!("Re-applied thermal, fan, and lighting state after system resume");
         }
         WorkerCommand::UpdateConfig(new_cfg) => {
             *cfg = new_cfg;
@@ -729,23 +787,14 @@ fn handle_worker_command(
                 .map(|st| st.telemetry.clone())
                 .unwrap_or_default();
             let is_cool = cool_hint_from_snapshot(&snap);
-            let target_pct = if mode == FanMode::CustomCurve {
-                if let Some(temp) = effective_fan_curve_temp_c(
-                    snap.cpu_temp_c,
-                    snap.gpu_temp_c,
-                    snap.chassis_temp_c,
-                    snap.cpu_power_w,
-                ) {
-                    let pct = cfg.thermal_fan.custom_curve.evaluate(temp, temp, 0);
-                    *prev_curve_temp = temp;
-                    *prev_curve_speed = pct;
-                    Some(pct)
-                } else {
-                    manual_speed_pct
-                }
-            } else {
-                manual_speed_pct
-            };
+            let target_pct = resolve_fan_target_pct(
+                cfg,
+                &snap,
+                mode,
+                manual_speed_pct,
+                prev_curve_temp,
+                prev_curve_speed,
+            );
             let res = thermal_be.set_fan_mode_with_cool_hint(mode, target_pct, is_cool);
             record_result(state, res, format!("Fan mode -> {mode:?}"));
         }
@@ -1044,6 +1093,68 @@ fn run_worker_loop(
     while let Ok(cmd) = rx.recv() {
         if matches!(cmd, WorkerCommand::Shutdown) {
             return;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn resolve_fan_target_pct(
+    cfg: &AppConfig,
+    snap: &TelemetrySnapshot,
+    mode: FanMode,
+    manual_speed_pct: Option<u8>,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
+) -> Option<u8> {
+    if mode == FanMode::CustomCurve {
+        if let Some(temp) = effective_fan_curve_temp_c(
+            snap.cpu_temp_c,
+            snap.gpu_temp_c,
+            snap.chassis_temp_c,
+            snap.cpu_power_w,
+        ) {
+            let pct = cfg.thermal_fan.custom_curve.evaluate(temp, temp, 0);
+            *prev_curve_temp = temp;
+            *prev_curve_speed = pct;
+            return Some(pct);
+        }
+    }
+    manual_speed_pct
+}
+
+#[cfg(windows)]
+fn apply_off_state_safety(
+    cfg: &AppConfig,
+    thermal_guard: &ThermalSafetyGuard,
+    thermal_be: &WindowsThermalFanBackend,
+    battery_be: &WindowsBatteryBackend,
+    reason: &str,
+) {
+    if cfg.thermal_fan.fan_mode != FanMode::Auto || thermal_guard.is_active() {
+        if let Err(err) = thermal_be.set_fan_mode(FanMode::Auto, None) {
+            tracing::warn!(%reason, "Failed to restore BIOS Auto fan: {err}");
+        } else {
+            tracing::info!(%reason, "Restored BIOS Auto fan control");
+        }
+    }
+    if !omvix_windows::battery_service::is_service_running() && cfg.battery.enabled {
+        if !cfg.battery.hold_when_shutdown {
+            if let Err(err) = battery_be.set_charge_mode(BatteryChargeMode::Auto) {
+                tracing::warn!(%reason, "Failed to restore normal battery charging: {err}");
+            } else {
+                tracing::info!(%reason, "Restored normal battery charging (0x2B Auto)");
+            }
+        } else if let Ok(bat) = battery_be.get_battery_status() {
+            if !cfg.battery.one_time_full_charge
+                && bat.charge_percent >= 40
+                && bat.charge_percent >= cfg.battery.start_threshold_pct
+            {
+                if let Err(err) = battery_be.set_charge_mode(BatteryChargeMode::Hold) {
+                    tracing::warn!(%reason, "Failed to apply Hold mode: {err}");
+                } else {
+                    tracing::info!(%reason, "Applied battery Hold (0x0300)");
+                }
+            }
         }
     }
 }

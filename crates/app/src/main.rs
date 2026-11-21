@@ -24,6 +24,10 @@ const DRAWER_SIZE: [f32; 2] = [632.0, 728.0];
 
 #[cfg(windows)]
 use omvix_windows::hotkeys::{ListenerHandle, spawn_global_hotkey_listener, spawn_omen_key_listener};
+#[cfg(windows)]
+use omvix_windows::power_events::{
+    PowerEventHandle, SystemPowerEvent, spawn_power_event_listener,
+};
 
 #[derive(Debug, Clone)]
 enum AppSignal {
@@ -500,6 +504,8 @@ struct OmvixApp {
     #[cfg(windows)]
     hotkey_listener: Option<ListenerHandle>,
     #[cfg(windows)]
+    power_listener: Option<PowerEventHandle>,
+    #[cfg(windows)]
     single_instance: Option<SingleInstanceGuard>,
     log_handle: Option<LogHandle>,
 }
@@ -632,9 +638,37 @@ impl OmvixApp {
             #[cfg(windows)]
             hotkey_listener: None,
             #[cfg(windows)]
+            power_listener: None,
+            #[cfg(windows)]
             single_instance,
             log_handle,
         };
+        #[cfg(windows)]
+        {
+            if let Some(w) = &app.worker {
+                let pwr_tx = worker_command_proxy(w);
+                app.power_listener = Some(spawn_power_event_listener(move |ev| match ev {
+                    SystemPowerEvent::Suspending => {
+                        let (ack_tx, ack_rx) = mpsc::channel();
+                        if pwr_tx.send(WorkerCommand::SystemSuspending(ack_tx)).is_ok() {
+                            let _ = ack_rx.recv_timeout(Duration::from_secs(3));
+                        }
+                    }
+                    SystemPowerEvent::ShuttingDown => {
+                        let (ack_tx, ack_rx) = mpsc::channel();
+                        if pwr_tx
+                            .send(WorkerCommand::SystemShuttingDown(ack_tx))
+                            .is_ok()
+                        {
+                            let _ = ack_rx.recv_timeout(Duration::from_secs(3));
+                        }
+                    }
+                    SystemPowerEvent::Resumed => {
+                        let _ = pwr_tx.send(WorkerCommand::SystemResumed);
+                    }
+                }));
+            }
+        }
         app.rebind_hotkeys(&ctx);
         app
     }
@@ -778,6 +812,10 @@ impl OmvixApp {
         self.clean_quit_started.store(true, Ordering::SeqCst);
         self.save_config();
         self.stop_hotkeys();
+        #[cfg(windows)]
+        if let Some(pwr) = self.power_listener.take() {
+            pwr.stop();
+        }
         if let Some(w) = self.worker.take() {
             w.shutdown();
         }

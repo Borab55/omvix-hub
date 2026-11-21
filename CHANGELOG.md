@@ -3,6 +3,17 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.4.3] - 2026-11-21
+
+### Added & Improved
+- **Native Sleep, Modern Standby (S0ix) & Windows Shutdown Safety (`power_events.rs`, `worker.rs`, `main.rs`):**
+  - Added hidden Win32 top-level window listening for `WM_QUERYENDSESSION` / `WM_ENDSESSION` and registered via `RegisterSuspendResumeNotification` for Modern Standby (`PBT_APMSUSPEND`) and Wake (`PBT_APMRESUME*`) broadcasts.
+  - Synchronously restores `FanMode::Auto` (preventing stuck `0 RPM` or fixed speeds when closing lid or shutting down) and applies `Battery Hold (0x0300)` (or `Auto` if disabled / below 40%) before Windows suspends or shuts down; automatically restores active Performance Mode, Fan Mode/Curve, and Keyboard Lighting on resume.
+- **Hidden-Tray Battery & Idle Optimizations (`telemetry.rs`, `worker.rs`):**
+  - Throttles background telemetry to `>= 1.0s` while hidden in system tray and skips heavy Disk/Network `sysinfo` refreshes when the UI is not visible.
+  - Keeps idle Optimus RTX dGPUs asleep (`D3cold`) by skipping NVML polling/initialization whenever the window is hidden on battery (`DC`).
+  - Added automatic 30s cooldown retry (capped at 3/5 attempts) for `PawnIO` (`IntelMSR.bin`) and `NVML` initialization so early Windows startup races self-heal automatically.
+
 ## [0.4.2] - 2026-11-21
 
 ### Added & Changed
