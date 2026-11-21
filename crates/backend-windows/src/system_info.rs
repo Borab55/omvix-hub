@@ -9,10 +9,27 @@ const MONITORED_SERVICES: &[(&str, &str)] = &[
     ("HPDiagsCap", "HP HSA"),
     ("HPNetworkCap", "HP HSA"),
     ("HPSysInfoCap", "HP HSA"),
+    ("OmenCommandCenterBackground", "HP OGH"),
+    ("OMENInstallMonitor", "HP OGH"),
     ("HpTouchpointAnalyticsService", "HP Telemetry"),
     ("XTU3SERVICE", "Intel XTU"),
     ("hp-charge-limit-rs", "Battery Charge Limit"),
 ];
+
+/// Returns `true` when `service_name` belongs to HP OGH/HSA or Intel XTU that can override
+/// fan speed, thermal profiles, or CPU power limits (R10).
+pub fn is_fan_thermal_conflict_service(service_name: &str) -> bool {
+    let lower = service_name.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "hpomencap"
+            | "hpapphelpercap"
+            | "hpsysinfocap"
+            | "omencommandcenterbackground"
+            | "omeninstallmonitor"
+            | "xtu3service"
+    ) || lower.starts_with("omen")
+}
 
 pub fn collect_system_identity() -> Result<SystemIdentity> {
     let cim = WmiConnection::connect(r"root\CIMV2")?;
@@ -179,4 +196,19 @@ pub fn scan_conflict_services() -> Vec<ConflictServiceInfo> {
     }
     found.sort_by(|a, b| a.service_name.cmp(&b.service_name));
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifies_fan_and_thermal_conflict_services() {
+        assert!(is_fan_thermal_conflict_service("HPOmenCap"));
+        assert!(is_fan_thermal_conflict_service("OmenCommandCenterBackground"));
+        assert!(is_fan_thermal_conflict_service("OMENCapSvc"));
+        assert!(is_fan_thermal_conflict_service("XTU3SERVICE"));
+        assert!(!is_fan_thermal_conflict_service("hp-charge-limit-rs"));
+        assert!(!is_fan_thermal_conflict_service("HpTouchpointAnalyticsService"));
+    }
 }

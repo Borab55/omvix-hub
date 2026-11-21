@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 2;
+use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
+
+pub const CURRENT_CONFIG_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -293,6 +295,7 @@ pub struct GeneralConfig {
     pub show_tray_notice_on_close: bool,
     pub dock_bottom_right: bool,
     pub hide_on_focus_loss: bool,
+    pub experimental_board_id: Option<String>,
     pub theme: String,
     pub telemetry_interval_ms: u64,
     pub custom_theme: CustomThemeConfig,
@@ -308,6 +311,7 @@ impl Default for GeneralConfig {
             show_tray_notice_on_close: true,
             dock_bottom_right: true,
             hide_on_focus_loss: false,
+            experimental_board_id: None,
             theme: "dark".to_string(),
             telemetry_interval_ms: 1000,
             custom_theme: CustomThemeConfig::preset_dark_slate(),
@@ -324,6 +328,8 @@ pub struct ThermalFanConfig {
     pub custom_curve: FanCurve,
     pub keep_alive_enabled: bool,
     pub keep_alive_interval_secs: u64,
+    pub guard_cpu_temp_c: u8,
+    pub guard_sustain_secs: u8,
 }
 
 impl Default for ThermalFanConfig {
@@ -335,6 +341,8 @@ impl Default for ThermalFanConfig {
             custom_curve: FanCurve::default(),
             keep_alive_enabled: true,
             keep_alive_interval_secs: 45,
+            guard_cpu_temp_c: DEFAULT_GUARD_CPU_TEMP_C,
+            guard_sustain_secs: DEFAULT_GUARD_SUSTAIN_SECS,
         }
     }
 }
@@ -580,11 +588,16 @@ impl AppConfig {
         }
         let raw = fs::read_to_string(path)?;
         let mut cfg: Self = toml::from_str(&raw).map_err(|e| OmvixError::Config(e.to_string()))?;
-        if cfg.config_version < CURRENT_CONFIG_VERSION {
+        if cfg.config_version < 2 {
             // Migrate pre-v0.4.2 configs once to enable safe shutdown Hold by default.
             cfg.battery.hold_when_shutdown = true;
-            cfg.config_version = CURRENT_CONFIG_VERSION;
         }
+        if cfg.config_version < 3 {
+            // Migrate pre-v0.4.5 configs to configurable sustained thermal guard defaults.
+            cfg.thermal_fan.guard_cpu_temp_c = DEFAULT_GUARD_CPU_TEMP_C;
+            cfg.thermal_fan.guard_sustain_secs = DEFAULT_GUARD_SUSTAIN_SECS;
+        }
+        cfg.config_version = CURRENT_CONFIG_VERSION;
         let warnings = cfg.sanitize();
         Ok((cfg, warnings))
     }
@@ -601,25 +614,22 @@ impl AppConfig {
         self.thermal_fan.manual_speed_pct = self.thermal_fan.manual_speed_pct.clamp(0, 100);
         self.thermal_fan.keep_alive_interval_secs =
             self.thermal_fan.keep_alive_interval_secs.clamp(15, 110);
-        self.thermal_fan.custom_curve.hysteresis_c =
-            self.thermal_fan.custom_curve.hysteresis_c.clamp(1, 10);
+        self.thermal_fan.guard_cpu_temp_c = self.thermal_fan.guard_cpu_temp_c.clamp(90, 98);
+        self.thermal_fan.guard_sustain_secs = self.thermal_fan.guard_sustain_secs.clamp(10, 30);
 
-        if self.thermal_fan.custom_curve.points.len() < 2 {
-            self.thermal_fan.custom_curve.points = FanCurve::default().points;
-            warnings.push(
-                "Custom fan curve had fewer than 2 points; restored default curve points."
-                    .to_string(),
-            );
-        } else {
-            for pt in &mut self.thermal_fan.custom_curve.points {
-                pt.temp_c = pt.temp_c.clamp(30, 100);
-                pt.speed_pct = pt.speed_pct.clamp(0, 100);
+        let had_too_few = self.thermal_fan.custom_curve.points.len() < 2;
+        if self.thermal_fan.custom_curve.normalize() {
+            if had_too_few {
+                warnings.push(
+                    "Custom fan curve had fewer than 2 points; restored default curve points."
+                        .to_string(),
+                );
+            } else {
+                warnings.push(
+                    "Normalized custom fan curve (monotonic non-decreasing & >= 50% at >= 80°C)."
+                        .to_string(),
+                );
             }
-            self.thermal_fan
-                .custom_curve
-                .points
-                .sort_by_key(|p| p.temp_c);
-            self.thermal_fan.custom_curve.points.truncate(8);
         }
 
         self.battery.stop_threshold_pct = self.battery.stop_threshold_pct.clamp(50, 100);
@@ -804,16 +814,44 @@ mod tests {
         assert_eq!(migrated.config_version, CURRENT_CONFIG_VERSION);
         assert!(migrated.battery.hold_when_shutdown);
 
-        // v2 config where user explicitly chose false -> preserves false
-        let v2_toml = format!(
-            "config_version = {CURRENT_CONFIG_VERSION}\n[battery]\nenabled = true\nhold_when_shutdown = false\n"
-        );
+        // v2 config where user explicitly chose false -> preserves false, migrates thermal guard to v3 defaults
+        let v2_toml =
+            "config_version = 2\n[battery]\nenabled = true\nhold_when_shutdown = false\n";
         fs::write(&path, v2_toml).unwrap();
         let explicit = AppConfig::load_from_path(&path).expect("load v2");
         assert_eq!(explicit.config_version, CURRENT_CONFIG_VERSION);
         assert!(!explicit.battery.hold_when_shutdown);
+        assert_eq!(explicit.thermal_fan.guard_cpu_temp_c, DEFAULT_GUARD_CPU_TEMP_C);
+        assert_eq!(explicit.thermal_fan.guard_sustain_secs, DEFAULT_GUARD_SUSTAIN_SECS);
+
+        // v3 config preserves explicit guard overrides (within 90..=98°C, 10..=30s)
+        let v3_toml = format!(
+            "config_version = {CURRENT_CONFIG_VERSION}\n[thermal_fan]\nguard_cpu_temp_c = 92\nguard_sustain_secs = 15\n"
+        );
+        fs::write(&path, v3_toml).unwrap();
+        let v3_loaded = AppConfig::load_from_path(&path).expect("load v3");
+        assert_eq!(v3_loaded.thermal_fan.guard_cpu_temp_c, 92);
+        assert_eq!(v3_loaded.thermal_fan.guard_sustain_secs, 15);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitize_enforces_monotonic_curve_and_high_temp_floor_with_warning() {
+        let mut cfg = AppConfig::default();
+        cfg.thermal_fan.guard_cpu_temp_c = 80;
+        cfg.thermal_fan.guard_sustain_secs = 2;
+        cfg.thermal_fan.custom_curve.points = vec![
+            crate::models::FanCurvePoint { temp_c: 40, speed_pct: 35 },
+            crate::models::FanCurvePoint { temp_c: 65, speed_pct: 20 },
+            crate::models::FanCurvePoint { temp_c: 85, speed_pct: 10 },
+        ];
+        let warnings = cfg.sanitize();
+        assert!(!warnings.is_empty());
+        assert_eq!(cfg.thermal_fan.guard_cpu_temp_c, 90);
+        assert_eq!(cfg.thermal_fan.guard_sustain_secs, 10);
+        assert_eq!(cfg.thermal_fan.custom_curve.points[1].speed_pct, 35);
+        assert_eq!(cfg.thermal_fan.custom_curve.points[2].speed_pct, 50);
     }
 
     #[test]

@@ -548,6 +548,7 @@ struct OmvixApp {
     worker_dead: bool,
     worker_dead_recovery_attempted: bool,
     battery_draft: ui::battery::BatteryDraftState,
+    lighting_draft: ui::lighting_display::LightingDisplayDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
     window_visible: Arc<AtomicBool>,
     hwnd_atomic: Arc<AtomicIsize>,
@@ -693,6 +694,7 @@ impl OmvixApp {
             worker_dead: false,
             worker_dead_recovery_attempted: false,
             battery_draft: ui::battery::BatteryDraftState::default(),
+            lighting_draft: ui::lighting_display::LightingDisplayDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
             window_visible,
             hwnd_atomic,
@@ -723,7 +725,9 @@ impl OmvixApp {
                     SystemPowerEvent::Suspending => {
                         let (ack_tx, ack_rx) = mpsc::channel();
                         if pwr_tx.send(WorkerCommand::SystemSuspending(ack_tx)).is_ok() {
-                            let _ = ack_rx.recv_timeout(Duration::from_secs(3));
+                            if ack_rx.recv_timeout(Duration::from_secs(3)).is_err() {
+                                tracing::warn!("SystemSuspending safety hook timed out after 3s");
+                            }
                         }
                     }
                     SystemPowerEvent::ShuttingDown => {
@@ -732,7 +736,9 @@ impl OmvixApp {
                             .send(WorkerCommand::SystemShuttingDown(ack_tx))
                             .is_ok()
                         {
-                            let _ = ack_rx.recv_timeout(Duration::from_secs(3));
+                            if ack_rx.recv_timeout(Duration::from_secs(3)).is_err() {
+                                tracing::warn!("SystemShuttingDown safety hook timed out after 3s");
+                            }
                         }
                     }
                     SystemPowerEvent::Resumed => {
@@ -1014,6 +1020,15 @@ impl eframe::App for OmvixApp {
             .map(|s| s.clone())
             .unwrap_or_default();
 
+        if let Some(tray) = &mut self.tray {
+            let bat_mode = snapshot_state
+                .battery_status
+                .as_ref()
+                .map(|b| b.current_mode)
+                .unwrap_or(omvix_core::BatteryChargeMode::Auto);
+            tray.update_battery_badge(bat_mode, &self.i18n);
+        }
+
         if !self.quitting && self.worker.as_ref().is_some_and(|w| !w.is_alive()) {
             self.worker_dead = true;
             if !self.worker_dead_recovery_attempted {
@@ -1267,6 +1282,7 @@ impl eframe::App for OmvixApp {
                                                 &mut self.cfg,
                                                 &snapshot_state,
                                                 &self.i18n,
+                                                &mut self.lighting_draft,
                                                 &mut push_cmd,
                                                 &mut mark_save,
                                             )
@@ -1343,6 +1359,7 @@ impl eframe::App for OmvixApp {
             self.cfg.general.start_minimized = false;
             self.config_warnings.clear();
             self.battery_draft = ui::battery::BatteryDraftState::default();
+            self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();
             theme::apply_theme(ctx, &self.cfg.general.custom_theme);
             if let Some(tray) = &self.tray {

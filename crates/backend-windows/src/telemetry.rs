@@ -49,6 +49,33 @@ pub fn should_retry_init(
     attempts < max_attempts && last_attempt.is_none_or(|t| t.elapsed() >= cooldown)
 }
 
+/// Filters implausible NVML GPU board power readings emitted during Optimus D3cold transitions.
+pub fn sanitize_nvml_power_w(raw_w: f32, power_limit_w: Option<f32>) -> Option<f32> {
+    if !raw_w.is_finite() || raw_w < 0.0 {
+        return None;
+    }
+    let ceiling = power_limit_w
+        .filter(|l| l.is_finite() && *l > 0.0)
+        .map(|l| (l * 1.6).max(220.0))
+        .unwrap_or(300.0);
+    (raw_w <= ceiling).then_some(raw_w)
+}
+
+/// Validates NVML GPU core temperature readings.
+pub fn sanitize_nvml_temp_c(raw_c: f32) -> Option<f32> {
+    (raw_c.is_finite() && (5.0..=115.0).contains(&raw_c)).then_some(raw_c)
+}
+
+/// Validates NVML GPU utilization readings.
+pub fn sanitize_nvml_usage_pct(raw_pct: u32) -> Option<f32> {
+    (raw_pct <= 100).then_some(raw_pct as f32)
+}
+
+/// Fast (< 0.1 ms) Win32 battery charge percentage lookup without slow WMI queries.
+pub fn read_fast_battery_pct() -> Option<u8> {
+    WindowsTelemetryBackend::read_win32_power().1
+}
+
 /// Dual-tier Windows telemetry provider:
 /// - **Fast tier (supports 100 ms / 0.1 s polling):** `sysinfo` CPU/RAM/Disk/Net, NVML GPU metrics,
 ///   Windows Energy Meter Interface (`EMI`) CPU package power, and `GetSystemPowerStatus`.
@@ -429,14 +456,35 @@ impl WindowsTelemetryBackend {
                 if let Some(nvml) = &guard.nvml {
                     if let Ok(device) = nvml.device_by_index(0) {
                         gpu_name = device.name().ok();
-                        gpu_temp_c = device.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f32);
-                        gpu_usage_pct = device.utilization_rates().ok().map(|u| u.gpu as f32);
-                        gpu_power_w = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
+                        gpu_temp_c = device
+                            .temperature(TemperatureSensor::Gpu)
+                            .ok()
+                            .and_then(|t| sanitize_nvml_temp_c(t as f32));
+                        gpu_usage_pct = match device.utilization_rates() {
+                            Ok(u) => sanitize_nvml_usage_pct(u.gpu),
+                            Err(err) => {
+                                tracing::debug!("NVML utilization_rates unavailable: {err}");
+                                None
+                            }
+                        };
                         gpu_power_limit_w = device
                             .enforced_power_limit()
                             .or_else(|_| device.power_management_limit())
                             .ok()
-                            .map(|mw| mw as f32 / 1000.0);
+                            .map(|mw| mw as f32 / 1000.0)
+                            .filter(|w| w.is_finite() && (10.0..=600.0).contains(w));
+                        gpu_power_w = device.power_usage().ok().and_then(|mw| {
+                            let raw_w = mw as f32 / 1000.0;
+                            let valid = sanitize_nvml_power_w(raw_w, gpu_power_limit_w);
+                            if valid.is_none() {
+                                tracing::debug!(
+                                    raw_w,
+                                    ?gpu_power_limit_w,
+                                    "Discarded implausible NVML GPU power sample"
+                                );
+                            }
+                            valid
+                        });
                         gpu_clock_mhz = device.clock_info(Clock::Graphics).ok();
                         gpu_mem_clock_mhz = device.clock_info(Clock::Memory).ok();
                         if let Ok(mem) = device.memory_info() {
@@ -623,6 +671,19 @@ mod tests {
         assert!(should_retry_init(1, 5, old, cd));
         // Reached max attempts -> blocked permanently
         assert!(!should_retry_init(5, 5, old, cd));
+    }
+
+    #[test]
+    fn sanitize_nvml_filters_d3cold_power_spikes_and_invalid_metrics() {
+        assert_eq!(sanitize_nvml_power_w(590.0, Some(80.0)), None);
+        assert_eq!(sanitize_nvml_power_w(590.0, None), None);
+        assert_eq!(sanitize_nvml_power_w(-5.0, Some(140.0)), None);
+        assert_eq!(sanitize_nvml_power_w(16.2, Some(80.0)), Some(16.2));
+        assert_eq!(sanitize_nvml_power_w(140.0, Some(140.0)), Some(140.0));
+        assert_eq!(sanitize_nvml_temp_c(51.0), Some(51.0));
+        assert_eq!(sanitize_nvml_temp_c(0.0), None);
+        assert_eq!(sanitize_nvml_usage_pct(42), Some(42.0));
+        assert_eq!(sanitize_nvml_usage_pct(150), None);
     }
 }
 

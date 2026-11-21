@@ -53,6 +53,9 @@ pub enum FanMode {
     CustomCurve,
 }
 
+pub const FAN_CURVE_SAFETY_FLOOR_TEMP_C: u8 = 80;
+pub const FAN_CURVE_SAFETY_FLOOR_SPEED_PCT: u8 = 50;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FanCurvePoint {
     pub temp_c: u8,
@@ -84,12 +87,54 @@ impl Default for FanCurve {
 }
 
 impl FanCurve {
+    /// Enforces safe curve invariants: 2..=8 points sorted by temperature, monotonically
+    /// non-decreasing fan speed, and a mandatory high-temperature safety floor
+    /// (`>= 80°C` -> `>= 50%`). Returns `true` if any point or hysteresis value changed.
+    pub fn normalize(&mut self) -> bool {
+        let prev_points = self.points.clone();
+        let prev_hyst = self.hysteresis_c;
+        self.hysteresis_c = self.hysteresis_c.clamp(1, 10);
+
+        if self.points.len() < 2 {
+            self.points = Self::default().points;
+            return self.points != prev_points || self.hysteresis_c != prev_hyst;
+        }
+
+        for pt in &mut self.points {
+            pt.temp_c = pt.temp_c.clamp(30, 100);
+            pt.speed_pct = pt.speed_pct.clamp(0, 100);
+        }
+        self.points.sort_by_key(|p| (p.temp_c, p.speed_pct));
+        self.points.truncate(8);
+
+        let mut running_max = 0u8;
+        for pt in &mut self.points {
+            if pt.temp_c >= FAN_CURVE_SAFETY_FLOOR_TEMP_C {
+                pt.speed_pct = pt.speed_pct.max(FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+            }
+            if pt.speed_pct < running_max {
+                pt.speed_pct = running_max;
+            }
+            running_max = pt.speed_pct;
+        }
+
+        self.points != prev_points || self.hysteresis_c != prev_hyst
+    }
+
     /// Evaluates target fan speed percentage with linear interpolation and downward hysteresis.
     /// When temperature drops within `hysteresis_c` of `prev_temp_c`, keeps `prev_speed_pct`
-    /// to avoid rapid fan oscillation.
+    /// to avoid rapid fan oscillation. Enforces high-temp safety floor at `>= 80°C`.
     pub fn evaluate(&self, current_temp_c: f32, prev_temp_c: f32, prev_speed_pct: u8) -> u8 {
+        let floor_if_hot = |pct: u8| -> u8 {
+            if current_temp_c >= FAN_CURVE_SAFETY_FLOOR_TEMP_C as f32 {
+                pct.max(FAN_CURVE_SAFETY_FLOOR_SPEED_PCT)
+            } else {
+                pct
+            }
+        };
+
         if self.points.is_empty() {
-            return prev_speed_pct.clamp(0, 100);
+            return floor_if_hot(prev_speed_pct.clamp(0, 100));
         }
 
         let mut sorted = self.points.clone();
@@ -98,17 +143,17 @@ impl FanCurve {
         // Downward hysteresis guard: ignore minor cooling jitter.
         if current_temp_c < prev_temp_c && (prev_temp_c - current_temp_c) < self.hysteresis_c as f32
         {
-            return prev_speed_pct.clamp(0, 100);
+            return floor_if_hot(prev_speed_pct.clamp(0, 100));
         }
 
         let first = sorted[0];
         if current_temp_c <= first.temp_c as f32 {
-            return first.speed_pct.clamp(0, 100);
+            return floor_if_hot(first.speed_pct.clamp(0, 100));
         }
 
         let last = sorted[sorted.len() - 1];
         if current_temp_c >= last.temp_c as f32 {
-            return last.speed_pct.clamp(0, 100);
+            return floor_if_hot(last.speed_pct.clamp(0, 100));
         }
 
         for pair in sorted.windows(2) {
@@ -117,16 +162,16 @@ impl FanCurve {
             if current_temp_c >= low.temp_c as f32 && current_temp_c <= high.temp_c as f32 {
                 let span = (high.temp_c - low.temp_c) as f32;
                 if span <= f32::EPSILON {
-                    return high.speed_pct.clamp(0, 100);
+                    return floor_if_hot(high.speed_pct.clamp(0, 100));
                 }
                 let ratio = (current_temp_c - low.temp_c as f32) / span;
                 let interp =
                     low.speed_pct as f32 + ratio * (high.speed_pct as f32 - low.speed_pct as f32);
-                return interp.round().clamp(0.0, 100.0) as u8;
+                return floor_if_hot(interp.round().clamp(0.0, 100.0) as u8);
             }
         }
 
-        prev_speed_pct.clamp(0, 100)
+        floor_if_hot(prev_speed_pct.clamp(0, 100))
     }
 }
 
@@ -350,5 +395,37 @@ mod tests {
         assert_eq!(curve.evaluate(55.0, 60.0, 60), 50);
         // Clamped above maximum
         assert_eq!(curve.evaluate(95.0, 80.0, 100), 100);
+    }
+
+    #[test]
+    fn fan_curve_normalize_enforces_monotonic_and_high_temp_floor() {
+        let mut curve = FanCurve {
+            points: vec![
+                FanCurvePoint { temp_c: 40, speed_pct: 40 },
+                FanCurvePoint { temp_c: 60, speed_pct: 25 },
+                FanCurvePoint { temp_c: 85, speed_pct: 10 },
+                FanCurvePoint { temp_c: 92, speed_pct: 45 },
+            ],
+            hysteresis_c: 20,
+        };
+        assert!(curve.normalize());
+        assert_eq!(curve.hysteresis_c, 10);
+        assert_eq!(curve.points[0].speed_pct, 40);
+        assert_eq!(curve.points[1].speed_pct, 40); // monotonically non-decreasing
+        assert_eq!(curve.points[2].speed_pct, FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+        assert_eq!(curve.points[3].speed_pct, FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+
+        // Second normalize is a no-op
+        assert!(!curve.normalize());
+
+        // Even if all points sit below 80°C, evaluating >= 80°C applies the 50% safety floor.
+        let sub80 = FanCurve {
+            points: vec![
+                FanCurvePoint { temp_c: 40, speed_pct: 10 },
+                FanCurvePoint { temp_c: 75, speed_pct: 20 },
+            ],
+            hysteresis_c: 3,
+        };
+        assert_eq!(sub80.evaluate(82.0, 75.0, 20), FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
     }
 }
