@@ -1,12 +1,10 @@
 use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge};
+use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Slider, Ui};
 use omvix_core::{
     AppConfig, CustomThemeConfig, I18n, LogLevel, clear_logs, tail_logs, total_log_bytes,
 };
-
-#[cfg(windows)]
-use omvix_windows::autostart;
 
 #[derive(Debug, Default, Clone)]
 pub struct SettingsThemeDraft {
@@ -140,22 +138,37 @@ pub fn render(
                 )
                 .changed()
             {
-                #[cfg(windows)]
-                if let Ok(exe) = std::env::current_exe() {
-                    if let Err(err) = autostart::set_autostart(cfg.general.start_with_windows, &exe)
-                    {
-                        tracing::warn!("Autostart update failed: {err}");
-                        draft.status_msg = Some((err.to_string(), true));
-                    }
-                }
                 on_save();
+                on_cmd(WorkerCommand::SetAutostart(cfg.general.start_with_windows));
             }
-            #[cfg(windows)]
-            if autostart::is_elevated_task_autostart_enabled() {
+            if st.installed_copy_status.task_exists {
                 status_badge(ui, &i18n.t("settings.autostart_elevated_badge"), STATUS_OK);
             }
         });
         ui.weak(RichText::new(i18n.t("settings.autostart_admin_note")).size(11.0));
+        if !st.installed_copy_status.installed_path.is_empty() {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{}:", i18n.t("settings.installed_copy_path")));
+                ui.monospace(&st.installed_copy_status.installed_path);
+                if pill_button(
+                    ui,
+                    &i18n.t("settings.update_installed_copy"),
+                    st.installed_copy_status.installed_is_outdated,
+                    &theme_snapshot,
+                )
+                .clicked()
+                {
+                    on_cmd(WorkerCommand::UpdateInstalledCopy);
+                }
+            });
+            if st.installed_copy_status.installed_is_outdated {
+                ui.colored_label(
+                    STATUS_WARN,
+                    RichText::new(i18n.t("settings.installed_copy_outdated")).size(11.5),
+                );
+            }
+        }
     });
 
     ui.add_space(8.0);
@@ -214,57 +227,57 @@ pub fn render(
             .spacing([14.0, 6.0])
             .show(ui, |ui| {
                 ui.label(i18n.t("settings.color_accent"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.accent)
-                    .changed()
-                {
+                let r0 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.accent);
+                if r0.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 0usize), &r0) {
                     on_save();
                 }
 
                 ui.label(i18n.t("settings.color_canvas"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.canvas_bg)
-                    .changed()
-                {
+                let r1 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.canvas_bg);
+                if r1.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 1usize), &r1) {
                     on_save();
                 }
 
                 ui.label(i18n.t("settings.color_sidebar"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.sidebar_bg)
-                    .changed()
-                {
+                let r2 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.sidebar_bg);
+                if r2.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 2usize), &r2) {
                     on_save();
                 }
                 ui.end_row();
 
                 ui.label(i18n.t("settings.color_card"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.card_bg)
-                    .changed()
-                {
+                let r3 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.card_bg);
+                if r3.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 3usize), &r3) {
                     on_save();
                 }
 
                 ui.label(i18n.t("settings.color_border"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.card_border)
-                    .changed()
-                {
+                let r4 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.card_border);
+                if r4.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 4usize), &r4) {
                     on_save();
                 }
 
                 ui.label(i18n.t("settings.color_text"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.text_primary)
-                    .changed()
-                {
+                let r5 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.text_primary);
+                if r5.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 5usize), &r5) {
                     on_save();
                 }
                 ui.end_row();
@@ -359,10 +372,9 @@ pub fn render(
 
             ui.add_space(12.0);
             ui.label(i18n.t("logs.max_size_mb"));
-            if ui
-                .add(Slider::new(&mut cfg.logging.max_total_mb, 5..=100).suffix(" MB"))
-                .changed()
-            {
+            let log_resp =
+                ui.add(Slider::new(&mut cfg.logging.max_total_mb, 5..=100).suffix(" MB"));
+            if control_committed(ui, "settings_log_max_mb", &log_resp) {
                 on_save();
             }
         });

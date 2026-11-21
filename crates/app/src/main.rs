@@ -319,6 +319,45 @@ fn try_shell_elevate_self() -> std::result::Result<(), ()> {
     }
 }
 
+#[cfg(windows)]
+fn install_fan_safety_panic_hook(log_handle: Option<LogHandle>) {
+    use std::sync::Once;
+    static HOOK_ONCE: Once = Once::new();
+    static PANIC_RECOVERY_RUNNING: AtomicBool = AtomicBool::new(false);
+
+    HOOK_ONCE.call_once(|| {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            previous_hook(panic_info);
+
+            if !PANIC_RECOVERY_RUNNING.swap(true, Ordering::SeqCst) {
+                let (tx, rx) = mpsc::channel();
+                let _ = thread::spawn(move || {
+                    let res = omvix_windows::thermal_fan::restore_fan_auto_fresh_wmi();
+                    let _ = tx.send(res);
+                });
+                match rx.recv_timeout(Duration::from_secs(2)) {
+                    Ok(Ok(())) => {
+                        tracing::warn!("Panic safety hook restored BIOS Auto fan control");
+                    }
+                    Ok(Err(err)) => {
+                        tracing::error!("Panic safety hook failed to restore Auto fan: {err}");
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "Panic safety hook timed out after 2s restoring BIOS Auto fan"
+                        );
+                    }
+                }
+                if let Some(ref h) = log_handle {
+                    h.flush();
+                }
+                PANIC_RECOVERY_RUNNING.store(false, Ordering::SeqCst);
+            }
+        }));
+    });
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -335,13 +374,30 @@ fn main() {
     let no_elevate = args.iter().any(|a| a == "--no-elevate");
 
     let cfg_path = AppConfig::default_config_path();
-    let mut cfg = AppConfig::load_from_path(&cfg_path).unwrap_or_default();
+    let cfg_existed = cfg_path.exists();
+    let (mut cfg, cfg_warnings) = AppConfig::load_from_path_with_warnings(&cfg_path)
+        .unwrap_or_else(|err| {
+            (
+                AppConfig::default(),
+                vec![format!("Failed reading config, restored defaults: {err}")],
+            )
+        });
     if cfg.general.theme == "light" && cfg.general.custom_theme == CustomThemeConfig::preset_dark_slate() {
         cfg.general.custom_theme = CustomThemeConfig::preset_clean_light();
     } else if cfg.general.custom_theme.is_legacy_bluish_dark_slate() {
         cfg.general.custom_theme = CustomThemeConfig::preset_dark_slate();
     }
     let log_handle = init_logging(&cfg.logging, smoke_test).ok();
+    #[cfg(windows)]
+    if !smoke_test {
+        install_fan_safety_panic_hook(log_handle.clone());
+    }
+    for warning in &cfg_warnings {
+        tracing::warn!("Config validation notice: {warning}");
+    }
+    if !smoke_test && cfg_existed && !cfg_warnings.is_empty() {
+        let _ = cfg.save_to_path(&cfg_path);
+    }
     let i18n = I18n::new(&cfg.general.language);
 
     if smoke_test {
@@ -463,6 +519,7 @@ fn main() {
                 cc.egui_ctx.clone(),
                 cfg,
                 cfg_path,
+                cfg_warnings,
                 i18n,
                 tray_ctrl,
                 log_handle,
@@ -479,6 +536,7 @@ fn main() {
 struct OmvixApp {
     cfg: AppConfig,
     cfg_path: PathBuf,
+    config_warnings: Vec<String>,
     i18n: I18n,
     open_drawer: Option<Drawer>,
     fans_power_tab: FansPowerSubTab,
@@ -486,6 +544,9 @@ struct OmvixApp {
     pending_dock_frames: u8,
     last_shown_at: Instant,
     prev_focused: bool,
+    config_dirty_since: Option<Instant>,
+    worker_dead: bool,
+    worker_dead_recovery_attempted: bool,
     battery_draft: ui::battery::BatteryDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
     window_visible: Arc<AtomicBool>,
@@ -516,6 +577,7 @@ impl OmvixApp {
         ctx: egui::Context,
         cfg: AppConfig,
         cfg_path: PathBuf,
+        config_warnings: Vec<String>,
         i18n: I18n,
         tray: Option<TrayController>,
         log_handle: Option<LogHandle>,
@@ -532,6 +594,12 @@ impl OmvixApp {
 
         let worker = BackgroundWorker::spawn(cfg.clone(), Some(ctx.clone()), Arc::clone(&window_visible));
         let state = worker.state();
+        if !config_warnings.is_empty() {
+            let joined = config_warnings.join(" | ");
+            if let Ok(mut st) = state.lock() {
+                st.set_toast(joined, true);
+            }
+        }
         let (signal_tx, signal_rx) = mpsc::channel::<AppSignal>();
 
         // Poll tray events every 80ms; handles show/hide/quit directly on Win32 HWND even when hidden.
@@ -613,6 +681,7 @@ impl OmvixApp {
         let mut app = Self {
             cfg,
             cfg_path,
+            config_warnings,
             i18n,
             open_drawer: None,
             fans_power_tab: FansPowerSubTab::default(),
@@ -620,6 +689,9 @@ impl OmvixApp {
             pending_dock_frames: dock_initial,
             last_shown_at: Instant::now(),
             prev_focused: true,
+            config_dirty_since: None,
+            worker_dead: false,
+            worker_dead_recovery_attempted: false,
             battery_draft: ui::battery::BatteryDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
             window_visible,
@@ -673,9 +745,16 @@ impl OmvixApp {
         app
     }
 
-    fn save_config(&self) {
+    fn save_config(&mut self) {
+        self.config_dirty_since = None;
         if let Err(err) = self.cfg.save_to_path(&self.cfg_path) {
             tracing::warn!("Failed to save config: {err}");
+        }
+    }
+
+    fn flush_config_if_dirty(&mut self) {
+        if self.config_dirty_since.is_some() {
+            self.save_config();
         }
     }
 
@@ -769,6 +848,7 @@ impl OmvixApp {
         } else {
             self.open_drawer = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.flush_config_if_dirty();
         }
         if let Some(tray) = &self.tray {
             tray.update_labels(&self.i18n, visible);
@@ -788,18 +868,12 @@ impl OmvixApp {
     }
 
     fn launch_custom_omen_command(&self) {
-        let cmd = self.cfg.hotkeys.custom_command.trim();
+        let cmd = self.cfg.hotkeys.custom_command.trim().to_string();
+        let args = self.cfg.hotkeys.custom_args.trim().to_string();
         if cmd.is_empty() {
             return;
         }
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("cmd").args(["/C", cmd]).spawn();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = std::process::Command::new("sh").args(["-c", cmd]).spawn();
-        }
+        self.send_cmd(WorkerCommand::LaunchCustomCommand { command: cmd, args });
     }
 
     fn begin_quit(&mut self, ctx: &egui::Context) {
@@ -861,6 +935,7 @@ impl OmvixApp {
     }
 
     fn restart_as_admin(&mut self, ctx: &egui::Context) {
+        self.flush_config_if_dirty();
         #[cfg(windows)]
         {
             // Release global hotkeys & single-instance mutex BEFORE spawning elevated process.
@@ -939,6 +1014,27 @@ impl eframe::App for OmvixApp {
             .map(|s| s.clone())
             .unwrap_or_default();
 
+        if !self.quitting && self.worker.as_ref().is_some_and(|w| !w.is_alive()) {
+            self.worker_dead = true;
+            if !self.worker_dead_recovery_attempted {
+                self.worker_dead_recovery_attempted = true;
+                tracing::error!(
+                    "Background worker thread exited unexpectedly; attempting BIOS Auto fan restore"
+                );
+                #[cfg(windows)]
+                thread::spawn(|| {
+                    match omvix_windows::thermal_fan::restore_fan_auto_fresh_wmi() {
+                        Ok(()) => {
+                            tracing::warn!("Dead-worker recovery restored BIOS Auto fan control");
+                        }
+                        Err(err) => {
+                            tracing::error!("Dead-worker Auto fan recovery failed: {err}");
+                        }
+                    }
+                });
+            }
+        }
+
         let current_theme = self.cfg.general.custom_theme.clone();
         let cockpit_frame = egui::Frame::central_panel(&ctx.style())
             .fill(theme::sidebar_fill(&current_theme))
@@ -968,6 +1064,8 @@ impl eframe::App for OmvixApp {
                 &self.i18n,
                 self.open_drawer,
                 COMPACT_SIZE[0],
+                self.worker_dead,
+                &mut self.config_warnings,
                 &mut push_cmd,
                 &mut mark_save,
             );
@@ -1177,6 +1275,7 @@ impl eframe::App for OmvixApp {
                                             ui,
                                             &mut self.cfg,
                                             &self.i18n,
+                                            &mut self.config_warnings,
                                             &mut push_cmd,
                                             &mut mark_save,
                                             &mut || should_rebind_hotkeys = true,
@@ -1242,6 +1341,7 @@ impl eframe::App for OmvixApp {
             self.cfg = AppConfig::default();
             self.cfg.general.language = keep_lang;
             self.cfg.general.start_minimized = false;
+            self.config_warnings.clear();
             self.battery_draft = ui::battery::BatteryDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();
             theme::apply_theme(ctx, &self.cfg.general.custom_theme);
@@ -1258,11 +1358,16 @@ impl eframe::App for OmvixApp {
         }
 
         if should_save {
-            self.save_config();
             self.omen_action_code.store(
                 omen_action_to_code(&self.cfg.hotkeys.omen_key_action),
                 Ordering::SeqCst,
             );
+            if should_restore_defaults || !self.window_visible.load(Ordering::Relaxed) {
+                self.save_config();
+            } else {
+                self.config_dirty_since = Some(Instant::now());
+                ctx.request_repaint_after(Duration::from_millis(450));
+            }
         }
         for cmd in pending_cmds {
             self.send_cmd(cmd);
@@ -1278,6 +1383,11 @@ impl eframe::App for OmvixApp {
         }
         if should_quit {
             self.begin_quit(ctx);
+        } else if self
+            .config_dirty_since
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(400))
+        {
+            self.save_config();
         }
     }
 }

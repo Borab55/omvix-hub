@@ -1,3 +1,6 @@
+use crate::paths;
+use crate::security_fs::is_reparse_point;
+use crate::system_info::is_process_elevated;
 use omvix_core::{OmvixError, Result};
 use std::fs;
 use std::os::windows::process::CommandExt;
@@ -17,6 +20,145 @@ const FN_NAME_LEN: usize = 32;
 
 const MSR_IA32_TEMPERATURE_TARGET: u64 = 0x1A2;
 const MSR_IA32_PACKAGE_THERM_STATUS: u64 = 0x1B1;
+
+// Pinned PawnIO supply-chain metadata (verified 2026-11-21)
+pub const PAWNIO_SETUP_VERSION: &str = "2.2.0";
+pub const PAWNIO_SETUP_URL: &str =
+    "https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe";
+pub const PAWNIO_SETUP_SHA256: &str =
+    "1f519a22e47187f70a1379a48ca604981c4fcf694f4e65b734aaa74a9fba3032";
+
+pub const PAWNIO_SIGNER_SUBJECT: &str =
+    "E=admin@namazso.eu, CN=namazso.eu, O=namazso, L=Debrecen, C=HU";
+pub const PAWNIO_SIGNER_ISSUER: &str =
+    "CN=GLOBALTRUST 2015 CODESIGNING 1, OU=GLOBALTRUST Certification Service, O=e-commerce monitoring GmbH, L=Wien, S=Wien, C=AT";
+pub const PAWNIO_SIGNER_THUMBPRINT: &str = "F380DCC9F706E2756A5047B832FFE719E1BC35F5";
+
+pub const PAWNIO_MODULES_VERSION: &str = "0.2.12";
+pub const PAWNIO_MODULES_URL: &str =
+    "https://github.com/namazso/PawnIO.Modules/releases/download/0.2.12/release_0_2_12.zip";
+pub const PAWNIO_MODULES_ZIP_SHA256: &str =
+    "09698897ce19b92f1043a2e322cfcf0b1fe823e0b576971b178a65244fb0af9d";
+pub const INTEL_MSR_BIN_SHA256: &str =
+    "30a5a302283de1e080dfee99e686eca91d7e53e911095cb91a320fb961f1ce12";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignerCheckResult {
+    Match,
+    ThumbprintChanged { actual: String },
+    Rejected(String),
+}
+
+/// Validates Authenticode signer metadata against pinned Subject & Issuer (hard fail) and
+/// Thumbprint (warn-only so routine cert renewal after 2027-08-05 does not break verified installs).
+pub fn verify_signer_policy(
+    status: &str,
+    subject: &str,
+    issuer: &str,
+    thumbprint: &str,
+) -> SignerCheckResult {
+    if !status.trim().eq_ignore_ascii_case("Valid") {
+        return SignerCheckResult::Rejected(format!(
+            "Authenticode signature status is `{status}`, expected `Valid`"
+        ));
+    }
+    if subject.trim() != PAWNIO_SIGNER_SUBJECT {
+        return SignerCheckResult::Rejected(format!(
+            "Signer Subject mismatch: got `{subject}`"
+        ));
+    }
+    if issuer.trim() != PAWNIO_SIGNER_ISSUER {
+        return SignerCheckResult::Rejected(format!(
+            "Signer Issuer mismatch: got `{issuer}`"
+        ));
+    }
+    let clean_tp = thumbprint.trim();
+    if !clean_tp.eq_ignore_ascii_case(PAWNIO_SIGNER_THUMBPRINT) {
+        return SignerCheckResult::ThumbprintChanged {
+            actual: clean_tp.to_string(),
+        };
+    }
+    SignerCheckResult::Match
+}
+
+/// Pure-Rust FIPS 180-4 SHA-256 digest (lowercase hex), avoiding external dependencies or DLLs.
+pub fn sha256_hex(data: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut padded = Vec::with_capacity(data.len() + 64);
+    padded.extend_from_slice(data);
+    padded.push(0x80);
+    while (padded.len() % 64) != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in padded.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, word) in chunk.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        let delta = [a, b, c, d, e, f, g, hh];
+        for (slot, val) in h.iter_mut().zip(delta) {
+            *slot = slot.wrapping_add(val);
+        }
+    }
+
+    let mut hex = String::with_capacity(64);
+    for word in h {
+        use std::fmt::Write;
+        let _ = write!(hex, "{word:08x}");
+    }
+    hex
+}
 
 /// Extracts Intel `TjMax` (°C) from `MSR_IA32_TEMPERATURE_TARGET` (`0x1A2`, bits `23:16`).
 pub fn decode_intel_tjmax(msr_1a2: u64) -> i32 {
@@ -45,17 +187,9 @@ pub fn median3(a: f32, b: f32, c: f32) -> f32 {
     vals[1]
 }
 
-/// Directory where Omvix Hub stores verified PawnIO module binaries (`IntelMSR.bin`, etc.).
+/// Admin-protected directory where Omvix Hub stores verified PawnIO module binaries (`C:\Program Files\OmvixHub\pawnio`).
 pub fn pawnio_module_dir() -> PathBuf {
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data).join("OmvixHub").join("pawnio");
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            return dir.join("pawnio");
-        }
-    }
-    PathBuf::from("pawnio")
+    paths::pawnio_module_dir()
 }
 
 /// Checks whether the PawnIO kernel driver device is reachable or installed on this machine.
@@ -83,19 +217,42 @@ pub fn is_pawnio_driver_installed() -> bool {
         }
     }
 
-    Path::new(r"C:\Program Files\PawnIO\PawnIOUtil.exe").exists()
-        || Path::new(r"C:\Program Files\PawnIO").is_dir()
+    let pf_pawnio = paths::program_files_dir().join("PawnIO");
+    pf_pawnio.join("PawnIOUtil.exe").exists() || pf_pawnio.is_dir()
 }
 
-/// Returns true when a local `IntelMSR.bin` PawnIO module is already present.
+/// Returns true when a verified `IntelMSR.bin` PawnIO module is present.
 pub fn has_intel_msr_module() -> bool {
     find_intel_msr_module().is_some()
 }
 
-/// Downloads and verifies Microsoft-signed PawnIO installer + `IntelMSR.bin` module from GitHub releases.
+/// Downloads and verifies pinned PawnIO (`2.2.0`) + `PawnIO.Modules` (`0.2.12`) with SHA-256 and
+/// Authenticode Subject/Issuer checks into admin-protected `C:\Program Files\OmvixHub\pawnio\`.
 pub fn install_pawnio_and_module() -> Result<String> {
+    if !is_process_elevated() {
+        return Err(OmvixError::PermissionDenied(
+            "Administrator privileges are required to install PawnIO into Program Files."
+                .to_string(),
+        ));
+    }
+
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let install_root = paths::install_dir();
+    if is_reparse_point(&install_root) {
+        return Err(OmvixError::PermissionDenied(format!(
+            "Refusing to write into reparse point {}",
+            install_root.display()
+        )));
+    }
     let dir = pawnio_module_dir();
+    if is_reparse_point(&dir) {
+        return Err(OmvixError::PermissionDenied(format!(
+            "Refusing to write into reparse point {}",
+            dir.display()
+        )));
+    }
+    fs::create_dir_all(&dir)?;
+
     let skip_driver = is_pawnio_driver_installed();
 
     let script = r#"
@@ -103,89 +260,220 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $dir = $env:OMVIX_PAWNIO_DIR
+$staging = Join-Path $dir '.staging'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $staging
+New-Item -ItemType Directory -Force -Path $staging | Out-Null
 $headers = @{ 'User-Agent' = 'OmvixHub' }
 $reboot = $false
 
-if ($env:OMVIX_SKIP_DRIVER -ne '1') {
-    $rel = Invoke-RestMethod 'https://api.github.com/repos/namazso/PawnIO.Setup/releases/latest' -Headers $headers -TimeoutSec 25
-    $asset = $rel.assets | Where-Object { $_.name -like '*PawnIO_setup*.exe' } | Select-Object -First 1
-    if (-not $asset) { throw 'PawnIO_setup.exe asset not found in latest release' }
-    $exe = Join-Path $dir 'PawnIO_setup.exe'
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $exe -Headers $headers -TimeoutSec 60
-    $sig = Get-AuthenticodeSignature -FilePath $exe
-    if ($sig.Status -ne 'Valid') {
-        Remove-Item -Force -ErrorAction SilentlyContinue $exe
-        throw ('Invalid Authenticode signature on PawnIO_setup.exe: ' + $sig.Status)
+try {
+    if ($env:OMVIX_SKIP_DRIVER -ne '1') {
+        $exe = Join-Path $staging 'PawnIO_setup.exe'
+        Invoke-WebRequest -Uri $env:OMVIX_SETUP_URL -OutFile $exe -Headers $headers -TimeoutSec 60
+        $actualSetupSha = (Get-FileHash -Algorithm SHA256 -Path $exe).Hash.ToLowerInvariant()
+        if ($actualSetupSha -ne $env:OMVIX_SETUP_SHA256) {
+            throw ('PawnIO_setup.exe SHA-256 mismatch: ' + $actualSetupSha)
+        }
+        $sig = Get-AuthenticodeSignature -FilePath $exe
+        if ($sig.Status -ne 'Valid') {
+            throw ('Invalid Authenticode signature on PawnIO_setup.exe: ' + $sig.Status)
+        }
+        $cert = $sig.SignerCertificate
+        if (-not $cert) {
+            throw 'PawnIO_setup.exe missing SignerCertificate'
+        }
+        if ($cert.Subject -ne $env:OMVIX_SIGNER_SUBJECT) {
+            throw ('PawnIO_setup.exe Subject mismatch: ' + $cert.Subject)
+        }
+        if ($cert.Issuer -ne $env:OMVIX_SIGNER_ISSUER) {
+            throw ('PawnIO_setup.exe Issuer mismatch: ' + $cert.Issuer)
+        }
+        if ($cert.Thumbprint -ne $env:OMVIX_SIGNER_THUMBPRINT) {
+            Write-Output ('WARN_THUMBPRINT=' + $cert.Thumbprint)
+        }
+        $proc = Start-Process -FilePath $exe -ArgumentList '-install','-silent' -Wait -PassThru
+        $code = $proc.ExitCode
+        if ($code -notin @(0, 183, 3010)) {
+            throw ('PawnIO_setup.exe failed with exit code ' + $code)
+        }
+        if ($code -eq 3010) { $reboot = $true }
     }
-    $proc = Start-Process -FilePath $exe -ArgumentList '-install','-silent' -Verb RunAs -Wait -PassThru
-    $code = $proc.ExitCode
-    Remove-Item -Force -ErrorAction SilentlyContinue $exe
-    if ($code -notin @(0, 183, 3010)) {
-        throw ('PawnIO_setup.exe failed with exit code ' + $code)
-    }
-    if ($code -eq 3010) { $reboot = $true }
-}
 
-$mrel = Invoke-RestMethod 'https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest' -Headers $headers -TimeoutSec 25
-$masset = $mrel.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
-if (-not $masset) { throw 'PawnIO.Modules release zip not found' }
-$zip = Join-Path $dir 'modules.zip'
-$tmp = Join-Path $dir 'tmp_extract'
-Invoke-WebRequest -Uri $masset.browser_download_url -OutFile $zip -Headers $headers -TimeoutSec 60
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
-Expand-Archive -Path $zip -DestinationPath $tmp -Force
-foreach ($name in @('IntelMSR.bin','AMDFamily17.bin','COPYING')) {
-    $found = Get-ChildItem -Path $tmp -Filter $name -Recurse -File | Select-Object -First 1
-    if ($found) { Copy-Item -Force $found.FullName (Join-Path $dir $name) }
+    $zip = Join-Path $staging 'modules.zip'
+    $ext = Join-Path $staging 'ext'
+    Invoke-WebRequest -Uri $env:OMVIX_MODULES_URL -OutFile $zip -Headers $headers -TimeoutSec 60
+    $actualZipSha = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
+    if ($actualZipSha -ne $env:OMVIX_MODULES_ZIP_SHA256) {
+        throw ('PawnIO.Modules zip SHA-256 mismatch: ' + $actualZipSha)
+    }
+    Expand-Archive -Path $zip -DestinationPath $ext -Force
+    $msrFound = Get-ChildItem -Path $ext -Filter 'IntelMSR.bin' -Recurse -File | Select-Object -First 1
+    if (-not $msrFound) {
+        throw 'IntelMSR.bin missing inside modules archive'
+    }
+    $actualMsrSha = (Get-FileHash -Algorithm SHA256 -Path $msrFound.FullName).Hash.ToLowerInvariant()
+    if ($actualMsrSha -ne $env:OMVIX_INTEL_MSR_SHA256) {
+        throw ('IntelMSR.bin SHA-256 mismatch: ' + $actualMsrSha)
+    }
+    foreach ($name in @('IntelMSR.bin','AMDFamily17.bin','COPYING')) {
+        $found = Get-ChildItem -Path $ext -Filter $name -Recurse -File | Select-Object -First 1
+        if ($found) { Copy-Item -Force $found.FullName (Join-Path $dir $name) }
+    }
+    Write-Output ('OK:REBOOT=' + $reboot)
+} finally {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $staging
 }
-Remove-Item -Force -ErrorAction SilentlyContinue $zip
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
-if (-not (Test-Path (Join-Path $dir 'IntelMSR.bin'))) {
-    throw 'IntelMSR.bin missing after module extraction'
-}
-Write-Output ('OK:REBOOT=' + $reboot)
 "#;
 
     let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .args(["-NoProfile", "-Command", script])
         .env("OMVIX_PAWNIO_DIR", &dir)
         .env("OMVIX_SKIP_DRIVER", if skip_driver { "1" } else { "0" })
+        .env("OMVIX_SETUP_URL", PAWNIO_SETUP_URL)
+        .env("OMVIX_SETUP_SHA256", PAWNIO_SETUP_SHA256)
+        .env("OMVIX_SIGNER_SUBJECT", PAWNIO_SIGNER_SUBJECT)
+        .env("OMVIX_SIGNER_ISSUER", PAWNIO_SIGNER_ISSUER)
+        .env("OMVIX_SIGNER_THUMBPRINT", PAWNIO_SIGNER_THUMBPRINT)
+        .env("OMVIX_MODULES_URL", PAWNIO_MODULES_URL)
+        .env("OMVIX_MODULES_ZIP_SHA256", PAWNIO_MODULES_ZIP_SHA256)
+        .env("OMVIX_INTEL_MSR_SHA256", INTEL_MSR_BIN_SHA256)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| OmvixError::DriverRequired(format!("Failed to launch PowerShell: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    for line in stdout.lines() {
+        if let Some(tp) = line.strip_prefix("WARN_THUMBPRINT=") {
+            tracing::warn!(
+                pinned = PAWNIO_SIGNER_THUMBPRINT,
+                actual = tp.trim(),
+                "PawnIO signer certificate thumbprint changed (Subject & Issuer matched pinned identity)"
+            );
+        }
+    }
+
     if !out.status.success() {
         let detail = if !stderr.is_empty() { stderr } else { stdout };
-        tracing::warn!(%detail, "PawnIO installation failed");
+        tracing::warn!(%detail, "Pinned PawnIO installation failed");
         return Err(OmvixError::DriverRequired(format!(
             "PawnIO install failed: {detail}"
         )));
     }
 
+    let msr_path = dir.join("IntelMSR.bin");
+    let blob = fs::read(&msr_path)?;
+    let digest = sha256_hex(&blob);
+    if digest != INTEL_MSR_BIN_SHA256 {
+        let _ = fs::remove_file(&msr_path);
+        return Err(OmvixError::DriverRequired(format!(
+            "Post-install IntelMSR.bin SHA-256 verification failed: {digest}"
+        )));
+    }
+
     let needs_reboot = stdout.contains("REBOOT=True");
-    tracing::info!(dir = %dir.display(), needs_reboot, "PawnIO + IntelMSR.bin installed");
+    tracing::info!(
+        dir = %dir.display(),
+        setup_ver = PAWNIO_SETUP_VERSION,
+        modules_ver = PAWNIO_MODULES_VERSION,
+        needs_reboot,
+        "Pinned PawnIO + IntelMSR.bin verified & installed"
+    );
     if needs_reboot {
         Ok("PawnIO installed (reboot recommended if sensor stays inactive)".to_string())
     } else {
-        Ok("PawnIO & IntelMSR.bin ready".to_string())
+        Ok("PawnIO & IntelMSR.bin verified and ready".to_string())
     }
 }
 
+fn read_verified_module(path: &Path) -> Option<Vec<u8>> {
+    if !path.is_file() || is_reparse_point(path) {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    if sha256_hex(&bytes) == INTEL_MSR_BIN_SHA256 {
+        Some(bytes)
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            "Rejected IntelMSR.bin module failing pinned SHA-256 verification"
+        );
+        None
+    }
+}
+
+fn try_migrate_legacy_module(bytes: &[u8], target: &Path) -> bool {
+    if !is_process_elevated() {
+        return false;
+    }
+    let Some(parent) = target.parent() else {
+        return false;
+    };
+    if is_reparse_point(&paths::install_dir()) || is_reparse_point(parent) || is_reparse_point(target)
+    {
+        return false;
+    }
+    if fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let tmp = target.with_extension("bin.tmp");
+    if fs::write(&tmp, bytes).is_err() {
+        return false;
+    }
+    if fs::rename(&tmp, target).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return false;
+    }
+    tracing::info!(
+        dest = %target.display(),
+        "Migrated verified IntelMSR.bin module into protected Program Files directory"
+    );
+    true
+}
+
 fn find_intel_msr_module() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    candidates.push(pawnio_module_dir().join("IntelMSR.bin"));
-    candidates.push(PathBuf::from(
-        r"C:\Program Files\PawnIO\modules\IntelMSR.bin",
-    ));
+    let protected = pawnio_module_dir().join("IntelMSR.bin");
+    if read_verified_module(&protected).is_some() {
+        return Some(protected);
+    }
+
+    let system_mod = paths::program_files_dir()
+        .join("PawnIO")
+        .join("modules")
+        .join("IntelMSR.bin");
+    if system_mod.is_file() && !is_reparse_point(&system_mod) {
+        return Some(system_mod);
+    }
+
+    let mut legacy_candidates = Vec::new();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        legacy_candidates.push(
+            PathBuf::from(local_app_data)
+                .join("OmvixHub")
+                .join("pawnio")
+                .join("IntelMSR.bin"),
+        );
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("pawnio").join("IntelMSR.bin"));
+            legacy_candidates.push(dir.join("pawnio").join("IntelMSR.bin"));
         }
     }
-    candidates.into_iter().find(|p| p.is_file())
+
+    for legacy in legacy_candidates {
+        if let Some(bytes) = read_verified_module(&legacy) {
+            if try_migrate_legacy_module(&bytes, &protected) {
+                return Some(protected);
+            }
+            return Some(legacy);
+        }
+    }
+
+    None
 }
 
 /// Pure-Rust Win32 `DeviceIoControl` reader for CPU package die temperature via signed PawnIO + `IntelMSR.bin`.
@@ -209,11 +497,26 @@ impl Drop for PawnIoCpuTempReader {
 }
 
 impl PawnIoCpuTempReader {
-    /// Opens `\Device\PawnIO` and loads `IntelMSR.bin` if both driver and signed module exist.
+    /// Opens `\Device\PawnIO` and loads `IntelMSR.bin` if both driver and verified module exist.
     pub fn open() -> Option<Self> {
         let module_path = find_intel_msr_module()?;
+        if is_reparse_point(&module_path) {
+            tracing::warn!(
+                path = %module_path.display(),
+                "Refusing to load IntelMSR.bin from reparse point"
+            );
+            return None;
+        }
         let blob = fs::read(&module_path).ok()?;
         if blob.is_empty() {
+            return None;
+        }
+        let system_mod_dir = paths::program_files_dir().join("PawnIO").join("modules");
+        if !module_path.starts_with(&system_mod_dir) && sha256_hex(&blob) != INTEL_MSR_BIN_SHA256 {
+            tracing::warn!(
+                path = %module_path.display(),
+                "Refusing to load IntelMSR.bin failing SHA-256 check"
+            );
             return None;
         }
 
@@ -356,5 +659,73 @@ mod tests {
     fn median3_filters_spikes() {
         assert_eq!(median3(55.0, 99.0, 56.0), 56.0);
         assert_eq!(median3(68.0, 67.0, 69.0), 68.0);
+    }
+
+    #[test]
+    fn sha256_matches_nist_vectors_and_pinned_hashes_valid() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(PAWNIO_SETUP_SHA256.len(), 64);
+        assert_eq!(PAWNIO_MODULES_ZIP_SHA256.len(), 64);
+        assert_eq!(INTEL_MSR_BIN_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn signer_policy_rejects_bad_subject_issuer_and_warns_only_on_thumbprint() {
+        assert_eq!(
+            verify_signer_policy(
+                "Valid",
+                PAWNIO_SIGNER_SUBJECT,
+                PAWNIO_SIGNER_ISSUER,
+                PAWNIO_SIGNER_THUMBPRINT
+            ),
+            SignerCheckResult::Match
+        );
+
+        assert_eq!(
+            verify_signer_policy(
+                "Valid",
+                PAWNIO_SIGNER_SUBJECT,
+                PAWNIO_SIGNER_ISSUER,
+                "0000111122223333444455556666777788889999"
+            ),
+            SignerCheckResult::ThumbprintChanged {
+                actual: "0000111122223333444455556666777788889999".to_string()
+            }
+        );
+
+        assert!(matches!(
+            verify_signer_policy(
+                "NotSigned",
+                PAWNIO_SIGNER_SUBJECT,
+                PAWNIO_SIGNER_ISSUER,
+                PAWNIO_SIGNER_THUMBPRINT
+            ),
+            SignerCheckResult::Rejected(_)
+        ));
+        assert!(matches!(
+            verify_signer_policy(
+                "Valid",
+                "CN=Evil",
+                PAWNIO_SIGNER_ISSUER,
+                PAWNIO_SIGNER_THUMBPRINT
+            ),
+            SignerCheckResult::Rejected(_)
+        ));
+        assert!(matches!(
+            verify_signer_policy(
+                "Valid",
+                PAWNIO_SIGNER_SUBJECT,
+                "CN=Untrusted CA",
+                PAWNIO_SIGNER_THUMBPRINT
+            ),
+            SignerCheckResult::Rejected(_)
+        ));
     }
 }

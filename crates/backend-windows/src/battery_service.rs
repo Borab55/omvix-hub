@@ -1,4 +1,6 @@
 use crate::battery::WindowsBatteryBackend;
+use crate::paths;
+use crate::security_fs::{ensure_secure_program_data_dir, is_reparse_point, open_log_no_reparse};
 use crate::system_info::is_process_elevated;
 use crate::wmi_bios::HpWmiBios;
 use chrono::Local;
@@ -10,7 +12,7 @@ use omvix_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::c_void;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -63,19 +65,15 @@ impl Drop for ScHandleGuard {
 }
 
 pub fn install_dir() -> PathBuf {
-    let base = std::env::var_os("ProgramW6432")
-        .or_else(|| std::env::var_os("ProgramFiles"))
-        .unwrap_or_else(|| r"C:\Program Files".into());
-    PathBuf::from(base).join("OmvixHub")
+    paths::install_dir()
 }
 
 pub fn installed_exe() -> PathBuf {
-    install_dir().join("omvix-battery-svc.exe")
+    paths::installed_service_exe()
 }
 
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
-    PathBuf::from(base).join("OmvixHub")
+    paths::omvix_program_data_dir()
 }
 
 pub fn config_file_path() -> PathBuf {
@@ -156,15 +154,15 @@ impl BatteryServiceConfig {
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        let raw = toml::to_string_pretty(self).map_err(|e| OmvixError::Config(e.to_string()))?;
+        if path.exists() && fs::read_to_string(path).ok().as_deref() == Some(raw.as_str()) {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let raw = toml::to_string_pretty(self).map_err(|e| OmvixError::Config(e.to_string()))?;
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, raw)?;
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
         fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -289,6 +287,7 @@ pub fn sync_config_if_installed(cfg: &BatteryConfig) -> Result<()> {
     if !is_service_installed() {
         return Ok(());
     }
+    ensure_secure_program_data_dir(&data_dir())?;
     BatteryServiceConfig::from(cfg).save_to_path(&config_file_path())
 }
 
@@ -391,10 +390,16 @@ pub fn install_or_update_service(cfg: &BatteryConfig) -> Result<String> {
     require_admin("install or update OmvixBatteryService")?;
 
     let i_dir = install_dir();
+    if is_reparse_point(&i_dir) {
+        return Err(OmvixError::PermissionDenied(format!(
+            "Refusing to install service into reparse point {}",
+            i_dir.display()
+        )));
+    }
     let d_dir = data_dir();
     let target_exe = installed_exe();
     fs::create_dir_all(&i_dir)?;
-    fs::create_dir_all(&d_dir)?;
+    ensure_secure_program_data_dir(&d_dir)?;
     BatteryServiceConfig::from(cfg).save_to_path(&config_file_path())?;
 
     let current_exe = std::env::current_exe()?;
@@ -579,6 +584,14 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
     }
 
     let mut deferred_reboot = false;
+    crate::autostart::remove_autostart_and_installed_copy();
+    let pawnio_dir = paths::pawnio_module_dir();
+    if pawnio_dir.exists() && fs::remove_dir_all(&pawnio_dir).is_err() {
+        if schedule_delete_on_reboot(&pawnio_dir) {
+            deferred_reboot = true;
+        }
+    }
+
     let exe_path = installed_exe();
     let i_dir = install_dir();
     if exe_path.exists() {
@@ -655,15 +668,22 @@ fn set_scm_state(state: u32, controls: u32, exit_code: u32, wait_hint_ms: u32) {
 
 fn daemon_log(line: &str) {
     let path = log_file_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if is_reparse_point(parent) {
+        return;
     }
-    if fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
+    if !parent.exists() {
+        let _ = ensure_secure_program_data_dir(parent);
+    }
+    if !is_reparse_point(&path) && fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
         let backup = path.with_extension("log.old");
-        let _ = fs::remove_file(&backup);
-        let _ = fs::rename(&path, backup);
+        if !is_reparse_point(&backup) {
+            let _ = fs::rename(&path, backup);
+        }
     }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = open_log_no_reparse(&path) {
         let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
         let _ = writeln!(file, "{ts} | {line}");
     }
@@ -754,6 +774,9 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
     let battery_be = WindowsBatteryBackend::new();
     let mut engine = BatteryCareEngine::new();
 
+    if let Err(err) = ensure_secure_program_data_dir(&data_dir()) {
+        daemon_log(&format!("Warning: ProgramData ACL repair returned: {err}"));
+    }
     let cfg_path = config_file_path();
     let mut svc_cfg = BatteryServiceConfig::load_from_path(&cfg_path).unwrap_or_default();
     let mut bat_cfg = svc_cfg.to_battery_config();
@@ -775,7 +798,9 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
         let cur_mtime = fs::metadata(&cfg_path).and_then(|m| m.modified()).ok();
         if cur_mtime.is_some() && cur_mtime != last_cfg_mtime {
             last_cfg_mtime = cur_mtime;
-            if let Ok(reloaded) = BatteryServiceConfig::load_from_path(&cfg_path) {
+            if is_reparse_point(&cfg_path) {
+                daemon_log("Refusing config reload: target path is a reparse point");
+            } else if let Ok(reloaded) = BatteryServiceConfig::load_from_path(&cfg_path) {
                 svc_cfg = reloaded;
                 bat_cfg = svc_cfg.to_battery_config();
                 last_applied = None;

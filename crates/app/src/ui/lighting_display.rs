@@ -1,4 +1,5 @@
 use crate::theme::{STATUS_WARN, accent_color, card_frame, section_title, status_badge};
+use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
 use omvix_core::{AppConfig, GpuMode, I18n, KeyboardType, RgbColor};
@@ -25,10 +26,22 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.checkbox(&mut cfg.lighting.enabled, i18n.t("common.enabled"));
+            if ui
+                .checkbox(&mut cfg.lighting.enabled, i18n.t("common.enabled"))
+                .changed()
+            {
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                on_cmd(WorkerCommand::ApplyLighting);
+            }
             ui.add_space(10.0);
             ui.label(i18n.t("lighting.brightness"));
-            ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
+            let resp = ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
+            if control_committed(ui, "lighting_brightness", &resp) {
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                on_cmd(WorkerCommand::ApplyLighting);
+            }
         });
 
         let zone_count = match st.keyboard_type {
@@ -39,20 +52,31 @@ pub fn render(
 
         if zone_count > 0 {
             ui.add_space(4.0);
+            let mut zone_committed = false;
             ui.horizontal_wrapped(|ui| {
                 for z in 0..zone_count {
-                    let c = &mut cfg.lighting.zones[z];
-                    let mut srgb = [c.r, c.g, c.b];
+                    let cur = cfg.lighting.zones[z];
+                    let mut srgb = [cur.r, cur.g, cur.b];
                     ui.label(i18n.t_fmt("lighting.zone", &[("index", &(z + 1).to_string())]));
-                    if ui.color_edit_button_srgb(&mut srgb).changed() {
-                        *c = RgbColor {
+                    let resp = ui.color_edit_button_srgb(&mut srgb);
+                    if resp.changed() {
+                        cfg.lighting.zones[z] = RgbColor {
                             r: srgb[0],
                             g: srgb[1],
                             b: srgb[2],
                         };
                     }
+                    if control_committed(ui, ("lighting_zone_color", z), &resp) {
+                        zone_committed = true;
+                    }
                 }
             });
+            if zone_committed {
+                cfg.lighting.enabled = true;
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                on_cmd(WorkerCommand::ApplyLighting);
+            }
 
             ui.horizontal_wrapped(|ui| {
                 ui.label(i18n.t("lighting.presets"));
@@ -71,16 +95,6 @@ pub fn render(
                     }
                 }
             });
-        }
-
-        ui.add_space(6.0);
-        if ui
-            .button(RichText::new(i18n.t("common.apply")).strong())
-            .clicked()
-        {
-            on_save();
-            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-            on_cmd(WorkerCommand::ApplyLighting);
         }
     });
 

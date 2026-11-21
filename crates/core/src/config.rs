@@ -424,6 +424,7 @@ pub struct HotkeyConfig {
     pub capture_omen_key: bool,
     pub omen_key_action: OmenKeyAction,
     pub custom_command: String,
+    pub custom_args: String,
     pub global_toggle_shortcut: String,
 }
 
@@ -433,9 +434,66 @@ impl Default for HotkeyConfig {
             capture_omen_key: true,
             omen_key_action: OmenKeyAction::ToggleWindow,
             custom_command: String::new(),
+            custom_args: String::new(),
             global_toggle_shortcut: "Ctrl+Shift+O".to_string(),
         }
     }
+}
+
+/// Splits a legacy combined `custom_command` string into `(executable_or_lnk_path, args)`.
+pub fn split_legacy_command(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return (String::new(), String::new());
+    }
+
+    if let Some(after_quote) = trimmed.strip_prefix('"') {
+        if let Some(end_quote) = after_quote.find('"') {
+            let path = after_quote[..end_quote].trim().to_string();
+            let args = after_quote[end_quote + 1..].trim().to_string();
+            return (path, args);
+        }
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    for ext in [".exe", ".lnk"] {
+        let mut search_from = 0usize;
+        while let Some(rel) = lower[search_from..].find(ext) {
+            let idx = search_from + rel + ext.len();
+            if idx == trimmed.len() {
+                return (trimmed.to_string(), String::new());
+            }
+            if trimmed[idx..].chars().next().is_some_and(|c| c.is_ascii_whitespace()) {
+                return (
+                    trimmed[..idx].trim().to_string(),
+                    trimmed[idx..].trim().to_string(),
+                );
+            }
+            search_from = idx;
+        }
+    }
+
+    match trimmed.split_once(|c: char| c.is_ascii_whitespace()) {
+        Some((head, tail)) => (head.trim().to_string(), tail.trim().to_string()),
+        None => (trimmed.to_string(), String::new()),
+    }
+}
+
+/// Validates syntactic safety of a custom command target path: non-empty, `.exe` or `.lnk`,
+/// without control characters or shell chaining operators.
+pub fn is_valid_custom_command_syntax(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed
+        .chars()
+        .any(|c| matches!(c, '\0' | '\r' | '\n' | '&' | '|' | ';' | '<' | '>' | '`'))
+    {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    (lower.ends_with(".exe") && lower.len() > 4) || (lower.ends_with(".lnk") && lower.len() > 4)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -512,8 +570,13 @@ impl AppConfig {
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
+        let (cfg, _warnings) = Self::load_from_path_with_warnings(path)?;
+        Ok(cfg)
+    }
+
+    pub fn load_from_path_with_warnings(path: &Path) -> Result<(Self, Vec<String>)> {
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok((Self::default(), Vec::new()));
         }
         let raw = fs::read_to_string(path)?;
         let mut cfg: Self = toml::from_str(&raw).map_err(|e| OmvixError::Config(e.to_string()))?;
@@ -522,21 +585,116 @@ impl AppConfig {
             cfg.battery.hold_when_shutdown = true;
             cfg.config_version = CURRENT_CONFIG_VERSION;
         }
-        Ok(cfg)
+        let warnings = cfg.sanitize();
+        Ok((cfg, warnings))
+    }
+
+    /// Validates, clamps, and migrates untrusted configuration values loaded from disk.
+    /// Returns human-readable warnings/migration notes to log and surface in the UI.
+    pub fn sanitize(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        self.general.telemetry_interval_ms = self.general.telemetry_interval_ms.clamp(100, 10_000);
+        self.logging.max_total_mb = self.logging.max_total_mb.clamp(5, 100);
+        self.logging.max_files = self.logging.max_files.clamp(1, 16);
+
+        self.thermal_fan.manual_speed_pct = self.thermal_fan.manual_speed_pct.clamp(0, 100);
+        self.thermal_fan.keep_alive_interval_secs =
+            self.thermal_fan.keep_alive_interval_secs.clamp(15, 110);
+        self.thermal_fan.custom_curve.hysteresis_c =
+            self.thermal_fan.custom_curve.hysteresis_c.clamp(1, 10);
+
+        if self.thermal_fan.custom_curve.points.len() < 2 {
+            self.thermal_fan.custom_curve.points = FanCurve::default().points;
+            warnings.push(
+                "Custom fan curve had fewer than 2 points; restored default curve points."
+                    .to_string(),
+            );
+        } else {
+            for pt in &mut self.thermal_fan.custom_curve.points {
+                pt.temp_c = pt.temp_c.clamp(30, 100);
+                pt.speed_pct = pt.speed_pct.clamp(0, 100);
+            }
+            self.thermal_fan
+                .custom_curve
+                .points
+                .sort_by_key(|p| p.temp_c);
+            self.thermal_fan.custom_curve.points.truncate(8);
+        }
+
+        self.battery.stop_threshold_pct = self.battery.stop_threshold_pct.clamp(50, 100);
+        let max_start = self.battery.stop_threshold_pct.saturating_sub(2).max(40);
+        self.battery.start_threshold_pct = self.battery.start_threshold_pct.clamp(40, max_start);
+        for prof in &mut self.battery.custom_profiles {
+            prof.stop_threshold_pct = prof.stop_threshold_pct.clamp(50, 100);
+            let p_max_start = prof.stop_threshold_pct.saturating_sub(2).max(40);
+            prof.start_threshold_pct = prof.start_threshold_pct.clamp(40, p_max_start);
+        }
+
+        self.lighting.brightness_pct = self.lighting.brightness_pct.clamp(0, 100);
+
+        if let Some(ref mut pl1) = self.tuning.pl1_watts {
+            *pl1 = (*pl1).clamp(15, 200);
+        }
+        if let Some(ref mut pl2) = self.tuning.pl2_watts {
+            *pl2 = (*pl2).clamp(15, 200);
+        }
+        if let Some(ref mut tcc) = self.tuning.tcc_temp_limit_c {
+            *tcc = (*tcc).clamp(70, 100);
+        }
+        if let Some(ref mut uv) = self.tuning.core_undervolt_mv {
+            *uv = (*uv).clamp(-150, 0);
+        }
+
+        let cleaned_args: String = self
+            .hotkeys
+            .custom_args
+            .chars()
+            .filter(|c| !matches!(c, '\0' | '\r' | '\n'))
+            .collect();
+        self.hotkeys.custom_args = cleaned_args.trim().to_string();
+
+        if !self.hotkeys.custom_command.trim().is_empty() {
+            let original = self.hotkeys.custom_command.trim().to_string();
+            let (exe_part, split_args) = split_legacy_command(&original);
+            if is_valid_custom_command_syntax(&exe_part) {
+                self.hotkeys.custom_command = exe_part;
+                if !split_args.is_empty() {
+                    if self.hotkeys.custom_args.is_empty() {
+                        self.hotkeys.custom_args = split_args;
+                    } else {
+                        self.hotkeys.custom_args =
+                            format!("{split_args} {}", self.hotkeys.custom_args);
+                    }
+                    warnings.push(format!(
+                        "Migrated legacy custom_command arguments into custom_args ({}).",
+                        self.hotkeys.custom_command
+                    ));
+                }
+            } else {
+                self.hotkeys.custom_command.clear();
+                self.hotkeys.custom_args.clear();
+                warnings.push(format!(
+                    "Cleared invalid custom_command for security (only .exe/.lnk allowed): {original}"
+                ));
+            }
+        }
+
+        warnings
     }
 
     /// Saves configuration atomically via a temporary file + rename.
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        let serialized =
+            toml::to_string_pretty(self).map_err(|e| OmvixError::Config(e.to_string()))?;
+        if path.exists() && fs::read_to_string(path).ok().as_deref() == Some(serialized.as_str()) {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let serialized =
-            toml::to_string_pretty(self).map_err(|e| OmvixError::Config(e.to_string()))?;
         let tmp_path = path.with_extension("toml.tmp");
         fs::write(&tmp_path, serialized)?;
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
         fs::rename(&tmp_path, path)?;
         Ok(())
     }
@@ -656,5 +814,105 @@ mod tests {
         assert!(!explicit.battery.hold_when_shutdown);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_to_path_skips_redundant_identical_write() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_noop_save_test_{nanos}"));
+        let path = dir.join("config.toml");
+
+        let cfg = AppConfig::default();
+        cfg.save_to_path(&path).expect("initial save");
+        let first_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cfg.save_to_path(&path).expect("identical save should succeed");
+        let second_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        assert_eq!(first_mtime, second_mtime);
+        assert!(!path.with_extension("toml.tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_to_path_overwrites_atomically_without_leaving_tmp() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_atomic_save_test_{nanos}"));
+        let path = dir.join("config.toml");
+
+        let mut cfg = AppConfig::default();
+        cfg.thermal_fan.manual_speed_pct = 45;
+        cfg.save_to_path(&path).expect("first save");
+
+        cfg.thermal_fan.manual_speed_pct = 75;
+        cfg.save_to_path(&path).expect("atomic overwrite");
+
+        assert!(!path.with_extension("toml.tmp").exists());
+        let reloaded = AppConfig::load_from_path(&path).expect("reload");
+        assert_eq!(reloaded.thermal_fan.manual_speed_pct, 75);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitize_migrates_legacy_custom_command_and_warns_on_invalid() {
+        let mut cfg = AppConfig::default();
+        cfg.hotkeys.custom_command = r#""C:\Program Files\MyApp\tool.exe" --tray --fast"#.into();
+        let w1 = cfg.sanitize();
+        assert_eq!(cfg.hotkeys.custom_command, r"C:\Program Files\MyApp\tool.exe");
+        assert_eq!(cfg.hotkeys.custom_args, "--tray --fast");
+        assert_eq!(w1.len(), 1);
+
+        cfg.hotkeys.custom_command = "cmd /C calc && whoami".into();
+        cfg.hotkeys.custom_args = "--old".into();
+        let w2 = cfg.sanitize();
+        assert!(cfg.hotkeys.custom_command.is_empty());
+        assert!(cfg.hotkeys.custom_args.is_empty());
+        assert!(!w2.is_empty());
+
+        cfg.hotkeys.custom_command = r"C:\Users\Public\Shortcuts\Game.lnk".into();
+        let w3 = cfg.sanitize();
+        assert!(w3.is_empty());
+        assert_eq!(
+            cfg.hotkeys.custom_command,
+            r"C:\Users\Public\Shortcuts\Game.lnk"
+        );
+    }
+
+    #[test]
+    fn sanitize_clamps_out_of_range_curve_thresholds_and_intervals() {
+        let mut cfg = AppConfig::default();
+        cfg.general.telemetry_interval_ms = 5;
+        cfg.logging.max_total_mb = 500;
+        cfg.battery.stop_threshold_pct = 42;
+        cfg.battery.start_threshold_pct = 90;
+        cfg.thermal_fan.manual_speed_pct = 200;
+        cfg.thermal_fan.custom_curve.hysteresis_c = 99;
+        cfg.thermal_fan.custom_curve.points = vec![crate::models::FanCurvePoint {
+            temp_c: 95,
+            speed_pct: 50,
+        }];
+        cfg.tuning.pl1_watts = Some(1);
+        cfg.tuning.core_undervolt_mv = Some(-500);
+
+        let warnings = cfg.sanitize();
+        assert!(!warnings.is_empty());
+        assert_eq!(cfg.general.telemetry_interval_ms, 100);
+        assert_eq!(cfg.logging.max_total_mb, 100);
+        assert_eq!(cfg.battery.stop_threshold_pct, 50);
+        assert_eq!(cfg.battery.start_threshold_pct, 48);
+        assert_eq!(cfg.thermal_fan.manual_speed_pct, 100);
+        assert_eq!(cfg.thermal_fan.custom_curve.hysteresis_c, 10);
+        assert_eq!(cfg.thermal_fan.custom_curve.points.len(), 8);
+        assert_eq!(cfg.tuning.pl1_watts, Some(15));
+        assert_eq!(cfg.tuning.core_undervolt_mv, Some(-150));
     }
 }

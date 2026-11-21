@@ -1,5 +1,6 @@
 use crate::theme::{card_frame, pill_button, section_title};
 use crate::ui::charts::interactive_fan_curve;
+use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
 use omvix_core::thermal::effective_fan_curve_temp_c;
@@ -122,6 +123,7 @@ pub fn render(
                                 .changed()
                             {
                                 on_save();
+                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             }
                             for &hz in &disp.supported_hz {
                                 if ui
@@ -133,6 +135,7 @@ pub fn render(
                                     .changed()
                                 {
                                     on_save();
+                                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                                 }
                             }
                         });
@@ -152,6 +155,7 @@ pub fn render(
                                 .changed()
                             {
                                 on_save();
+                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             }
                             for &hz in &disp.supported_hz {
                                 if ui
@@ -163,6 +167,7 @@ pub fn render(
                                     .changed()
                                 {
                                     on_save();
+                                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                                 }
                             }
                         });
@@ -211,8 +216,10 @@ pub fn render(
         if cfg.thermal_fan.fan_mode == FanMode::Manual {
             ui.horizontal(|ui| {
                 ui.label(i18n.t("fan.manual_speed"));
-                ui.add(Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100).suffix("%"));
-                if ui.button(i18n.t("common.apply")).clicked() {
+                let resp = ui.add(
+                    Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100).suffix("%"),
+                );
+                if control_committed(ui, "perf_manual_fan", &resp) {
                     on_save();
                     on_cmd(WorkerCommand::SetFanMode {
                         mode: FanMode::Manual,
@@ -258,21 +265,38 @@ pub fn render(
             ui.add_space(6.0);
             ui.collapsing(i18n.t("fan.curve_manual_table"), |ui| {
                 let mut remove_idx: Option<usize> = None;
+                let mut table_committed = false;
                 let num_pts = cfg.thermal_fan.custom_curve.points.len();
                 for (idx, pt) in cfg.thermal_fan.custom_curve.points.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(format!("#{}", idx + 1));
                         ui.label(i18n.t("fan.curve_temp"));
-                        ui.add(egui::DragValue::new(&mut pt.temp_c).range(30..=100).suffix("°C"));
+                        let temp_resp = ui.add(
+                            egui::DragValue::new(&mut pt.temp_c)
+                                .range(30..=100)
+                                .suffix("°C"),
+                        );
+                        if control_committed(ui, ("curve_pt_temp", idx), &temp_resp) {
+                            table_committed = true;
+                        }
                         ui.label(i18n.t("fan.curve_speed"));
-                        ui.add(Slider::new(&mut pt.speed_pct, 0..=100).suffix("%"));
+                        let speed_resp = ui.add(Slider::new(&mut pt.speed_pct, 0..=100).suffix("%"));
+                        if control_committed(ui, ("curve_pt_speed", idx), &speed_resp) {
+                            table_committed = true;
+                        }
                         if num_pts > 2 && ui.button("×").clicked() {
                             remove_idx = Some(idx);
+                            table_committed = true;
                         }
                     });
                 }
                 if let Some(idx) = remove_idx {
                     cfg.thermal_fan.custom_curve.points.remove(idx);
+                }
+                if table_committed {
+                    cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }
             });
 
@@ -284,13 +308,12 @@ pub fn render(
                         .custom_curve
                         .points
                         .push(FanCurvePoint { temp_c: 75, speed_pct: 75 });
-                }
-                if ui.button(i18n.t("fan.reset_curve")).clicked() {
-                    cfg.thermal_fan.custom_curve = FanCurve::default();
+                    cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }
-                if ui.button(RichText::new(i18n.t("common.apply")).strong()).clicked() {
+                if ui.button(i18n.t("fan.reset_curve")).clicked() {
+                    cfg.thermal_fan.custom_curve = FanCurve::default();
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }
@@ -311,13 +334,11 @@ pub fn render(
 
             ui.horizontal(|ui| {
                 ui.label(i18n.t("fan.hysteresis"));
-                if ui
-                    .add(
-                        Slider::new(&mut cfg.thermal_fan.custom_curve.hysteresis_c, 1..=10)
-                            .suffix("°C"),
-                    )
-                    .changed()
-                {
+                let resp = ui.add(
+                    Slider::new(&mut cfg.thermal_fan.custom_curve.hysteresis_c, 1..=10)
+                        .suffix("°C"),
+                );
+                if control_committed(ui, "perf_fan_hysteresis", &resp) {
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }

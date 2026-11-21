@@ -15,9 +15,13 @@ pub mod hotkeys;
 #[cfg(windows)]
 pub mod keyboard;
 #[cfg(windows)]
+pub mod paths;
+#[cfg(windows)]
 pub mod pawnio;
 #[cfg(windows)]
 pub mod power_events;
+#[cfg(windows)]
+pub mod security_fs;
 #[cfg(windows)]
 pub mod system_info;
 #[cfg(windows)]
@@ -26,6 +30,8 @@ pub mod telemetry;
 pub mod thermal_fan;
 #[cfg(windows)]
 pub mod tuning;
+#[cfg(windows)]
+pub mod unelevated;
 #[cfg(windows)]
 pub mod wmi_bios;
 #[cfg(windows)]
