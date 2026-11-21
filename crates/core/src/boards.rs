@@ -98,6 +98,21 @@ pub fn all_known_boards() -> &'static [BoardProfile] {
     KNOWN_BOARDS
 }
 
+/// Returns `true` when BIOS WMI writes are authorized either because `board_id` is in the
+/// verified board table or because the user explicitly approved Experimental Mode for this board.
+pub fn is_bios_write_allowed(board_id: &str, experimental_approved_board: Option<&str>) -> bool {
+    let trimmed = board_id.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if lookup_board(trimmed).is_some() {
+        return true;
+    }
+    experimental_approved_board
+        .map(|approved| approved.trim().eq_ignore_ascii_case(trimmed))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +124,14 @@ mod tests {
         assert_eq!(board.thermal_scheme, ThermalProfileScheme::VictusS);
         assert!(board.expected_has_mux);
         assert!(board.expected_charge_limit);
+    }
+
+    #[test]
+    fn bios_write_gate_blocks_unapproved_unknown_boards() {
+        assert!(is_bios_write_allowed("8C99", None));
+        assert!(!is_bios_write_allowed("ZZZZ", None));
+        assert!(!is_bios_write_allowed("", Some("")));
+        assert!(is_bios_write_allowed("ZZZZ", Some("zzzz")));
+        assert!(!is_bios_write_allowed("ZZZZ", Some("YYYY")));
     }
 }

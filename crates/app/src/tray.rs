@@ -1,4 +1,4 @@
-use omvix_core::{FanMode, I18n, PerformanceMode};
+use omvix_core::{BatteryChargeMode, FanMode, I18n, PerformanceMode};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -13,6 +13,12 @@ pub enum TrayAction {
 
 /// Procedurally generates a crisp 32x32 RGBA Omvix emblem (dark slate circle + luminous cyan ring).
 pub fn build_tray_icon_rgba() -> (Vec<u8>, u32, u32) {
+    build_tray_icon_rgba_with_badge(false)
+}
+
+/// Procedurally generates the 32x32 tray emblem, optionally adding a corner amber badge
+/// while battery Hold (`0x0300`) or Inhibit (`0x0100`) charge limiting is active (R5).
+pub fn build_tray_icon_rgba_with_badge(battery_limit_active: bool) -> (Vec<u8>, u32, u32) {
     const SIZE: u32 = 32;
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     let center = (SIZE as f32 - 1.0) / 2.0;
@@ -47,6 +53,25 @@ pub fn build_tray_icon_rgba() -> (Vec<u8>, u32, u32) {
                     rgba[idx + 3] = edge_alpha;
                 }
             }
+
+            if battery_limit_active {
+                let bdx = x as f32 - 24.5;
+                let bdy = y as f32 - 24.5;
+                let bd = (bdx * bdx + bdy * bdy).sqrt();
+                if bd <= 6.2 {
+                    if bd <= 4.5 {
+                        rgba[idx] = 245;
+                        rgba[idx + 1] = 158;
+                        rgba[idx + 2] = 11;
+                        rgba[idx + 3] = 255;
+                    } else {
+                        rgba[idx] = 18;
+                        rgba[idx + 1] = 22;
+                        rgba[idx + 2] = 28;
+                        rgba[idx + 3] = 255;
+                    }
+                }
+            }
         }
     }
 
@@ -63,11 +88,12 @@ pub struct TrayController {
     item_fan_max: MenuItem,
     item_bat_toggle: MenuItem,
     item_quit: MenuItem,
+    battery_badge_mode: Option<BatteryChargeMode>,
 }
 
 impl TrayController {
     pub fn new(i18n: &I18n) -> Result<Self, String> {
-        let (rgba, w, h) = build_tray_icon_rgba();
+        let (rgba, w, h) = build_tray_icon_rgba_with_badge(false);
         let icon = Icon::from_rgba(rgba, w, h).map_err(|e| format!("Tray icon error: {e}"))?;
 
         let item_toggle = MenuItem::with_id(MenuId::new("toggle"), i18n.t("app.tray.show"), true, None);
@@ -129,7 +155,26 @@ impl TrayController {
             item_fan_max,
             item_bat_toggle,
             item_quit,
+            battery_badge_mode: None,
         })
+    }
+
+    pub fn update_battery_badge(&mut self, mode: BatteryChargeMode, i18n: &I18n) {
+        if self.battery_badge_mode == Some(mode) {
+            return;
+        }
+        self.battery_badge_mode = Some(mode);
+        let active = mode != BatteryChargeMode::Auto;
+        let (rgba, w, h) = build_tray_icon_rgba_with_badge(active);
+        if let Ok(icon) = Icon::from_rgba(rgba, w, h) {
+            let _ = self._tray.set_icon(Some(icon));
+        }
+        let tooltip = match mode {
+            BatteryChargeMode::Hold => i18n.t("app.tray.tooltip_hold"),
+            BatteryChargeMode::Inhibit => i18n.t("app.tray.tooltip_inhibit"),
+            BatteryChargeMode::Auto => "Omvix Hub".to_string(),
+        };
+        let _ = self._tray.set_tooltip(Some(&tooltip));
     }
 
     pub fn update_labels(&self, i18n: &I18n, window_visible: bool) {
@@ -197,5 +242,12 @@ mod tests {
         assert_eq!(w, 32);
         assert_eq!(h, 32);
         assert_eq!(rgba.len(), 32 * 32 * 4);
+
+        let (badged, bw, bh) = build_tray_icon_rgba_with_badge(true);
+        assert_eq!(bw, 32);
+        assert_eq!(bh, 32);
+        let corner_idx = ((24 * 32 + 24) * 4) as usize;
+        assert_eq!(&badged[corner_idx..corner_idx + 4], &[245, 158, 11, 255]);
+        assert_ne!(&rgba[corner_idx..corner_idx + 4], &[245, 158, 11, 255]);
     }
 }

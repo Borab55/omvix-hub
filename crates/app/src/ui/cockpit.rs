@@ -90,6 +90,9 @@ pub fn render(
             if st.thermal_guard_active {
                 status_badge(ui, "MAX GUARD", STATUS_ERR);
             }
+            if st.sensor_loss_active {
+                status_badge(ui, &i18n.t("cockpit.sensor_loss_badge"), STATUS_ERR);
+            }
         });
     });
 
@@ -220,6 +223,44 @@ pub fn render(
                         config_warnings.clear();
                     }
                 });
+            });
+        });
+    }
+
+    if !st.board_known && !st.bios_writes_allowed && !st.board_id.is_empty() {
+        ui.add_space(4.0);
+        compact_card(t).show(ui, |ui| {
+            ui.set_width(card_inner_w);
+            ui.set_max_width(card_inner_w);
+            ui.colored_label(
+                STATUS_WARN,
+                RichText::new(i18n.t_fmt("board.experimental_title", &[("board", &st.board_id)]))
+                    .size(11.5)
+                    .strong(),
+            );
+            ui.weak(RichText::new(i18n.t("board.experimental_desc")).size(10.5));
+            if let Some(diag) = &st.diagnostics {
+                let ok_cnt = diag.probes.iter().filter(|p| p.success).count();
+                ui.weak(
+                    RichText::new(i18n.t_fmt(
+                        "board.probe_summary",
+                        &[
+                            ("ok", &ok_cnt.to_string()),
+                            ("total", &diag.probes.len().to_string()),
+                        ],
+                    ))
+                    .size(10.5),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if pill_button(ui, &i18n.t("board.approve_experimental"), false, t).clicked() {
+                    cfg.general.experimental_board_id = Some(st.board_id.clone());
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                }
+                if ui.small_button(i18n.t("board.view_probes")).clicked() {
+                    actions.open_extra_subtab = Some(ExtraSubTab::Diagnostics);
+                }
             });
         });
     }
@@ -573,6 +614,12 @@ pub fn render(
                         on_cmd(WorkerCommand::ApplyBatteryNow);
                     }
                 });
+                let off_key = if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
+                    "battery.when_off_hold_short"
+                } else {
+                    "battery.when_off_auto_short"
+                };
+                ui.weak(RichText::new(i18n.t(off_key)).size(10.5));
             });
         });
 

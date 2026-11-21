@@ -3,6 +3,28 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.4.5] - 2026-11-21
+
+### Added & Hardened (Phase 2 — Hardware Safety)
+- **R1 — Sensor-Loss Safety Mode (`core/thermal.rs`, `worker.rs`, `cockpit.rs`):**
+  - Added `SensorLossGuard`: if all temperature readings (`CPU`, `GPU`, `Chassis`) vanish for `6` seconds continuously, immediately forces `FanMode::Auto` (BIOS control), pauses keep-alive ticks, raises a header badge + warning toast, and cleanly restores the user's selected fan mode/curve when telemetry returns.
+- **R2 — Monotonic Fan Curve & High-Temperature Floor (`core/models.rs`, `charts.rs`, `performance.rs`, `config.rs`):**
+  - Added `FanCurve::normalize()` enforcing non-decreasing speeds across points and a mandatory `>= 50%` floor at `>= 80°C` (including inside `FanCurve::evaluate()` and interactive drag handles in `charts.rs`), applied both on config load and UI edits.
+- **R3 & R7 — Configurable Sustained Thermal Guard & Retry/RPM Verification (`core/thermal.rs`, `config.rs`, `performance.rs`, `worker.rs`):**
+  - Raised default CPU Emergency Guard threshold to **95°C** (configurable `90–98°C` in Advanced Fan Settings) with a mandatory continuous sustain window (configurable `10–30 s`, default `10 s`) to eliminate false startup spikes and `Auto`-mode transient watt triggers (`i7-14700HX` brief 55W+ burst while cool). Bumped `CURRENT_CONFIG_VERSION` to `3` with automatic migration.
+  - Added `GuardMaxRetryController`: retries failed `set_fan_mode(Max)` calls up to 3 attempts (2s intervals), verifies physical RPM acceleration within 4s, and automatically falls back to BIOS `Auto` with a warning toast if `Max` fails or fans do not spin up.
+- **R4 / B1 & B3 — Power Limit Wildcard Safety & Disabled Unwired MSR Controls (`backend-windows/tuning.rs`, `tuning.rs`):**
+  - Fixed `set_power_limits` (`0x20008 / 0x29`) to encode unset fields as `0xFF` ("leave unchanged") instead of overwriting PL1/PL2 defaults, disabled `0x29` on unknown motherboards, and added independent PL1/PL2 checkboxes in UI.
+  - Disabled TCC (`MSR 0x1A2`) and Core Undervolt (`MSR 0x150`) UI controls with a tooltip and `MSR BRIDGE PENDING` badge until the PawnIO MSR write bridge is wired.
+- **R5 & R8 — Persistent Battery Awareness, Tray Badge, Fast Off-State Order & Recovery (`tray.rs`, `cli/main.rs`, `battery.rs`, `cockpit.rs`, `worker.rs`, `telemetry.rs`, `README.md`):**
+  - Added corner amber tray icon badge + tooltip while `Hold`/`Inhibit` is active, explicit off-state mode notes in Cockpit & Battery cards, `OmvixBatteryService` recommendation tip, `omvix-cli battery auto` shortcut, and a **Recovery / Kurtarma** section in `README.md`.
+  - Optimized suspend/shutdown sequence (`Fan Auto` first, then `<0.1ms` Win32 `GetSystemPowerStatus` battery `Hold` write) with millisecond timing logs.
+- **R6, R9, R10, B5 & NVML Filter (`lighting_display.rs`, `boards.rs`, `system_info.rs`, `telemetry.rs`, `worker.rs`):**
+  - Added 2-step GPU MUX confirmation with BitLocker/battery warning and **Restart Now / Later** actions.
+  - Blocked BIOS WMI writes on unrecognized motherboards until the user explicitly reviews read-only probe results and enables **Experimental Mode**.
+  - Added OGH/OMEN & Intel XTU fan/thermal conflict detection warnings (`is_fan_thermal_conflict_service`).
+  - Logged previously ignored (`let _ =`) fan/lighting WMI failures and filtered implausible NVML GPU power spikes (e.g., `590W` during Optimus D3cold transitions).
+
 ## [0.4.4] - 2026-11-21
 
 ### Added & Changed

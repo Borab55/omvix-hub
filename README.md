@@ -79,3 +79,20 @@ cargo build --release --workspace
 ### Paths (Windows)
 - **Config:** `%APPDATA%\OmvixHub\config.toml`
 - **Rotating Logs (20 MB cap):** `%LOCALAPPDATA%\OmvixHub\logs\omvix.log`
+
+---
+
+## Recovery / Kurtarma
+
+If Omvix Hub was deleted manually while **Battery Hold (`0x0300`)** or **Inhibit (`0x0100`)** was active, the HP firmware (`0x2B`) retains that charge limit persistently even across reboots or Windows shutdowns.
+
+*Omvix Hub klasörü batarya **Hold (`0x0300`)** veya **Inhibit (`0x0100`)** aktifken elle silindiyse, BIOS/EC firmware bu şarj kısıtını yeniden başlatma veya kapatma sonrasında da kalıcı olarak tutmaya devam eder.*
+
+To restore normal 100% battery charging at any time (**no GUI needed**):
+
+```powershell
+# Run in an Administrator terminal / Yönetici terminalinde çalıştırın:
+.\omvix-cli.exe battery auto
+```
+
+Alternatively (without `omvix-cli.exe`), reboot into **HP BIOS Setup (`F10`)** and load **Restore Defaults**, or perform a CMOS/EC reset by holding the power button for 15–30 seconds while unplugged.
