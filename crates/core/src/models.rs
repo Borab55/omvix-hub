@@ -138,6 +138,29 @@ pub enum BatteryChargeMode {
     Hold,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BatteryServiceState {
+    #[default]
+    NotInstalled,
+    Running,
+    Stopped,
+    Starting,
+    Stopping,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BatteryServiceInfo {
+    pub service_name: String,
+    pub state: BatteryServiceState,
+    pub installed_exe_path: String,
+    pub active_binary_path: Option<String>,
+    pub data_dir_path: String,
+    pub log_file_path: String,
+    pub exe_exists: bool,
+    pub data_dir_exists: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct BatteryStatus {

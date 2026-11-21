@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CustomThemeConfig {
@@ -357,7 +359,7 @@ impl Default for BatteryConfig {
             mode: BatteryChargeMode::Inhibit,
             stop_threshold_pct: 80,
             start_threshold_pct: 75,
-            hold_when_shutdown: false,
+            hold_when_shutdown: true,
             one_time_full_charge: false,
             active_profile_id: None,
             custom_profiles: Vec::new(),
@@ -462,9 +464,11 @@ impl Default for TuningConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub config_version: u32,
     pub general: GeneralConfig,
     pub logging: LogConfig,
     pub thermal_fan: ThermalFanConfig,
@@ -473,6 +477,22 @@ pub struct AppConfig {
     pub auto_profile: AutoProfileConfig,
     pub hotkeys: HotkeyConfig,
     pub tuning: TuningConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            config_version: CURRENT_CONFIG_VERSION,
+            general: GeneralConfig::default(),
+            logging: LogConfig::default(),
+            thermal_fan: ThermalFanConfig::default(),
+            battery: BatteryConfig::default(),
+            lighting: LightingConfig::default(),
+            auto_profile: AutoProfileConfig::default(),
+            hotkeys: HotkeyConfig::default(),
+            tuning: TuningConfig::default(),
+        }
+    }
 }
 
 impl AppConfig {
@@ -496,7 +516,13 @@ impl AppConfig {
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(path)?;
-        toml::from_str(&raw).map_err(|e| OmvixError::Config(e.to_string()))
+        let mut cfg: Self = toml::from_str(&raw).map_err(|e| OmvixError::Config(e.to_string()))?;
+        if cfg.config_version < CURRENT_CONFIG_VERSION {
+            // Migrate pre-v0.4.2 configs once to enable safe shutdown Hold by default.
+            cfg.battery.hold_when_shutdown = true;
+            cfg.config_version = CURRENT_CONFIG_VERSION;
+        }
+        Ok(cfg)
     }
 
     /// Saves configuration atomically via a temporary file + rename.
@@ -598,5 +624,37 @@ mod tests {
         assert!(old.is_legacy_bluish_dark_slate());
         assert!(!CustomThemeConfig::preset_dark_slate().is_legacy_bluish_dark_slate());
         assert!(!CustomThemeConfig::preset_omen_crimson().is_legacy_bluish_dark_slate());
+    }
+
+    #[test]
+    fn battery_hold_default_is_true_and_legacy_config_migrates_once() {
+        assert!(BatteryConfig::default().hold_when_shutdown);
+        assert_eq!(AppConfig::default().config_version, CURRENT_CONFIG_VERSION);
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_migrate_test_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // Pre-v0.4.2 config had no `config_version` and `hold_when_shutdown = false` -> migrates to true
+        let legacy_toml = "[battery]\nenabled = true\nhold_when_shutdown = false\n";
+        fs::write(&path, legacy_toml).unwrap();
+        let migrated = AppConfig::load_from_path(&path).expect("load legacy");
+        assert_eq!(migrated.config_version, CURRENT_CONFIG_VERSION);
+        assert!(migrated.battery.hold_when_shutdown);
+
+        // v2 config where user explicitly chose false -> preserves false
+        let v2_toml = format!(
+            "config_version = {CURRENT_CONFIG_VERSION}\n[battery]\nenabled = true\nhold_when_shutdown = false\n"
+        );
+        fs::write(&path, v2_toml).unwrap();
+        let explicit = AppConfig::load_from_path(&path).expect("load v2");
+        assert_eq!(explicit.config_version, CURRENT_CONFIG_VERSION);
+        assert!(!explicit.battery.hold_when_shutdown);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

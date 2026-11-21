@@ -1,10 +1,14 @@
 use crate::theme::{
-    STATUS_OK, STATUS_WARN, accent_color, card_frame, pill_button, section_title, status_badge,
+    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, card_frame, pill_button, section_title,
+    status_badge,
 };
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{RichText, Slider, Ui};
-use omvix_core::{AppConfig, BatteryChargeMode, BatteryProfile, I18n};
+use egui::{Color32, RichText, Slider, Ui};
+use omvix_core::{
+    AppConfig, BatteryChargeMode, BatteryProfile, BatteryServiceState, I18n,
+};
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct BatteryDraftState {
@@ -12,6 +16,7 @@ pub struct BatteryDraftState {
     pub stop_pct: u8,
     pub start_pct: u8,
     pub mode: BatteryChargeMode,
+    pub confirm_uninstall_service: bool,
 }
 
 impl Default for BatteryDraftState {
@@ -21,6 +26,7 @@ impl Default for BatteryDraftState {
             stop_pct: 75,
             start_pct: 70,
             mode: BatteryChargeMode::Inhibit,
+            confirm_uninstall_service: false,
         }
     }
 }
@@ -396,5 +402,167 @@ pub fn render(
         } else {
             ui.weak(i18n.t("battery.travel_mode_desc"));
         }
+
+        if st.battery_service.state == BatteryServiceState::Running {
+            ui.add_space(4.0);
+            ui.colored_label(STATUS_OK, RichText::new(i18n.t("battery.service_active_sync_note")).size(11.5));
+        }
+    });
+
+    ui.add_space(8.0);
+
+    // Optional Standalone Windows Background Service (Zero-Trace Uninstallable)
+    card_frame(t).show(ui, |ui| {
+        let svc = &st.battery_service;
+        let (state_text, state_color) = match svc.state {
+            BatteryServiceState::Running => (i18n.t("battery.service_state_running"), STATUS_OK),
+            BatteryServiceState::Stopped => (i18n.t("battery.service_state_stopped"), STATUS_WARN),
+            BatteryServiceState::Starting | BatteryServiceState::Stopping => {
+                (i18n.t("battery.service_state_transitioning"), STATUS_WARN)
+            }
+            BatteryServiceState::NotInstalled | BatteryServiceState::Unknown => (
+                i18n.t("battery.service_state_not_installed"),
+                Color32::from_rgb(138, 144, 156),
+            ),
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            section_title(ui, i18n.t("battery.service_title"), t);
+            status_badge(ui, &state_text, state_color);
+        });
+        ui.add_space(4.0);
+        ui.weak(i18n.t("battery.service_desc"));
+        ui.add_space(6.0);
+
+        let exe_display = svc
+            .active_binary_path
+            .as_deref()
+            .unwrap_or(&svc.installed_exe_path);
+
+        egui::Grid::new("battery_service_paths_grid")
+            .num_columns(2)
+            .spacing([14.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(i18n.t("battery.service_name_label"));
+                ui.monospace(format!("{}  (LocalSystem · AutoStart)", svc.service_name));
+                ui.end_row();
+
+                ui.label(i18n.t("battery.service_exe_path"));
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(exe_display);
+                    if svc.exe_exists {
+                        if ui.small_button(i18n.t("battery.service_open_folder")).clicked() {
+                            #[cfg(windows)]
+                            if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
+                                let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
+                            }
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label(i18n.t("battery.service_data_path"));
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(&svc.data_dir_path);
+                    if svc.data_dir_exists {
+                        if ui.small_button(i18n.t("battery.service_open_folder")).clicked() {
+                            #[cfg(windows)]
+                            {
+                                let _ = std::process::Command::new("explorer.exe")
+                                    .arg(&svc.data_dir_path)
+                                    .spawn();
+                            }
+                        }
+                    }
+                });
+                ui.end_row();
+            });
+
+        ui.add_space(8.0);
+        if st.battery_service_busy {
+            ui.colored_label(STATUS_WARN, i18n.t("battery.service_busy"));
+        }
+
+        ui.add_enabled_ui(!st.battery_service_busy, |ui| {
+            let installed = svc.state != BatteryServiceState::NotInstalled;
+            if !installed {
+                ui.horizontal_wrapped(|ui| {
+                    if pill_button(ui, &i18n.t("battery.service_install"), true, t).clicked() {
+                        draft.confirm_uninstall_service = false;
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::InstallBatteryService);
+                    }
+                    if svc.exe_exists || svc.data_dir_exists {
+                        if ui
+                            .button(RichText::new(i18n.t("battery.service_clean_leftovers")).color(STATUS_ERR))
+                            .clicked()
+                        {
+                            on_cmd(WorkerCommand::UninstallBatteryServiceZeroTrace);
+                        }
+                    }
+                });
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    if pill_button(ui, &i18n.t("battery.service_update_sync"), false, t).clicked()
+                    {
+                        draft.confirm_uninstall_service = false;
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::InstallBatteryService);
+                    }
+                    if svc.state == BatteryServiceState::Stopped
+                        && ui.button(i18n.t("battery.service_start")).clicked()
+                    {
+                        on_cmd(WorkerCommand::StartBatteryService);
+                    }
+                    if svc.state == BatteryServiceState::Running {
+                        if ui.button(i18n.t("battery.service_restart")).clicked() {
+                            on_cmd(WorkerCommand::RestartBatteryService);
+                        }
+                        if ui.button(i18n.t("battery.service_stop")).clicked() {
+                            on_cmd(WorkerCommand::StopBatteryService);
+                        }
+                    }
+                });
+
+                ui.add_space(6.0);
+                if !draft.confirm_uninstall_service {
+                    if ui
+                        .button(
+                            RichText::new(i18n.t("battery.service_uninstall_zero"))
+                                .color(STATUS_ERR),
+                        )
+                        .clicked()
+                    {
+                        draft.confirm_uninstall_service = true;
+                    }
+                } else {
+                    ui.weak(RichText::new(i18n.t("battery.service_uninstall_confirm_desc")).size(11.0));
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .button(
+                                RichText::new(i18n.t("battery.service_uninstall_confirm_btn"))
+                                    .strong()
+                                    .color(STATUS_ERR),
+                            )
+                            .clicked()
+                        {
+                            draft.confirm_uninstall_service = false;
+                            cfg.battery.enabled = false;
+                            cfg.battery.mode = BatteryChargeMode::Auto;
+                            cfg.battery.active_profile_id = None;
+                            cfg.battery.one_time_full_charge = false;
+                            on_save();
+                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                            on_cmd(WorkerCommand::UninstallBatteryServiceZeroTrace);
+                        }
+                        if ui.button(i18n.t("common.cancel")).clicked() {
+                            draft.confirm_uninstall_service = false;
+                        }
+                    });
+                }
+            }
+        });
     });
 }
