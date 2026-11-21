@@ -1,4 +1,4 @@
-use crate::theme::{STATUS_WARN, card_frame, pill_button, section_title, status_badge};
+use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge};
 use crate::ui::charts::interactive_fan_curve;
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
@@ -7,13 +7,22 @@ use omvix_core::thermal::{
     MAX_GUARD_CPU_TEMP_C, MAX_GUARD_SUSTAIN_SECS, MIN_GUARD_CPU_TEMP_C, MIN_GUARD_SUSTAIN_SECS,
     effective_fan_curve_temp_c,
 };
-use omvix_core::{AppConfig, FanCurve, FanCurvePoint, FanMode, I18n, PerformanceMode};
+use omvix_core::{
+    AppConfig, FanCurve, FanCurvePoint, FanMode, I18n, PerformanceMode, WindowsPowerOverlay,
+};
+
+#[derive(Debug, Default, Clone)]
+pub struct PerformanceDraftState {
+    pub curve_import_input: String,
+    pub curve_status_msg: Option<(String, bool)>,
+}
 
 pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
     st: &SharedState,
     i18n: &I18n,
+    draft: &mut PerformanceDraftState,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) {
@@ -32,7 +41,7 @@ pub fn render(
         ui.add_space(6.0);
     }
 
-    // Thermal / Performance Mode Card
+    // Thermal / Performance Mode Card + Windows Power Mode Sync
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("thermal.mode"), t);
         ui.add_space(4.0);
@@ -51,151 +60,34 @@ pub fn render(
                 }
             }
         });
-    });
-
-    ui.add_space(8.0);
-
-    // AC / Battery Auto-Profile Card
-    card_frame(t).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            section_title(ui, i18n.t("thermal.auto_profile"), t);
-            if ui
-                .checkbox(&mut cfg.auto_profile.enabled, i18n.t("common.enabled"))
-                .changed()
-            {
-                on_save();
-                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-            }
-        });
-
-        ui.add_enabled_ui(cfg.auto_profile.enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(i18n.t("thermal.ac_profile"));
-                egui::ComboBox::from_id_salt("ac_perf_combo")
-                    .selected_text(format!("{:?}", cfg.auto_profile.ac_performance_mode))
-                    .show_ui(ui, |ui| {
-                        for m in [
-                            PerformanceMode::Eco,
-                            PerformanceMode::Quiet,
-                            PerformanceMode::Balanced,
-                            PerformanceMode::Performance,
-                        ] {
-                            if ui
-                                .selectable_value(
-                                    &mut cfg.auto_profile.ac_performance_mode,
-                                    m,
-                                    format!("{m:?}"),
-                                )
-                                .changed()
-                            {
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            }
-                        }
-                    });
-
-                ui.add_space(12.0);
-                ui.label(i18n.t("thermal.dc_profile"));
-                egui::ComboBox::from_id_salt("dc_perf_combo")
-                    .selected_text(format!("{:?}", cfg.auto_profile.dc_performance_mode))
-                    .show_ui(ui, |ui| {
-                        for m in [
-                            PerformanceMode::Eco,
-                            PerformanceMode::Quiet,
-                            PerformanceMode::Balanced,
-                            PerformanceMode::Performance,
-                        ] {
-                            if ui
-                                .selectable_value(
-                                    &mut cfg.auto_profile.dc_performance_mode,
-                                    m,
-                                    format!("{m:?}"),
-                                )
-                                .changed()
-                            {
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            }
-                        }
-                    });
-            });
-
-            if let Some(disp) = &st.display_mode {
-                ui.horizontal(|ui| {
-                    ui.label("AC Hz:");
-                    egui::ComboBox::from_id_salt("ac_hz_combo")
-                        .selected_text(
-                            cfg.auto_profile
-                                .ac_refresh_hz
-                                .map(|h| format!("{h} Hz"))
-                                .unwrap_or_else(|| "—".into()),
-                        )
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_value(&mut cfg.auto_profile.ac_refresh_hz, None, "—")
-                                .changed()
-                            {
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            }
-                            for &hz in &disp.supported_hz {
-                                if ui
-                                    .selectable_value(
-                                        &mut cfg.auto_profile.ac_refresh_hz,
-                                        Some(hz),
-                                        format!("{hz} Hz"),
-                                    )
-                                    .changed()
-                                {
-                                    on_save();
-                                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                }
-                            }
-                        });
-
-                    ui.add_space(12.0);
-                    ui.label("Battery Hz:");
-                    egui::ComboBox::from_id_salt("dc_hz_combo")
-                        .selected_text(
-                            cfg.auto_profile
-                                .dc_refresh_hz
-                                .map(|h| format!("{h} Hz"))
-                                .unwrap_or_else(|| "—".into()),
-                        )
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_value(&mut cfg.auto_profile.dc_refresh_hz, None, "—")
-                                .changed()
-                            {
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            }
-                            for &hz in &disp.supported_hz {
-                                if ui
-                                    .selectable_value(
-                                        &mut cfg.auto_profile.dc_refresh_hz,
-                                        Some(hz),
-                                        format!("{hz} Hz"),
-                                    )
-                                    .changed()
-                                {
-                                    on_save();
-                                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                }
-                            }
-                        });
-                });
-            }
-
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(
-                    &mut cfg.auto_profile.dim_keyboard_on_battery,
-                    "Turn off keyboard backlight on battery",
+                    &mut cfg.thermal_fan.sync_windows_power_mode,
+                    i18n.t("thermal.sync_windows_power_mode"),
                 )
                 .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                if cfg.thermal_fan.sync_windows_power_mode {
+                    on_cmd(WorkerCommand::SetPerformanceMode(
+                        cfg.thermal_fan.performance_mode,
+                    ));
+                }
+            }
+            if let Some(overlay) = st.active_win_power_mode {
+                let ov_key = match overlay {
+                    WindowsPowerOverlay::BestPowerEfficiency => "thermal.win_power_efficiency",
+                    WindowsPowerOverlay::Balanced => "thermal.win_power_balanced",
+                    WindowsPowerOverlay::BestPerformance => "thermal.win_power_performance",
+                };
+                status_badge(
+                    ui,
+                    &i18n.t_fmt("thermal.win_power_active", &[("mode", &i18n.t(ov_key))]),
+                    STATUS_OK,
+                );
             }
         });
     });
@@ -255,6 +147,24 @@ pub fn render(
                 ui.add_space(4.0);
             }
             ui.weak(RichText::new(i18n.t("fan.curve_drag_hint")).size(11.5));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(i18n.t("fan.curve_presets"));
+                for (key, preset) in [
+                    ("fan.preset_quiet", FanCurve::preset_quiet()),
+                    ("fan.preset_balanced", FanCurve::preset_balanced()),
+                    ("fan.preset_aggressive", FanCurve::preset_aggressive()),
+                    ("fan.preset_ogh_like", FanCurve::preset_ogh_like()),
+                ] {
+                    let selected = cfg.thermal_fan.custom_curve == preset;
+                    if pill_button(ui, &i18n.t(key), selected, t).clicked() {
+                        cfg.thermal_fan.custom_curve = preset;
+                        draft.curve_status_msg = None;
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    }
+                }
+            });
             ui.add_space(4.0);
             cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
 
@@ -331,8 +241,59 @@ pub fn render(
                 }
                 if ui.button(i18n.t("fan.reset_curve")).clicked() {
                     cfg.thermal_fan.custom_curve = FanCurve::default();
+                    draft.curve_status_msg = None;
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.collapsing(i18n.t("fan.curve_share"), |ui| {
+                let mut code = cfg.thermal_fan.custom_curve.encode_share_code();
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut code)
+                            .desired_width(260.0)
+                            .interactive(false),
+                    );
+                    if ui.button(i18n.t("fan.curve_copy_code")).clicked() {
+                        ui.ctx().copy_text(code.clone());
+                        draft.curve_status_msg = Some((i18n.t("fan.curve_copied"), false));
+                    }
+                    if ui.button(i18n.t("fan.curve_copy_json")).clicked() {
+                        if let Ok(json) = serde_json::to_string_pretty(&cfg.thermal_fan.custom_curve)
+                        {
+                            ui.ctx().copy_text(json);
+                            draft.curve_status_msg = Some((i18n.t("fan.curve_copied"), false));
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.curve_import_input)
+                            .desired_width(260.0)
+                            .hint_text(i18n.t("fan.curve_import_placeholder")),
+                    );
+                    if pill_button(ui, &i18n.t("fan.curve_import_btn"), false, t).clicked() {
+                        match FanCurve::decode_share_code(&draft.curve_import_input) {
+                            Ok(imported) => {
+                                cfg.thermal_fan.custom_curve = imported;
+                                draft.curve_import_input.clear();
+                                draft.curve_status_msg =
+                                    Some((i18n.t("fan.curve_imported"), false));
+                                on_save();
+                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                            }
+                            Err(err) => {
+                                draft.curve_status_msg = Some((err.to_string(), true));
+                            }
+                        }
+                    }
+                });
+
+                if let Some((msg, is_err)) = &draft.curve_status_msg {
+                    ui.colored_label(if *is_err { STATUS_ERR } else { STATUS_OK }, msg);
                 }
             });
         }

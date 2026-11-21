@@ -1,9 +1,11 @@
 use crate::config::AutoProfileConfig;
-use crate::models::PerformanceMode;
+use crate::models::{FanCurvePreset, FanMode, PerformanceMode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoProfileAction {
     pub performance_mode: PerformanceMode,
+    pub fan_mode: Option<FanMode>,
+    pub curve_preset: Option<FanCurvePreset>,
     pub refresh_hz: Option<u32>,
     pub dim_keyboard: bool,
 }
@@ -48,12 +50,16 @@ impl AutoProfileEngine {
         if ac_connected {
             Some(AutoProfileAction {
                 performance_mode: cfg.ac_performance_mode,
+                fan_mode: cfg.ac_fan_mode,
+                curve_preset: cfg.ac_curve_preset,
                 refresh_hz: cfg.ac_refresh_hz,
                 dim_keyboard: false,
             })
         } else {
             Some(AutoProfileAction {
                 performance_mode: cfg.dc_performance_mode,
+                fan_mode: cfg.dc_fan_mode,
+                curve_preset: cfg.dc_curve_preset,
                 refresh_hz: cfg.dc_refresh_hz,
                 dim_keyboard: cfg.dim_keyboard_on_battery,
             })
@@ -72,6 +78,10 @@ mod tests {
             enabled: true,
             ac_performance_mode: PerformanceMode::Performance,
             dc_performance_mode: PerformanceMode::Eco,
+            ac_fan_mode: Some(FanMode::CustomCurve),
+            dc_fan_mode: Some(FanMode::Auto),
+            ac_curve_preset: Some(FanCurvePreset::Aggressive),
+            dc_curve_preset: None,
             ac_refresh_hz: Some(165),
             dc_refresh_hz: Some(60),
             dim_keyboard_on_battery: true,
@@ -80,6 +90,8 @@ mod tests {
         // Initial AC observation triggers action
         let ac_action = engine.evaluate(&cfg, true, false).expect("initial AC action");
         assert_eq!(ac_action.performance_mode, PerformanceMode::Performance);
+        assert_eq!(ac_action.fan_mode, Some(FanMode::CustomCurve));
+        assert_eq!(ac_action.curve_preset, Some(FanCurvePreset::Aggressive));
         assert_eq!(ac_action.refresh_hz, Some(165));
         assert!(!ac_action.dim_keyboard);
 
@@ -89,6 +101,8 @@ mod tests {
         // Transition to battery -> DC action
         let dc_action = engine.evaluate(&cfg, false, false).expect("DC transition");
         assert_eq!(dc_action.performance_mode, PerformanceMode::Eco);
+        assert_eq!(dc_action.fan_mode, Some(FanMode::Auto));
+        assert_eq!(dc_action.curve_preset, None);
         assert_eq!(dc_action.refresh_hz, Some(60));
         assert!(dc_action.dim_keyboard);
 

@@ -10,14 +10,14 @@
 
 - **Zero OGH Dependency / OGH Bağımsızlığı:** Communicates directly with HP ACPI/WMI firmware (`root\WMI\hpqBIntM`, `hpqBEvnt`) without Microsoft Store apps, background telemetry, or HP HSA services.
 - **Victus & OMEN Support / Victus ve OMEN Desteği:** Auto-detects board ID (`Win32_BaseBoard.Product`, e.g., Victus 16 `8C99`) and selects the appropriate thermal profile protocol (`OmenV0`, `OmenV1`, `Victus`, `VictusS`).
-- **Thermal & Fan Control:** Performance mode switching (`Eco`, `Quiet`, `Balanced`, `Performance`), `Auto`/`Max`/`Manual` speed, interactive `CustomCurve` with downward hysteresis, and a 2-minute keep-alive guard preventing Victus/OMEN BIOS timeout resets.
-- **Dual-Tier Telemetry & Windows EMI:** Supports **0.1s–5.0s** live polling of CPU %/Clock, **CPU Package Power (W via Windows EMI — works under VBS/HVCI)**, NVIDIA NVML (Temp, Load, Power/TGP Limit, VRAM, Clocks, P-State, Throttle), Disk & Network I/O, Session Min/Max/Avg, and 3 dedicated real-time plots (Temperature, Usage, Power), while keeping EC/WMI BIOS reads safely capped at `1.0s`.
-- **Battery Care / Batarya Sağlığı:** Native WMI `0x2B` charge limiting (`Auto`, `Inhibit`, `Hold`), one-click presets (`60% / 80% / 90% / 100%`), unlimited custom battery profiles, **one-time 100% travel charge**, wear %, capacity, voltage, remaining time, and charge/discharge wattage.
-- **G-Helper-Style Smart Cockpit & Neutral Charcoal Theme:** Opens as a compact bottom-right `456 × 676` cockpit with tactile mode tiles, and expands smoothly to `1060 × 700` when opening `Graphs`, `Fans & Power`, `Battery`, or `Extra` drawers — with optional auto-hide on focus loss and neutral **Dark Graphite** (`#161618`) default styling.
-- **Low-Power iGPU UI & Shareable Themes:** Built on `eframe` + `wgpu` (`PowerPreference::LowPower`) to render cleanly on integrated graphics without waking dGPU, with 5 presets, live RGB pickers, and Copy/Paste shareable theme codes (`OMVIX1|...` / JSON).
-- **Display, Lighting, GPU & CPU Tuning:** 1-zone/4-zone RGB & white backlight control, GPU MUX switch (`Hybrid`/`Discrete`/`Optimus`), display refresh rate (`Hz`) switcher, AC/Battery auto-profiles, CPU Turbo Boost, PL1/PL2/TCC/Undervolt controls (with automatic VBS/HVCI lock detection).
-- **Hotkeys & System Tray:** Dedicated OMEN key capture (`hpqBEvnt`) with custom action/command assignment, global toggle shortcut (`Ctrl+Shift+O`), minimize-to-tray on close, and tray quick actions.
-- **i18n & Diagnostics:** Instant **Türkçe / English** switching (extensible JSON packs under `locales/`), companion/conflict service detector, JSON diagnostic export, and timestamped ring-rotating file logger capped at **20 MB** (`4 x 5 MB`).
+- **Thermal & Fan Control:** Performance mode switching (`Eco`, `Quiet`, `Balanced`, `Performance`), `Auto`/`Max`/`Manual` speed, interactive 8-point `CustomCurve` with presets, downward hysteresis & safe share codes, configurable sustained Thermal Guard, Sensor-Loss safety fallback, and Safe Mode (`--safe` / startup `Shift` / 3-launch crash-loop guard).
+- **Dual-Tier Telemetry, CSV Export & Windows EMI:** Supports **0.1s–5.0s** live polling of CPU %/Clock, **CPU Package Power (W via Windows EMI)**, signed **PawnIO (`IntelMSR.bin`)** CPU die temperature, zero-wake NVIDIA **D3 sleep detection** + NVML stabilization, Disk & Network I/O, Session Min/Max/Avg, native `egui::Painter` real-time area charts, and 600-row CSV export while keeping EC/WMI reads safely capped at `1.0s`.
+- **Battery Care & Weekly Health Chart:** Native WMI `0x2B` charge limiting (`Auto`, `Inhibit`, `Hold`), presets (`60% / 80% / 90% / 100%`), custom profiles, **one-time 100% travel charge**, built-in `OmvixBatteryService` for AC/sleep/shutdown enforcement, and persistent weekly battery health & wear trend chart.
+- **AC/DC & Per-App `.exe` Profiles:** Automatic AC/DC fan & curve switching, per-application foreground `.exe` profiles with debounce & baseline restore, and automatic Windows Power Mode synchronization.
+- **Zero-Flicker Dual-Viewport Cockpit & Accessibility:** Compact stationary bottom-right cockpit with a left-side detail viewport (`Graphs`, `Fans & Power`, `Battery`, `Extra`), 5-step onboarding wizard, **High Contrast** preset + `%85–%130` font scaling, and keyboard navigation (`Ctrl+1..4`, `Ctrl+Tab`, `Alt+Left/Right`, `Esc`), built on low-power `eframe` + `wgpu` (`PowerPreference::LowPower`) with shareable themes (`OMVIX1|...`).
+- **Display, Lighting, GPU & CPU Tuning:** 1-zone/4-zone RGB & white backlight control, 2-step GPU MUX switch (`Hybrid`/`Discrete`/`Optimus`), display refresh rate (`Hz`) switcher, CPU Turbo Boost, and PL1/PL2 controls (with VBS/HVCI detection).
+- **Hotkeys, System Tray & Signed Updater:** OMEN key capture (`hpqBEvnt`) with unelevated `.exe`/`.lnk` custom commands, global toggle shortcut with Win32 conflict detection, mode-colored tray icon + quick submenus + OSD/Toast alerts, and a pinned GitHub Releases updater with mandatory `SHA256SUMS.txt` & Authenticode verification.
+- **10-Step Undo, Support Bundle & i18n:** 10-step hardware change undo history, 1-click redacted `.zip` support bundle export, instant **Türkçe / English** localization (`locales/`), conflict service detector, and 20 MB rotating logs (`4 × 5 MB`).
 
 ---
 
@@ -26,11 +26,11 @@
 ```text
 hp-omen-hub-lite/
 ├── crates/
-│   ├── core/              # omvix-core: OS-agnostic models, traits, fan curve, battery care, auto-profile, i18n, 20 MB logger
-│   ├── backend-windows/   # omvix-windows: COM/WMI hpqBIntM & hpqBEvnt, NVML, sysinfo, Win32 Power/GDI/Registry
+│   ├── core/              # omvix-core: OS-agnostic models, traits, fan curve, battery care/history, profiles, undo, zip bundle, updater, i18n
+│   ├── backend-windows/   # omvix-windows: COM/WMI hpqBIntM & hpqBEvnt, NVML, PawnIO, EMI, SCM battery service, Win32 Power/Tray/Updater
 │   ├── backend-linux/     # omvix-linux: Linux sysfs/ACPI trait scaffold (hp-wmi, platform_profile, hwmon, acpi_call)
 │   ├── cli/               # omvix-cli: Hardware probe, telemetry, display, battery, thermal/fan CLI
-│   └── app/               # omvix-hub: Pure Rust desktop GUI (egui/eframe + egui_plot + tray-icon)
+│   └── app/               # omvix-hub: Pure Rust desktop GUI (eframe/wgpu + native egui::Painter charts + tray-icon)
 ├── locales/               # en.json, tr.json
 ├── docs/                  # Architecture & protocol notes
 └── CHANGELOG.md

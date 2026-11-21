@@ -3,6 +3,7 @@ use crate::theme::{
     status_badge,
 };
 use crate::ui::charts::{ChartSeries, telemetry_area_chart};
+use crate::ui::{default_telemetry_csv_path, show_file_in_folder};
 use crate::worker::{MetricStats, SharedState, WorkerCommand};
 use egui::{Color32, RichText, Ui};
 use omvix_core::{AppConfig, I18n};
@@ -67,8 +68,30 @@ pub fn render(
             if ui.button(i18n.t("monitor.reset_stats")).clicked() {
                 on_cmd(WorkerCommand::ResetTelemetryStats);
             }
+            if ui
+                .add_enabled(
+                    !st.telemetry_csv_rows.is_empty(),
+                    egui::Button::new(i18n.t("monitor.export_csv")),
+                )
+                .clicked()
+            {
+                on_cmd(WorkerCommand::ExportTelemetryCsv(default_telemetry_csv_path()));
+            }
         });
         ui.weak(i18n.t("monitor.ec_note"));
+        if let Some(ref csv_path) = st.last_csv_export_path {
+            ui.add_space(3.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.weak(format!(
+                    "{}: {}",
+                    i18n.t("monitor.csv_saved_label"),
+                    csv_path.display()
+                ));
+                if ui.small_button(i18n.t("support_bundle.show_in_folder")).clicked() {
+                    show_file_in_folder(csv_path);
+                }
+            });
+        }
     });
 
     ui.add_space(8.0);
@@ -130,58 +153,82 @@ pub fn render(
 
         // Card 2: GPU
         card_frame(t).show(&mut cols[1], |ui| {
+            let sleep_color = Color32::from_rgb(138, 162, 194);
             ui.horizontal(|ui| {
                 section_title(ui, i18n.t("dashboard.gpu"), t);
-                if let Some(pstate) = &st.telemetry.gpu_pstate {
-                    status_badge(ui, pstate, accent);
-                }
-                match &st.telemetry.gpu_throttle_reason {
-                    Some(reason) => status_badge(ui, reason, STATUS_WARN),
-                    None if st.telemetry.gpu_name.is_some() => {
-                        status_badge(ui, &i18n.t("monitor.no_throttle"), STATUS_OK);
+                if st.telemetry.gpu_sleeping {
+                    status_badge(ui, &i18n.t("monitor.gpu_sleeping_badge"), sleep_color)
+                        .on_hover_text(i18n.t("monitor.gpu_sleeping_tooltip"));
+                } else {
+                    if let Some(pstate) = &st.telemetry.gpu_pstate {
+                        status_badge(ui, pstate, accent)
+                            .on_hover_text(i18n.t("monitor.gpu_pstate_tooltip"));
                     }
-                    _ => {}
+                    match &st.telemetry.gpu_throttle_reason {
+                        Some(reason) => {
+                            status_badge(
+                                ui,
+                                &i18n.t_fmt(
+                                    "monitor.throttle_active_prefix",
+                                    &[("reason", reason)],
+                                ),
+                                STATUS_WARN,
+                            )
+                            .on_hover_text(i18n.t_fmt(
+                                "monitor.throttle_active_tooltip",
+                                &[("reason", reason)],
+                            ));
+                        }
+                        None if st.telemetry.gpu_name.is_some() => {
+                            status_badge(ui, &i18n.t("monitor.no_throttle"), STATUS_OK)
+                                .on_hover_text(i18n.t("monitor.no_throttle_tooltip"));
+                        }
+                        _ => {}
+                    }
                 }
             });
 
-            let load = st
-                .telemetry
-                .gpu_usage_pct
-                .map(|v| format!("{v:.0}%"))
-                .unwrap_or_else(|| "—".into());
-            let temp = st
-                .telemetry
-                .gpu_temp_c
-                .map(|v| format!("{v:.0} °C"))
-                .unwrap_or_else(|| "—".into());
-            let pwr = st
-                .telemetry
-                .gpu_power_w
-                .map(|v| format!("{v:.1} W"))
-                .unwrap_or_else(|| "—".into());
-            let limit = st
-                .telemetry
-                .gpu_power_limit_w
-                .map(|v| format!("/ {v:.0} W"))
-                .unwrap_or_default();
-            ui.label(
-                RichText::new(format!("{load}  |  {temp}  |  {pwr} {limit}"))
-                    .size(16.5)
-                    .strong(),
-            );
+            if st.telemetry.gpu_sleeping {
+                ui.label(RichText::new("—  |  —  |  —").size(16.5).strong());
+                ui.weak(format!(
+                    "VRAM: —  •  Clocks: —  •  °C [{}]",
+                    fmt_stats(&st.gpu_temp_stats, "°C")
+                ));
+            } else {
+                let load = st
+                    .telemetry
+                    .gpu_usage_pct
+                    .map(|v| format!("{v:.0}%"))
+                    .unwrap_or_else(|| "—".into());
+                let temp = st
+                    .telemetry
+                    .gpu_temp_c
+                    .map(|v| format!("{v:.0} °C"))
+                    .unwrap_or_else(|| "—".into());
+                let pwr_str = match (st.telemetry.gpu_power_w, st.telemetry.gpu_power_limit_w) {
+                    (Some(w), Some(lim)) => format!("{w:.1} W / {lim:.0} W"),
+                    (Some(w), None) => format!("{w:.1} W"),
+                    (None, _) => "—".into(),
+                };
+                ui.label(
+                    RichText::new(format!("{load}  |  {temp}  |  {pwr_str}"))
+                        .size(16.5)
+                        .strong(),
+                );
 
-            let vram = match (st.telemetry.gpu_mem_used_mb, st.telemetry.gpu_mem_total_mb) {
-                (Some(u), Some(tot)) => format!("{u} / {tot} MB"),
-                _ => "—".into(),
-            };
-            let clocks = match (st.telemetry.gpu_clock_mhz, st.telemetry.gpu_mem_clock_mhz) {
-                (Some(c), Some(m)) => format!("{c} / {m} MHz"),
-                _ => "—".into(),
-            };
-            ui.weak(format!(
-                "VRAM: {vram}  •  Clocks: {clocks}  •  °C [{}]",
-                fmt_stats(&st.gpu_temp_stats, "°C")
-            ));
+                let vram = match (st.telemetry.gpu_mem_used_mb, st.telemetry.gpu_mem_total_mb) {
+                    (Some(u), Some(tot)) => format!("{u} / {tot} MB"),
+                    _ => "—".into(),
+                };
+                let clocks = match (st.telemetry.gpu_clock_mhz, st.telemetry.gpu_mem_clock_mhz) {
+                    (Some(c), Some(m)) => format!("{c} / {m} MHz"),
+                    _ => "—".into(),
+                };
+                ui.weak(format!(
+                    "VRAM: {vram}  •  Clocks: {clocks}  •  °C [{}]",
+                    fmt_stats(&st.gpu_temp_stats, "°C")
+                ));
+            }
         });
     });
 

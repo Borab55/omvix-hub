@@ -1,6 +1,9 @@
-use crate::theme::{STATUS_OK, STATUS_WARN, card_frame, section_title, status_badge};
+use crate::theme::{
+    STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge,
+};
+use crate::ui::{default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{ScrollArea, Ui};
+use egui::{RichText, ScrollArea, Ui};
 use omvix_core::{CustomThemeConfig, I18n};
 use std::path::PathBuf;
 
@@ -11,9 +14,9 @@ pub fn render(
     t: &CustomThemeConfig,
     on_cmd: &mut dyn FnMut(WorkerCommand),
 ) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.heading(i18n.t("diagnostics.title"));
-        ui.add_space(12.0);
+        ui.add_space(8.0);
         if ui.button(i18n.t("diagnostics.run_probe")).clicked() {
             on_cmd(WorkerCommand::RefreshDiagnostics);
         }
@@ -21,8 +24,76 @@ pub fn render(
             let out_path = default_export_path();
             on_cmd(WorkerCommand::ExportDiagnostics(out_path));
         }
+        let bundle_lbl = if st.support_bundle_busy {
+            i18n.t("support_bundle.creating")
+        } else {
+            i18n.t("support_bundle.create_btn")
+        };
+        ui.add_enabled_ui(!st.support_bundle_busy, |ui| {
+            if pill_button(ui, &bundle_lbl, true, t).clicked() {
+                on_cmd(WorkerCommand::CreateSupportBundle(default_support_bundle_path()));
+            }
+        });
     });
     ui.add_space(6.0);
+
+    if let Some(ref zip_path) = st.last_support_bundle_path {
+        card_frame(t).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                status_badge(ui, &i18n.t("support_bundle.saved_label"), STATUS_OK);
+                ui.monospace(zip_path.display().to_string());
+                if ui.button(i18n.t("support_bundle.show_in_folder")).clicked() {
+                    show_file_in_folder(zip_path);
+                }
+            });
+        });
+        ui.add_space(6.0);
+    }
+
+    // Hardware Change History & 1-Click Undo Card
+    card_frame(t).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            section_title(ui, i18n.t("history.title"), t);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let has_entries = !st.change_history.is_empty();
+                if ui
+                    .add_enabled(has_entries, egui::Button::new(i18n.t("history.clear")))
+                    .clicked()
+                {
+                    on_cmd(WorkerCommand::ClearChangeHistory);
+                }
+                if ui
+                    .add_enabled(has_entries, egui::Button::new(i18n.t("history.undo_latest")))
+                    .clicked()
+                {
+                    on_cmd(WorkerCommand::UndoLastChange);
+                }
+            });
+        });
+
+        if st.change_history.is_empty() {
+            ui.weak(i18n.t("history.empty"));
+        } else {
+            ui.add_space(4.0);
+            egui::Grid::new("change_history_grid")
+                .striped(true)
+                .num_columns(4)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    for entry in &st.change_history {
+                        let ts_local = entry.timestamp.with_timezone(&chrono::Local);
+                        ui.monospace(ts_local.format("%H:%M:%S").to_string());
+                        ui.label(RichText::new(i18n.t(entry.domain.i18n_key())).strong());
+                        ui.label(format!("{} -> {}", entry.old_summary, entry.new_summary));
+                        if ui.small_button(i18n.t("history.undo_btn")).clicked() {
+                            on_cmd(WorkerCommand::UndoChangeById(entry.id));
+                        }
+                        ui.end_row();
+                    }
+                });
+        }
+    });
+    ui.add_space(8.0);
 
     if let Some(diag) = &st.diagnostics {
         // System Identity & Board Match

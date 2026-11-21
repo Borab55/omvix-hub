@@ -2,6 +2,7 @@ use crate::theme::{
     STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, card_frame, pill_button, section_title,
     status_badge,
 };
+use crate::ui::charts::battery_health_chart;
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
@@ -160,6 +161,61 @@ pub fn render(
                 });
         } else {
             ui.weak("...");
+        }
+    });
+
+    ui.add_space(8.0);
+
+    // Weekly Battery Health / Wear History & Chart Card
+    card_frame(t).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            section_title(ui, i18n.t("battery.health_history_title"), t);
+            status_badge(
+                ui,
+                &st.battery_health_history.len().to_string(),
+                accent,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(i18n.t("battery.log_snapshot_now")).clicked() {
+                    on_cmd(WorkerCommand::RecordBatteryHealthNow);
+                }
+            });
+        });
+        ui.add_space(4.0);
+        if st.battery_health_history.is_empty() {
+            ui.weak(i18n.t("battery.health_history_empty"));
+        } else {
+            battery_health_chart(
+                ui,
+                &st.battery_health_history,
+                t,
+                &i18n.t("battery.health"),
+                &i18n.t("battery.wear_level"),
+            );
+            ui.add_space(4.0);
+            ui.collapsing(i18n.t("battery.health_history_table"), |ui| {
+                egui::Grid::new("battery_health_history_grid")
+                    .striped(true)
+                    .num_columns(4)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.strong(i18n.t("battery.history_date"));
+                        ui.strong(i18n.t("battery.history_capacity"));
+                        ui.strong(i18n.t("battery.health"));
+                        ui.strong(i18n.t("battery.wear_level"));
+                        ui.end_row();
+                        for rec in st.battery_health_history.iter().rev().take(16) {
+                            ui.monospace(&rec.date_label);
+                            ui.monospace(format!(
+                                "{} / {} mWh",
+                                rec.full_charge_capacity_mwh, rec.design_capacity_mwh
+                            ));
+                            ui.label(format!("{:.1}%", rec.health_pct));
+                            ui.label(format!("{:.1}%", rec.wear_pct));
+                            ui.end_row();
+                        }
+                    });
+            });
         }
     });
 

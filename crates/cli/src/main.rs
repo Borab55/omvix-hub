@@ -463,10 +463,13 @@ fn print_telemetry(t: &TelemetrySnapshot) {
         (None, None) => "N/A".to_string(),
     };
     println!("CPU Temp    : {cpu_temp_str}");
-    println!(
-        "GPU         : {}",
-        t.gpu_name.as_deref().unwrap_or("N/A")
-    );
+    let gpu_label = match (t.gpu_name.as_deref(), t.gpu_sleeping) {
+        (Some(name), true) => format!("{name} (Sleeping D3)"),
+        (None, true) => "Sleeping (D3)".to_string(),
+        (Some(name), false) => name.to_string(),
+        (None, false) => "N/A".to_string(),
+    };
+    println!("GPU         : {gpu_label}");
     println!(
         "GPU Temp/Ld : {} / {}",
         t.gpu_temp_c

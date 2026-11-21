@@ -12,6 +12,50 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, PostThreadMessageW, WM_HOTKEY, WM_QUIT};
 
 const OMEN_KEY_EVENT_DATA: u32 = 8613; // 0x21A5
+pub const WIN32_ERR_HOTKEY_ALREADY_REGISTERED: u32 = 1409;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotkeyBindError {
+    InvalidSyntax(String),
+    Conflict { shortcut: String, os_code: u32 },
+    OsError { shortcut: String, message: String },
+}
+
+impl std::fmt::Display for HotkeyBindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSyntax(msg) => write!(f, "Invalid shortcut syntax: {msg}"),
+            Self::Conflict { shortcut, os_code } => write!(
+                f,
+                "Shortcut `{shortcut}` is already registered by another app or Windows (Win32 error {os_code})"
+            ),
+            Self::OsError { shortcut, message } => {
+                write!(f, "Failed registering shortcut `{shortcut}`: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HotkeyBindError {}
+
+pub fn classify_register_hotkey_hresult(
+    shortcut: &str,
+    hresult_code: i32,
+    message: String,
+) -> HotkeyBindError {
+    let win32_code = (hresult_code as u32) & 0xFFFF;
+    if win32_code == WIN32_ERR_HOTKEY_ALREADY_REGISTERED {
+        HotkeyBindError::Conflict {
+            shortcut: shortcut.to_string(),
+            os_code: win32_code,
+        }
+    } else {
+        HotkeyBindError::OsError {
+            shortcut: shortcut.to_string(),
+            message,
+        }
+    }
+}
 
 /// Parses a human-readable hotkey specification such as `"Ctrl+Shift+O"` or `"Alt+F12"`.
 pub fn parse_shortcut(spec: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
@@ -145,24 +189,29 @@ where
     }
 }
 
-/// Registers a global Windows hotkey on a dedicated message-loop thread.
-pub fn spawn_global_hotkey_listener<F>(spec: &str, on_trigger: F) -> Result<ListenerHandle>
+/// Registers a global Windows hotkey on a dedicated message-loop thread, classifying Win32 conflicts (`1409`).
+pub fn spawn_global_hotkey_listener<F>(
+    spec: &str,
+    on_trigger: F,
+) -> std::result::Result<ListenerHandle, HotkeyBindError>
 where
     F: Fn() + Send + 'static,
 {
-    let (mods, vk) = parse_shortcut(spec)?;
+    let (mods, vk) =
+        parse_shortcut(spec).map_err(|e| HotkeyBindError::InvalidSyntax(e.to_string()))?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
-    let (tid_tx, tid_rx) = std::sync::mpsc::channel::<Result<u32>>();
+    let (tid_tx, tid_rx) =
+        std::sync::mpsc::channel::<std::result::Result<u32, HotkeyBindError>>();
     let spec_owned = spec.to_string();
 
     let join = thread::spawn(move || {
         let tid = unsafe { GetCurrentThreadId() };
         let reg_res = unsafe { RegisterHotKey(HWND::default(), 1, mods, vk) };
         if let Err(err) = reg_res {
-            let _ = tid_tx.send(Err(OmvixError::Config(format!(
-                "RegisterHotKey({spec_owned}) failed: {err}"
-            ))));
+            let classified =
+                classify_register_hotkey_hresult(&spec_owned, err.code().0, err.to_string());
+            let _ = tid_tx.send(Err(classified));
             return;
         }
         let _ = tid_tx.send(Ok(tid));
@@ -186,7 +235,10 @@ where
 
     let tid = tid_rx
         .recv()
-        .map_err(|e| OmvixError::Config(format!("Hotkey thread failed to start: {e}")))??;
+        .map_err(|e| HotkeyBindError::OsError {
+            shortcut: spec.to_string(),
+            message: format!("Hotkey thread failed to start: {e}"),
+        })??;
 
     Ok(ListenerHandle {
         stop,
@@ -211,5 +263,27 @@ mod tests {
 
         assert!(parse_shortcut("Ctrl+").is_err());
         assert!(parse_shortcut("Ctrl+InvalidKeyName").is_err());
+    }
+
+    #[test]
+    fn classifies_hotkey_conflict_and_other_os_errors() {
+        let hresult_1409 = (0x8007_0000u32 | WIN32_ERR_HOTKEY_ALREADY_REGISTERED) as i32;
+        assert_eq!(
+            classify_register_hotkey_hresult(
+                "Ctrl+Shift+O",
+                hresult_1409,
+                "Hot key is already registered.".to_string()
+            ),
+            HotkeyBindError::Conflict {
+                shortcut: "Ctrl+Shift+O".to_string(),
+                os_code: 1409,
+            }
+        );
+
+        let other = (0x8007_0057u32) as i32;
+        assert!(matches!(
+            classify_register_hotkey_hresult("Ctrl+Shift+O", other, "Invalid param".into()),
+            HotkeyBindError::OsError { .. }
+        ));
     }
 }
