@@ -1,3 +1,4 @@
+pub mod app_profiles;
 pub mod auto_profile;
 pub mod battery_care;
 pub mod boards;
@@ -10,6 +11,7 @@ pub mod models;
 pub mod thermal;
 pub mod traits;
 
+pub use app_profiles::{AppProfileRule, AppProfilesConfig};
 pub use config::{AppConfig, BatteryProfile, CustomThemeConfig};
 pub use crash_guard::{CrashGuardState, SafeModeReason, crash_guard_path_for};
 pub use error::{OmvixError, Result};

@@ -6,6 +6,7 @@ pub mod hotkeys;
 pub mod lighting_display;
 pub mod monitor;
 pub mod performance;
+pub mod profiles;
 pub mod settings;
 pub mod tuning;
 pub mod wizard;
@@ -22,6 +23,7 @@ pub enum Drawer {
 pub enum FansPowerSubTab {
     #[default]
     PerformanceFans,
+    Profiles,
     Tuning,
 }
 

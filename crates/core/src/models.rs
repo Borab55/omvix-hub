@@ -45,6 +45,32 @@ pub enum PerformanceMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WindowsPowerOverlay {
+    BestPowerEfficiency,
+    #[default]
+    Balanced,
+    BestPerformance,
+}
+
+impl WindowsPowerOverlay {
+    pub fn for_performance_mode(mode: PerformanceMode) -> Self {
+        match mode {
+            PerformanceMode::Eco | PerformanceMode::Quiet => Self::BestPowerEfficiency,
+            PerformanceMode::Balanced => Self::Balanced,
+            PerformanceMode::Performance => Self::BestPerformance,
+        }
+    }
+
+    pub fn guid_u128(self) -> u128 {
+        match self {
+            Self::BestPowerEfficiency => 0x961cc777_2547_4f9d_8174_7d86181b8a7a,
+            Self::Balanced => 0x00000000_0000_0000_0000_000000000000,
+            Self::BestPerformance => 0xded574b5_45a0_4f42_8737_46345c09c238,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FanMode {
     #[default]
     Auto,
@@ -287,6 +313,35 @@ impl FanCurve {
         }
         let _ = curve.normalize();
         Ok(curve)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FanCurvePreset {
+    Quiet,
+    #[default]
+    Balanced,
+    Aggressive,
+    OghLike,
+}
+
+impl FanCurvePreset {
+    pub fn all() -> &'static [FanCurvePreset] {
+        &[
+            Self::Quiet,
+            Self::Balanced,
+            Self::Aggressive,
+            Self::OghLike,
+        ]
+    }
+
+    pub fn to_curve(self) -> FanCurve {
+        match self {
+            Self::Quiet => FanCurve::preset_quiet(),
+            Self::Balanced => FanCurve::preset_balanced(),
+            Self::Aggressive => FanCurve::preset_aggressive(),
+            Self::OghLike => FanCurve::preset_ogh_like(),
+        }
     }
 }
 
@@ -579,5 +634,43 @@ mod tests {
         // Importing an unsafe high-temp curve is normalized up to >= 50% at >= 80C
         let unsafe_curve = FanCurve::decode_share_code("OMVIXCURVE1|3|40:30,90:10").expect("import unsafe");
         assert_eq!(unsafe_curve.points[1].speed_pct, FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+    }
+
+    #[test]
+    fn fan_curve_preset_maps_to_expected_curves() {
+        assert_eq!(FanCurvePreset::all().len(), 4);
+        assert_eq!(FanCurvePreset::Quiet.to_curve(), FanCurve::preset_quiet());
+        assert_eq!(FanCurvePreset::Balanced.to_curve(), FanCurve::preset_balanced());
+        assert_eq!(FanCurvePreset::Aggressive.to_curve(), FanCurve::preset_aggressive());
+        assert_eq!(FanCurvePreset::OghLike.to_curve(), FanCurve::preset_ogh_like());
+    }
+
+    #[test]
+    fn windows_power_overlay_mapping_and_guids() {
+        assert_eq!(
+            WindowsPowerOverlay::for_performance_mode(PerformanceMode::Eco),
+            WindowsPowerOverlay::BestPowerEfficiency
+        );
+        assert_eq!(
+            WindowsPowerOverlay::for_performance_mode(PerformanceMode::Quiet),
+            WindowsPowerOverlay::BestPowerEfficiency
+        );
+        assert_eq!(
+            WindowsPowerOverlay::for_performance_mode(PerformanceMode::Balanced),
+            WindowsPowerOverlay::Balanced
+        );
+        assert_eq!(
+            WindowsPowerOverlay::for_performance_mode(PerformanceMode::Performance),
+            WindowsPowerOverlay::BestPerformance
+        );
+        assert_eq!(
+            WindowsPowerOverlay::BestPowerEfficiency.guid_u128(),
+            0x961cc777_2547_4f9d_8174_7d86181b8a7a
+        );
+        assert_eq!(WindowsPowerOverlay::Balanced.guid_u128(), 0);
+        assert_eq!(
+            WindowsPowerOverlay::BestPerformance.guid_u128(),
+            0xded574b5_45a0_4f42_8737_46345c09c238
+        );
     }
 }

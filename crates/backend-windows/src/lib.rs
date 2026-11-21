@@ -23,6 +23,10 @@ pub mod pawnio;
 #[cfg(windows)]
 pub mod power_events;
 #[cfg(windows)]
+pub mod power_mode;
+#[cfg(windows)]
+pub mod processes;
+#[cfg(windows)]
 pub mod security_fs;
 #[cfg(windows)]
 pub mod system_info;

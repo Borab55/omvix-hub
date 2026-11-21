@@ -16,6 +16,7 @@ use std::time::Duration;
 pub struct CockpitActions {
     pub toggle_drawer: Option<Drawer>,
     pub open_extra_subtab: Option<ExtraSubTab>,
+    pub open_profiles: bool,
     pub restart_admin: bool,
     pub hide_to_tray: bool,
     pub quit_app: bool,
@@ -404,7 +405,31 @@ pub fn render(
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
-                section_title(ui, i18n.t("thermal.mode"), t);
+                ui.horizontal(|ui| {
+                    section_title(ui, i18n.t("thermal.mode"), t);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(ref prof_name) = st.active_app_profile {
+                            if clickable_status_badge(
+                                ui,
+                                &i18n.t_fmt("profiles.cockpit_active_badge", &[("name", prof_name)]),
+                                STATUS_OK,
+                            )
+                            .clicked()
+                            {
+                                actions.open_profiles = true;
+                            }
+                        } else if cfg.auto_profile.enabled
+                            && clickable_status_badge(
+                                ui,
+                                &i18n.t("profiles.cockpit_auto_badge"),
+                                accent,
+                            )
+                            .clicked()
+                        {
+                            actions.open_profiles = true;
+                        }
+                    });
+                });
                 ui.add_space(3.0);
                 let items = [
                     (PerformanceMode::Eco, i18n.t("thermal.mode_eco")),
@@ -415,11 +440,16 @@ pub fn render(
                         i18n.t("thermal.mode_performance"),
                     ),
                 ];
+                let effective_perf = if st.active_app_profile.is_some() {
+                    st.effective_performance_mode
+                } else {
+                    cfg.thermal_fan.performance_mode
+                };
                 let w = equal_tile_width(card_inner_w, items.len(), 5.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
                     for (mode, label) in items {
-                        let selected = cfg.thermal_fan.performance_mode == mode;
+                        let selected = effective_perf == mode;
                         if tile_button(ui, &label, selected, w, 27.0, t).clicked() {
                             cfg.thermal_fan.performance_mode = mode;
                             on_save();
@@ -443,11 +473,16 @@ pub fn render(
                     (FanMode::Manual, i18n.t("cockpit.fan_manual")),
                     (FanMode::CustomCurve, i18n.t("cockpit.fan_curve")),
                 ];
+                let effective_fan = if st.active_app_profile.is_some() {
+                    st.effective_fan_mode
+                } else {
+                    cfg.thermal_fan.fan_mode
+                };
                 let w = equal_tile_width(card_inner_w, items.len(), 5.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
                     for (mode, label) in items {
-                        let selected = cfg.thermal_fan.fan_mode == mode;
+                        let selected = effective_fan == mode;
                         if tile_button(ui, &label, selected, w, 27.0, t).clicked() {
                             cfg.thermal_fan.fan_mode = mode;
                             on_save();
@@ -458,7 +493,7 @@ pub fn render(
                         }
                     }
                 });
-                if cfg.thermal_fan.fan_mode == FanMode::Manual {
+                if effective_fan == FanMode::Manual {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().slider_width = (card_inner_w - 72.0).max(220.0);

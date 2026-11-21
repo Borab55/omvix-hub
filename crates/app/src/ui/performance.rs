@@ -7,7 +7,9 @@ use omvix_core::thermal::{
     MAX_GUARD_CPU_TEMP_C, MAX_GUARD_SUSTAIN_SECS, MIN_GUARD_CPU_TEMP_C, MIN_GUARD_SUSTAIN_SECS,
     effective_fan_curve_temp_c,
 };
-use omvix_core::{AppConfig, FanCurve, FanCurvePoint, FanMode, I18n, PerformanceMode};
+use omvix_core::{
+    AppConfig, FanCurve, FanCurvePoint, FanMode, I18n, PerformanceMode, WindowsPowerOverlay,
+};
 
 #[derive(Debug, Default, Clone)]
 pub struct PerformanceDraftState {
@@ -39,7 +41,7 @@ pub fn render(
         ui.add_space(6.0);
     }
 
-    // Thermal / Performance Mode Card
+    // Thermal / Performance Mode Card + Windows Power Mode Sync
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("thermal.mode"), t);
         ui.add_space(4.0);
@@ -58,151 +60,34 @@ pub fn render(
                 }
             }
         });
-    });
-
-    ui.add_space(8.0);
-
-    // AC / Battery Auto-Profile Card
-    card_frame(t).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            section_title(ui, i18n.t("thermal.auto_profile"), t);
-            if ui
-                .checkbox(&mut cfg.auto_profile.enabled, i18n.t("common.enabled"))
-                .changed()
-            {
-                on_save();
-                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-            }
-        });
-
-        ui.add_enabled_ui(cfg.auto_profile.enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(i18n.t("thermal.ac_profile"));
-                egui::ComboBox::from_id_salt("ac_perf_combo")
-                    .selected_text(format!("{:?}", cfg.auto_profile.ac_performance_mode))
-                    .show_ui(ui, |ui| {
-                        for m in [
-                            PerformanceMode::Eco,
-                            PerformanceMode::Quiet,
-                            PerformanceMode::Balanced,
-                            PerformanceMode::Performance,
-                        ] {
-                            if ui
-                                .selectable_value(
-                                    &mut cfg.auto_profile.ac_performance_mode,
-                                    m,
-                                    format!("{m:?}"),
-                                )
-                                .changed()
-                            {
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            }
-                        }
-                    });
-
-                ui.add_space(12.0);
-                ui.label(i18n.t("thermal.dc_profile"));
-                egui::ComboBox::from_id_salt("dc_perf_combo")
-                    .selected_text(format!("{:?}", cfg.auto_profile.dc_performance_mode))
-                    .show_ui(ui, |ui| {
-                        for m in [
-                            PerformanceMode::Eco,
-                            PerformanceMode::Quiet,
-                            PerformanceMode::Balanced,
-                            PerformanceMode::Performance,
-                        ] {
-                            if ui
-                                .selectable_value(
-                                    &mut cfg.auto_profile.dc_performance_mode,
-                                    m,
-                                    format!("{m:?}"),
-                                )
-                                .changed()
-                            {
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            }
-                        }
-                    });
-            });
-
-            if let Some(disp) = &st.display_mode {
-                ui.horizontal(|ui| {
-                    ui.label("AC Hz:");
-                    egui::ComboBox::from_id_salt("ac_hz_combo")
-                        .selected_text(
-                            cfg.auto_profile
-                                .ac_refresh_hz
-                                .map(|h| format!("{h} Hz"))
-                                .unwrap_or_else(|| "—".into()),
-                        )
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_value(&mut cfg.auto_profile.ac_refresh_hz, None, "—")
-                                .changed()
-                            {
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            }
-                            for &hz in &disp.supported_hz {
-                                if ui
-                                    .selectable_value(
-                                        &mut cfg.auto_profile.ac_refresh_hz,
-                                        Some(hz),
-                                        format!("{hz} Hz"),
-                                    )
-                                    .changed()
-                                {
-                                    on_save();
-                                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                }
-                            }
-                        });
-
-                    ui.add_space(12.0);
-                    ui.label("Battery Hz:");
-                    egui::ComboBox::from_id_salt("dc_hz_combo")
-                        .selected_text(
-                            cfg.auto_profile
-                                .dc_refresh_hz
-                                .map(|h| format!("{h} Hz"))
-                                .unwrap_or_else(|| "—".into()),
-                        )
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_value(&mut cfg.auto_profile.dc_refresh_hz, None, "—")
-                                .changed()
-                            {
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            }
-                            for &hz in &disp.supported_hz {
-                                if ui
-                                    .selectable_value(
-                                        &mut cfg.auto_profile.dc_refresh_hz,
-                                        Some(hz),
-                                        format!("{hz} Hz"),
-                                    )
-                                    .changed()
-                                {
-                                    on_save();
-                                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                }
-                            }
-                        });
-                });
-            }
-
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(
-                    &mut cfg.auto_profile.dim_keyboard_on_battery,
-                    "Turn off keyboard backlight on battery",
+                    &mut cfg.thermal_fan.sync_windows_power_mode,
+                    i18n.t("thermal.sync_windows_power_mode"),
                 )
                 .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                if cfg.thermal_fan.sync_windows_power_mode {
+                    on_cmd(WorkerCommand::SetPerformanceMode(
+                        cfg.thermal_fan.performance_mode,
+                    ));
+                }
+            }
+            if let Some(overlay) = st.active_win_power_mode {
+                let ov_key = match overlay {
+                    WindowsPowerOverlay::BestPowerEfficiency => "thermal.win_power_efficiency",
+                    WindowsPowerOverlay::Balanced => "thermal.win_power_balanced",
+                    WindowsPowerOverlay::BestPerformance => "thermal.win_power_performance",
+                };
+                status_badge(
+                    ui,
+                    &i18n.t_fmt("thermal.win_power_active", &[("mode", &i18n.t(ov_key))]),
+                    STATUS_OK,
+                );
             }
         });
     });

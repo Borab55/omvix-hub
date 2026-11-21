@@ -625,9 +625,11 @@ struct OmvixApp {
     worker_dead: bool,
     worker_dead_recovery_attempted: bool,
     performance_draft: ui::performance::PerformanceDraftState,
+    profiles_draft: ui::profiles::ProfilesDraftState,
     battery_draft: ui::battery::BatteryDraftState,
     lighting_draft: ui::lighting_display::LightingDisplayDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
+    last_seen_auto_revision: u64,
     window_visible: Arc<AtomicBool>,
     hwnd_atomic: Arc<AtomicIsize>,
     force_quit: Arc<AtomicBool>,
@@ -793,9 +795,11 @@ impl OmvixApp {
             worker_dead: false,
             worker_dead_recovery_attempted: false,
             performance_draft: ui::performance::PerformanceDraftState::default(),
+            profiles_draft: ui::profiles::ProfilesDraftState::default(),
             battery_draft: ui::battery::BatteryDraftState::default(),
             lighting_draft: ui::lighting_display::LightingDisplayDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
+            last_seen_auto_revision: 0,
             window_visible,
             hwnd_atomic,
             force_quit,
@@ -1203,15 +1207,37 @@ impl eframe::App for OmvixApp {
             .map(|s| s.clone())
             .unwrap_or_default();
 
+        let mut pending_cmds: Vec<WorkerCommand> = Vec::new();
+        let mut should_save = false;
+        if snapshot_state.auto_applied_revision != self.last_seen_auto_revision {
+            self.last_seen_auto_revision = snapshot_state.auto_applied_revision;
+            if snapshot_state.active_app_profile.is_none() {
+                self.cfg.thermal_fan.performance_mode = snapshot_state.effective_performance_mode;
+                self.cfg.thermal_fan.fan_mode = snapshot_state.effective_fan_mode;
+                should_save = true;
+            }
+        }
+
         if let Some(tray) = &mut self.tray {
             let bat_mode = snapshot_state
                 .battery_status
                 .as_ref()
                 .map(|b| b.current_mode)
                 .unwrap_or(omvix_core::BatteryChargeMode::Auto);
+            let (tray_perf, tray_fan) = if snapshot_state.active_app_profile.is_some() {
+                (
+                    snapshot_state.effective_performance_mode,
+                    snapshot_state.effective_fan_mode,
+                )
+            } else {
+                (
+                    self.cfg.thermal_fan.performance_mode,
+                    self.cfg.thermal_fan.fan_mode,
+                )
+            };
             tray.update_visual_state(
-                self.cfg.thermal_fan.performance_mode,
-                self.cfg.thermal_fan.fan_mode,
+                tray_perf,
+                tray_fan,
                 self.cfg.battery.enabled,
                 self.cfg.battery.stop_threshold_pct,
                 bat_mode,
@@ -1248,8 +1274,6 @@ impl eframe::App for OmvixApp {
             .fill(theme::rgb(current_theme.canvas_bg))
             .inner_margin(Margin::same(14));
 
-        let mut pending_cmds: Vec<WorkerCommand> = Vec::new();
-        let mut should_save = false;
         let mut should_restart_admin = false;
         let mut should_rebind_hotkeys = false;
         let mut should_restore_defaults = false;
@@ -1257,6 +1281,7 @@ impl eframe::App for OmvixApp {
         let mut should_quit = false;
         let mut toggle_drawer: Option<Drawer> = None;
         let mut open_extra: Option<ExtraSubTab> = None;
+        let mut open_profiles = false;
 
         // Main window ALWAYS renders fixed-size compact cockpit or onboarding wizard (zero resize/flicker)
         egui::CentralPanel::default().frame(cockpit_frame).show(ctx, |ui| {
@@ -1311,6 +1336,9 @@ impl eframe::App for OmvixApp {
                 );
                 toggle_drawer = res.toggle_drawer;
                 open_extra = res.open_extra_subtab;
+                if res.open_profiles {
+                    open_profiles = true;
+                }
                 if res.restart_admin {
                     should_restart_admin = true;
                 }
@@ -1323,7 +1351,13 @@ impl eframe::App for OmvixApp {
             }
         });
 
-        if let Some(sub) = open_extra {
+        if open_profiles {
+            self.fans_power_tab = FansPowerSubTab::Profiles;
+            self.open_drawer = Some(Drawer::FansPower);
+            if snapshot_state.running_exes_snapshot.is_empty() {
+                pending_cmds.push(WorkerCommand::RefreshRunningProcesses);
+            }
+        } else if let Some(sub) = open_extra {
             self.extra_tab = sub;
             self.open_drawer = Some(Drawer::Extra);
         } else if let Some(d) = toggle_drawer {
@@ -1391,19 +1425,27 @@ impl eframe::App for OmvixApp {
                                                 FansPowerSubTab::PerformanceFans,
                                                 "drawer.sub_perf_fans",
                                             ),
+                                            (FansPowerSubTab::Profiles, "drawer.sub_profiles"),
                                             (FansPowerSubTab::Tuning, "drawer.sub_cpu_power"),
                                         ] {
                                             if theme::tile_button(
                                                 ui,
                                                 &self.i18n.t(key),
                                                 self.fans_power_tab == sub,
-                                                170.0,
+                                                152.0,
                                                 28.0,
                                                 &current_theme,
                                             )
                                             .clicked()
                                             {
                                                 self.fans_power_tab = sub;
+                                                if sub == FansPowerSubTab::Profiles
+                                                    && snapshot_state.running_exes_snapshot.is_empty()
+                                                {
+                                                    pending_cmds.push(
+                                                        WorkerCommand::RefreshRunningProcesses,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -1484,6 +1526,15 @@ impl eframe::App for OmvixApp {
                                                 &mut mark_save,
                                             )
                                         }
+                                        FansPowerSubTab::Profiles => ui::profiles::render(
+                                            ui,
+                                            &mut self.cfg,
+                                            &snapshot_state,
+                                            &self.i18n,
+                                            &mut self.profiles_draft,
+                                            &mut push_cmd,
+                                            &mut mark_save,
+                                        ),
                                         FansPowerSubTab::Tuning => ui::tuning::render(
                                             ui,
                                             &mut self.cfg,
@@ -1592,9 +1643,11 @@ impl eframe::App for OmvixApp {
             self.cfg.general.first_run_completed = true;
             self.config_warnings.clear();
             self.performance_draft = ui::performance::PerformanceDraftState::default();
+            self.profiles_draft = ui::profiles::ProfilesDraftState::default();
             self.battery_draft = ui::battery::BatteryDraftState::default();
             self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();
+            self.last_seen_auto_revision = snapshot_state.auto_applied_revision;
             theme::apply_theme(ctx, &self.cfg.general.custom_theme);
             if let Some(tray) = &mut self.tray {
                 tray.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));

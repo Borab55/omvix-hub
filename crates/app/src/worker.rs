@@ -1,4 +1,5 @@
-use omvix_core::auto_profile::AutoProfileEngine;
+use omvix_core::app_profiles::{AppProfileEngine, AppProfileRule, AppProfileTransition, ProfileBaseline};
+use omvix_core::auto_profile::{AutoProfileAction, AutoProfileEngine};
 use omvix_core::battery_care::BatteryCareEngine;
 use omvix_core::boards::{is_bios_write_allowed, lookup_board};
 use omvix_core::crash_guard::{CrashGuardState, SafeModeReason, current_unix_secs};
@@ -10,9 +11,9 @@ use omvix_core::thermal::{
 use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryServiceInfo, BatteryStatus,
     ConflictServiceInfo, CpuBoostMode, CpuTuningBackend, DiagnosticReport, DiagnosticsBackend,
-    DisplayBackend, DisplayModeInfo, FanMode, GpuMode, GpuSwitchBackend, InstalledCopyStatus,
-    KeyboardBackend, KeyboardType, PerformanceMode, Result, RgbColor, SecurityStatus,
-    TelemetryBackend, TelemetrySnapshot, ThermalFanBackend,
+    DisplayBackend, DisplayModeInfo, FanCurve, FanMode, GpuMode, GpuSwitchBackend,
+    InstalledCopyStatus, KeyboardBackend, KeyboardType, PerformanceMode, Result, RgbColor,
+    SecurityStatus, TelemetryBackend, TelemetrySnapshot, ThermalFanBackend, WindowsPowerOverlay,
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -126,6 +127,13 @@ pub struct SharedState {
     pub security: SecurityStatus,
     pub conflict_services: Vec<ConflictServiceInfo>,
     pub hp_charge_service_running: bool,
+    pub effective_performance_mode: PerformanceMode,
+    pub effective_fan_mode: FanMode,
+    pub active_app_profile: Option<String>,
+    pub active_app_profile_id: Option<String>,
+    pub active_win_power_mode: Option<WindowsPowerOverlay>,
+    pub auto_applied_revision: u64,
+    pub running_exes_snapshot: Vec<String>,
     pub last_toast: Option<(String, bool, Instant)>,
 }
 
@@ -177,6 +185,13 @@ impl Default for SharedState {
             },
             conflict_services: Vec::new(),
             hp_charge_service_running: false,
+            effective_performance_mode: PerformanceMode::default(),
+            effective_fan_mode: FanMode::default(),
+            active_app_profile: None,
+            active_app_profile_id: None,
+            active_win_power_mode: None,
+            auto_applied_revision: 0,
+            running_exes_snapshot: Vec::new(),
             last_toast: None,
         }
     }
@@ -248,6 +263,8 @@ pub enum WorkerCommand {
     RebootSystem,
     RefreshDiagnostics,
     ExportDiagnostics(PathBuf),
+    ApplyAutoProfileNow,
+    RefreshRunningProcesses,
     Shutdown,
 }
 
@@ -278,6 +295,8 @@ impl BackgroundWorker {
         let (tx, rx) = mpsc::channel::<WorkerCommand>();
         let mut initial_state = SharedState::default();
         initial_state.safe_mode = initial_safe_mode;
+        initial_state.effective_performance_mode = initial_config.thermal_fan.performance_mode;
+        initial_state.effective_fan_mode = initial_config.thermal_fan.fan_mode;
         #[cfg(windows)]
         {
             // Populate Admin elevation synchronously (<0.01ms) so Frame 1 shows accurate badge immediately.
@@ -511,20 +530,24 @@ fn run_worker_loop(
 
     let mut battery_engine = BatteryCareEngine::new();
     let mut auto_profile_engine = AutoProfileEngine::new();
+    let mut app_profile_engine = AppProfileEngine::new();
+    let mut active_curve_override: Option<FanCurve> = None;
 
     let started = Instant::now();
 
-    // Phase 1 discovery: instant live telemetry + display modes + CPU boost
+    // Phase 1 discovery: instant live telemetry + display modes + CPU boost + Windows power overlay
     {
         let snap = telemetry_be.read_telemetry().ok();
         let disp = display_be.get_display_mode().ok();
         let boost = tuning_be.read_cpu_boost_mode().ok();
+        let win_overlay = omvix_windows::power_mode::read_windows_power_overlay();
         if let Ok(mut st) = state.lock() {
             if let Some(s) = snap {
                 record_snapshot(&mut st, &s, started.elapsed().as_secs_f64());
             }
             st.display_mode = disp;
             st.cpu_boost = boost;
+            st.active_win_power_mode = win_overlay;
             st.pawnio_cpu_active = telemetry_be.is_pawnio_active();
         }
         request_repaint_if_visible(&ctx, &window_visible);
@@ -624,6 +647,7 @@ fn run_worker_loop(
     let mut last_guard_eval = Instant::now();
     let mut last_curve_eval = Instant::now();
     let mut last_keep_alive = Instant::now();
+    let mut last_app_profile_poll = Instant::now();
     let mut prev_curve_temp: f32 = 45.0;
     let mut prev_curve_speed: u8 = 40;
     let mut last_applied_bat_mode: Option<BatteryChargeMode> = None;
@@ -663,6 +687,9 @@ fn run_worker_loop(
                         &display_be,
                         &tuning_be,
                         &mut battery_engine,
+                        &mut auto_profile_engine,
+                        &mut app_profile_engine,
+                        &mut active_curve_override,
                         &mut sensor_loss_guard,
                         &mut thermal_guard,
                         &mut retry_ctrl,
@@ -734,21 +761,27 @@ fn run_worker_loop(
                 }
 
                 // R1: Evaluate temperature sensor-loss safety timeout (default 6s)
+                let eff_fan_mode = effective_fan_mode(&cfg, app_profile_engine.active_rule());
                 let has_any_temp = snap.cpu_temp_c.is_some()
                     || snap.gpu_temp_c.is_some()
                     || snap.chassis_temp_c.is_some();
                 let cool_hint = cool_hint_from_snapshot(&snap);
-                let restore_pct = if cfg.thermal_fan.fan_mode == FanMode::CustomCurve {
-                    resolve_fan_target_pct(
-                        &cfg,
-                        &snap,
-                        FanMode::CustomCurve,
-                        Some(cfg.thermal_fan.manual_speed_pct),
-                        &mut prev_curve_temp,
-                        &mut prev_curve_speed,
-                    )
-                } else {
-                    Some(cfg.thermal_fan.manual_speed_pct)
+                let restore_pct = {
+                    let active_curve = active_curve_override
+                        .as_ref()
+                        .unwrap_or(&cfg.thermal_fan.custom_curve);
+                    if eff_fan_mode == FanMode::CustomCurve {
+                        resolve_fan_target_pct_with_curve(
+                            active_curve,
+                            &snap,
+                            FanMode::CustomCurve,
+                            Some(cfg.thermal_fan.manual_speed_pct),
+                            &mut prev_curve_temp,
+                            &mut prev_curve_speed,
+                        )
+                    } else {
+                        Some(cfg.thermal_fan.manual_speed_pct)
+                    }
                 };
                 let (sl_dec, _) = step_sensor_loss_cycle(
                     &mut sensor_loss_guard,
@@ -756,7 +789,7 @@ fn run_worker_loop(
                     t,
                     bios_writes_allowed && safe_mode.is_none(),
                     thermal_guard.is_active(),
-                    cfg.thermal_fan.fan_mode,
+                    eff_fan_mode,
                     restore_pct,
                     cool_hint,
                     |m, pct, cool| {
@@ -789,7 +822,7 @@ fn run_worker_loop(
                     }
                     SensorLossDecision::RestoreUserMode => {
                         tracing::info!(
-                            mode = ?cfg.thermal_fan.fan_mode,
+                            mode = ?eff_fan_mode,
                             "Thermal sensors recovered -> restored user fan control"
                         );
                         if let Ok(mut st) = state.lock() {
@@ -807,72 +840,32 @@ fn run_worker_loop(
                             auto_profile_engine.evaluate(&cfg.auto_profile, ac, false)
                         {
                             tracing::info!(?action, "AC/DC transition triggered auto-profile");
-                            if bios_writes_allowed {
-                                record_hw_write_attempt(
-                                    &crash_guard,
-                                    &crash_guard_path,
-                                    &mut hw_applied_recorded,
-                                );
-                                match thermal_be.set_performance_mode(action.performance_mode) {
-                                    Ok(()) => {
-                                        let src = if ac { "AC" } else { "Battery" };
-                                        let rgb =
-                                            crate::tray::performance_mode_ring_rgb(action.performance_mode).0;
-                                        show_mode_osd(
-                                            &format!("Auto-Profile ({src})"),
-                                            &format!("{:?}", action.performance_mode),
-                                            rgb,
-                                        );
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            "Auto-profile performance mode write failed: {err}"
-                                        );
-                                    }
-                                }
-                            }
-                            if let Some(hz) = action.refresh_hz {
-                                record_hw_write_attempt(
-                                    &crash_guard,
-                                    &crash_guard_path,
-                                    &mut hw_applied_recorded,
-                                );
-                                if display_be.set_refresh_rate(hz).is_ok() {
-                                    if let Ok(disp) = display_be.get_display_mode() {
-                                        if let Ok(mut st) = state.lock() {
-                                            st.display_mode = Some(disp);
-                                        }
-                                    }
-                                }
-                            }
-                            if bios_writes_allowed {
-                                record_hw_write_attempt(
-                                    &crash_guard,
-                                    &crash_guard_path,
-                                    &mut hw_applied_recorded,
-                                );
-                                let kbd_res = if action.dim_keyboard {
-                                    kbd_be.set_backlight(false, 0, &cfg.lighting.zones)
-                                } else if cfg.lighting.enabled {
-                                    kbd_be.set_backlight(
-                                        true,
-                                        cfg.lighting.brightness_pct,
-                                        &cfg.lighting.zones,
-                                    )
-                                } else {
-                                    Ok(())
-                                };
-                                if let Err(err) = kbd_res {
-                                    tracing::warn!(
-                                        "Auto-profile keyboard backlight write failed: {err}"
-                                    );
-                                }
-                            }
+                            apply_auto_profile_action(
+                                action,
+                                ac,
+                                &mut cfg,
+                                &state,
+                                &thermal_be,
+                                &display_be,
+                                &kbd_be,
+                                &mut app_profile_engine,
+                                &mut active_curve_override,
+                                &sensor_loss_guard,
+                                &thermal_guard,
+                                bios_writes_allowed,
+                                safe_mode,
+                                &crash_guard,
+                                &crash_guard_path,
+                                &mut hw_applied_recorded,
+                                &mut prev_curve_temp,
+                                &mut prev_curve_speed,
+                            );
                         }
                     }
                 }
 
                 // Evaluate thermal safety guard & R3 Max-retry at >= 1s intervals
+                let eff_fan_mode = effective_fan_mode(&cfg, app_profile_engine.active_rule());
                 if safe_mode.is_none()
                     && !sensor_loss_guard.is_active()
                     && last_guard_eval.elapsed() >= Duration::from_millis(950)
@@ -884,7 +877,7 @@ fn run_worker_loop(
                     };
                     match thermal_guard.evaluate(
                         guard_cfg,
-                        cfg.thermal_fan.fan_mode,
+                        eff_fan_mode,
                         snap.cpu_temp_c,
                         snap.gpu_temp_c,
                         snap.chassis_temp_c,
@@ -948,8 +941,10 @@ fn run_worker_loop(
                                     &mut hw_applied_recorded,
                                 );
                                 let is_cool = cool_hint_from_snapshot(&snap);
+                                let rel_fan_mode =
+                                    effective_fan_mode(&cfg, app_profile_engine.active_rule());
                                 if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(
-                                    cfg.thermal_fan.fan_mode,
+                                    rel_fan_mode,
                                     Some(cfg.thermal_fan.manual_speed_pct),
                                     is_cool,
                                 ) {
@@ -1028,11 +1023,12 @@ fn run_worker_loop(
                 }
 
                 // Evaluate custom fan curve (every 2s) when emergency & sensor-loss guards are inactive
+                let eff_fan_mode = effective_fan_mode(&cfg, app_profile_engine.active_rule());
                 if safe_mode.is_none()
                     && bios_writes_allowed
                     && !sensor_loss_guard.is_active()
                     && !thermal_guard.is_active()
-                    && cfg.thermal_fan.fan_mode == FanMode::CustomCurve
+                    && eff_fan_mode == FanMode::CustomCurve
                     && last_curve_eval.elapsed() >= Duration::from_secs(2)
                 {
                     last_curve_eval = Instant::now();
@@ -1042,7 +1038,10 @@ fn run_worker_loop(
                         snap.chassis_temp_c,
                         snap.cpu_power_w,
                     ) {
-                        let target_pct = cfg.thermal_fan.custom_curve.evaluate(
+                        let active_curve = active_curve_override
+                            .as_ref()
+                            .unwrap_or(&cfg.thermal_fan.custom_curve);
+                        let target_pct = active_curve.evaluate(
                             temp,
                             prev_curve_temp,
                             prev_curve_speed,
@@ -1073,6 +1072,63 @@ fn run_worker_loop(
 
                 request_repaint_if_visible(&ctx, &window_visible);
             }
+        }
+
+        // Evaluate app-based .exe profiles (skipped while Safe Mode active)
+        let app_poll_interval =
+            Duration::from_secs(cfg.app_profiles.poll_interval_secs.clamp(2, 15));
+        let should_eval_apps = safe_mode.is_none()
+            && ((cfg.app_profiles.enabled && !cfg.app_profiles.rules.is_empty())
+                || app_profile_engine.active_rule().is_some());
+        if should_eval_apps
+            && ((!cfg.app_profiles.enabled && app_profile_engine.active_rule().is_some())
+                || last_app_profile_poll.elapsed() >= app_poll_interval)
+        {
+            last_app_profile_poll = Instant::now();
+            let running = if cfg.app_profiles.enabled {
+                omvix_windows::processes::running_process_names_lower()
+            } else {
+                std::collections::HashSet::new()
+            };
+            let transition = app_profile_engine.evaluate(&cfg.app_profiles, &running, || {
+                let st_guard = state.lock().ok();
+                let refresh_hz = st_guard
+                    .as_ref()
+                    .and_then(|s| s.display_mode.as_ref().map(|d| d.current_hz));
+                let cpu_boost_mode = st_guard
+                    .as_ref()
+                    .and_then(|s| s.cpu_boost)
+                    .or(cfg.tuning.cpu_boost_mode);
+                ProfileBaseline {
+                    performance_mode: cfg.thermal_fan.performance_mode,
+                    fan_mode: cfg.thermal_fan.fan_mode,
+                    manual_speed_pct: cfg.thermal_fan.manual_speed_pct,
+                    custom_curve: active_curve_override
+                        .clone()
+                        .unwrap_or_else(|| cfg.thermal_fan.custom_curve.clone()),
+                    refresh_hz,
+                    cpu_boost_mode,
+                }
+            });
+            apply_app_profile_transition(
+                transition,
+                &mut cfg,
+                &state,
+                &thermal_be,
+                &display_be,
+                &tuning_be,
+                &mut active_curve_override,
+                &sensor_loss_guard,
+                &thermal_guard,
+                bios_writes_allowed,
+                safe_mode,
+                &crash_guard,
+                &crash_guard_path,
+                &mut hw_applied_recorded,
+                &mut prev_curve_temp,
+                &mut prev_curve_speed,
+            );
+            request_repaint_if_visible(&ctx, &window_visible);
         }
 
         // Periodic battery care poll (5s)
@@ -1196,6 +1252,13 @@ fn record_snapshot(st: &mut SharedState, snap: &TelemetrySnapshot, t: f64) {
 }
 
 #[cfg(windows)]
+fn effective_fan_mode(cfg: &AppConfig, active_rule: Option<&AppProfileRule>) -> FanMode {
+    active_rule
+        .and_then(|r| r.fan_mode)
+        .unwrap_or(cfg.thermal_fan.fan_mode)
+}
+
+#[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
 fn handle_worker_command(
     cmd: WorkerCommand,
@@ -1213,6 +1276,9 @@ fn handle_worker_command(
     display_be: &WindowsDisplayBackend,
     tuning_be: &WindowsCpuTuningBackend,
     battery_engine: &mut BatteryCareEngine,
+    auto_profile_engine: &mut AutoProfileEngine,
+    app_profile_engine: &mut AppProfileEngine,
+    active_curve_override: &mut Option<FanCurve>,
     sensor_loss_guard: &mut SensorLossGuard,
     thermal_guard: &mut ThermalSafetyGuard,
     retry_ctrl: &mut GuardMaxRetryController,
@@ -1231,6 +1297,7 @@ fn handle_worker_command(
             tracing::info!("Background worker shutting down");
             apply_off_state_safety(
                 cfg,
+                effective_fan_mode(cfg, app_profile_engine.active_rule()),
                 thermal_guard,
                 thermal_be,
                 battery_be,
@@ -1256,6 +1323,7 @@ fn handle_worker_command(
             tracing::info!("System suspending -> applying Fan Auto & Battery off-state safety");
             apply_off_state_safety(
                 cfg,
+                effective_fan_mode(cfg, app_profile_engine.active_rule()),
                 thermal_guard,
                 thermal_be,
                 battery_be,
@@ -1269,6 +1337,7 @@ fn handle_worker_command(
             tracing::info!("System shutting down -> applying Fan Auto & Battery off-state safety");
             apply_off_state_safety(
                 cfg,
+                effective_fan_mode(cfg, app_profile_engine.active_rule()),
                 thermal_guard,
                 thermal_be,
                 battery_be,
@@ -1288,31 +1357,36 @@ fn handle_worker_command(
             sensor_loss_guard.reset();
             retry_ctrl.reset();
             *last_applied_bat_mode = None;
+            let eff_perf = app_profile_engine
+                .active_rule()
+                .map(|r| r.performance_mode)
+                .unwrap_or(cfg.thermal_fan.performance_mode);
+            let eff_fan = effective_fan_mode(cfg, app_profile_engine.active_rule());
             if *bios_writes_allowed && safe_mode.is_none() {
                 record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
-                if let Err(err) = thermal_be.set_performance_mode(cfg.thermal_fan.performance_mode)
-                {
+                if let Err(err) = thermal_be.set_performance_mode(eff_perf) {
                     tracing::warn!("Failed restoring performance mode on resume: {err}");
                 }
+                sync_win_power_mode_if_enabled(cfg, eff_perf, *safe_mode, state);
 
                 let snap = state
                     .lock()
                     .map(|st| st.telemetry.clone())
                     .unwrap_or_default();
                 let is_cool = cool_hint_from_snapshot(&snap);
-                let target_pct = resolve_fan_target_pct(
-                    cfg,
+                let active_curve = active_curve_override
+                    .as_ref()
+                    .unwrap_or(&cfg.thermal_fan.custom_curve);
+                let target_pct = resolve_fan_target_pct_with_curve(
+                    active_curve,
                     &snap,
-                    cfg.thermal_fan.fan_mode,
+                    eff_fan,
                     Some(cfg.thermal_fan.manual_speed_pct),
                     prev_curve_temp,
                     prev_curve_speed,
                 );
-                if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(
-                    cfg.thermal_fan.fan_mode,
-                    target_pct,
-                    is_cool,
-                ) {
+                if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(eff_fan, target_pct, is_cool)
+                {
                     tracing::warn!("Failed restoring fan mode on resume: {err}");
                 }
                 if cfg.lighting.enabled {
@@ -1337,6 +1411,9 @@ fn handle_worker_command(
             let _ = new_cfg.thermal_fan.custom_curve.normalize();
             let curve_changed =
                 cfg.thermal_fan.custom_curve.points != new_cfg.thermal_fan.custom_curve.points;
+            if curve_changed {
+                *active_curve_override = None;
+            }
             let bat_changed = cfg.battery.enabled != new_cfg.battery.enabled
                 || cfg.battery.mode != new_cfg.battery.mode
                 || cfg.battery.stop_threshold_pct != new_cfg.battery.stop_threshold_pct
@@ -1362,10 +1439,11 @@ fn handle_worker_command(
                     tracing::debug!("Failed syncing battery service config: {err}");
                 }
             }
+            let eff_fan = effective_fan_mode(cfg, app_profile_engine.active_rule());
             if safe_mode.is_none()
                 && *bios_writes_allowed
                 && curve_changed
-                && cfg.thermal_fan.fan_mode == FanMode::CustomCurve
+                && eff_fan == FanMode::CustomCurve
                 && !thermal_guard.is_active()
                 && !sensor_loss_guard.is_active()
             {
@@ -1374,8 +1452,11 @@ fn handle_worker_command(
                     .map(|st| st.telemetry.clone())
                     .unwrap_or_default();
                 let is_cool = cool_hint_from_snapshot(&snap);
-                let target_pct = resolve_fan_target_pct(
-                    cfg,
+                let active_curve = active_curve_override
+                    .as_ref()
+                    .unwrap_or(&cfg.thermal_fan.custom_curve);
+                let target_pct = resolve_fan_target_pct_with_curve(
+                    active_curve,
                     &snap,
                     FanMode::CustomCurve,
                     Some(cfg.thermal_fan.manual_speed_pct),
@@ -1418,6 +1499,12 @@ fn handle_worker_command(
             record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             cfg.thermal_fan.performance_mode = mode;
             let res = thermal_be.set_performance_mode(mode);
+            if res.is_ok() {
+                sync_win_power_mode_if_enabled(cfg, mode, *safe_mode, state);
+                if let Ok(mut st) = state.lock() {
+                    st.effective_performance_mode = mode;
+                }
+            }
             record_result(state, res, format!("Performance mode -> {mode:?}"));
         }
         WorkerCommand::SetFanMode {
@@ -1433,6 +1520,7 @@ fn handle_worker_command(
             ) {
                 return false;
             }
+            *active_curve_override = None;
             cfg.thermal_fan.fan_mode = mode;
             if let Some(pct) = manual_speed_pct {
                 cfg.thermal_fan.manual_speed_pct = pct;
@@ -1452,8 +1540,8 @@ fn handle_worker_command(
                 .map(|st| st.telemetry.clone())
                 .unwrap_or_default();
             let is_cool = cool_hint_from_snapshot(&snap);
-            let target_pct = resolve_fan_target_pct(
-                cfg,
+            let target_pct = resolve_fan_target_pct_with_curve(
+                &cfg.thermal_fan.custom_curve,
                 &snap,
                 mode,
                 manual_speed_pct,
@@ -1462,6 +1550,11 @@ fn handle_worker_command(
             );
             record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             let res = thermal_be.set_fan_mode_with_cool_hint(mode, target_pct, is_cool);
+            if res.is_ok() {
+                if let Ok(mut st) = state.lock() {
+                    st.effective_fan_mode = mode;
+                }
+            }
             record_result(state, res, format!("Fan mode -> {mode:?}"));
         }
         WorkerCommand::ApplyBatteryNow => {
@@ -1776,6 +1869,8 @@ fn handle_worker_command(
                 cg.clear_history();
                 let _ = cg.save_to_path(crash_guard_path);
             }
+            app_profile_engine.reset();
+            *active_curve_override = None;
             thermal_guard.reset();
             sensor_loss_guard.reset();
             retry_ctrl.reset();
@@ -1783,6 +1878,9 @@ fn handle_worker_command(
                 let _ = thermal_be.set_fan_mode(FanMode::Auto, None);
                 let _ = thermal_be.set_performance_mode(PerformanceMode::Balanced);
             }
+            let _ = omvix_windows::power_mode::set_windows_power_overlay(
+                WindowsPowerOverlay::Balanced,
+            );
             if omvix_windows::battery_service::is_service_installed()
                 || omvix_windows::battery_service::has_service_leftovers()
             {
@@ -1816,6 +1914,8 @@ fn handle_worker_command(
             let refreshed_bat = battery_be.get_battery_status().ok();
             let refreshed_svc = omvix_windows::battery_service::query_service_info();
             let refreshed_copy = omvix_windows::autostart::query_installed_copy_status();
+            let refreshed_overlay = omvix_windows::power_mode::read_windows_power_overlay()
+                .or(Some(WindowsPowerOverlay::Balanced));
             if let Ok(mut st) = state.lock() {
                 st.safe_mode = None;
                 st.thermal_guard_active = false;
@@ -1824,6 +1924,11 @@ fn handle_worker_command(
                 st.bios_writes_allowed = *bios_writes_allowed;
                 st.battery_service = refreshed_svc;
                 st.installed_copy_status = refreshed_copy;
+                st.active_app_profile = None;
+                st.active_app_profile_id = None;
+                st.effective_performance_mode = PerformanceMode::Balanced;
+                st.effective_fan_mode = FanMode::Auto;
+                st.active_win_power_mode = refreshed_overlay;
                 if refreshed_disp.is_some() {
                     st.display_mode = refreshed_disp;
                 }
@@ -1898,6 +2003,53 @@ fn handle_worker_command(
                 }
             }
         },
+        WorkerCommand::ApplyAutoProfileNow => {
+            if safe_mode.is_some() {
+                if let Ok(mut st) = state.lock() {
+                    st.set_toast("Blocked ApplyAutoProfileNow: Safe Mode is active", true);
+                }
+                return false;
+            }
+            let ac = state
+                .lock()
+                .ok()
+                .and_then(|s| s.telemetry.ac_connected)
+                .or_else(|| {
+                    telemetry_be
+                        .read_telemetry_with_options(false, false)
+                        .ok()
+                        .and_then(|s| s.ac_connected)
+                })
+                .unwrap_or(true);
+            if let Some(action) = auto_profile_engine.evaluate(&cfg.auto_profile, ac, true) {
+                apply_auto_profile_action(
+                    action,
+                    ac,
+                    cfg,
+                    state,
+                    thermal_be,
+                    display_be,
+                    kbd_be,
+                    app_profile_engine,
+                    active_curve_override,
+                    sensor_loss_guard,
+                    thermal_guard,
+                    *bios_writes_allowed,
+                    *safe_mode,
+                    crash_guard,
+                    crash_guard_path,
+                    hw_applied_recorded,
+                    prev_curve_temp,
+                    prev_curve_speed,
+                );
+            }
+        }
+        WorkerCommand::RefreshRunningProcesses => {
+            let procs = omvix_windows::processes::list_user_running_exes();
+            if let Ok(mut st) = state.lock() {
+                st.running_exes_snapshot = procs;
+            }
+        }
     }
     false
 }
@@ -1923,8 +2075,8 @@ fn run_worker_loop(
 }
 
 #[cfg(windows)]
-fn resolve_fan_target_pct(
-    cfg: &AppConfig,
+fn resolve_fan_target_pct_with_curve(
+    curve: &FanCurve,
     snap: &TelemetrySnapshot,
     mode: FanMode,
     manual_speed_pct: Option<u8>,
@@ -1938,7 +2090,7 @@ fn resolve_fan_target_pct(
             snap.chassis_temp_c,
             snap.cpu_power_w,
         ) {
-            let pct = cfg.thermal_fan.custom_curve.evaluate(temp, temp, 0);
+            let pct = curve.evaluate(temp, temp, 0);
             *prev_curve_temp = temp;
             *prev_curve_speed = pct;
             return Some(pct);
@@ -1950,6 +2102,7 @@ fn resolve_fan_target_pct(
 #[cfg(windows)]
 fn apply_off_state_safety(
     cfg: &AppConfig,
+    effective_fan: FanMode,
     thermal_guard: &ThermalSafetyGuard,
     thermal_be: &WindowsThermalFanBackend,
     battery_be: &WindowsBatteryBackend,
@@ -1961,7 +2114,7 @@ fn apply_off_state_safety(
     let mut fan_ms = 0u128;
     let mut battery_ms = 0u128;
 
-    if bios_writes_allowed && (cfg.thermal_fan.fan_mode != FanMode::Auto || thermal_guard.is_active()) {
+    if bios_writes_allowed && (effective_fan != FanMode::Auto || thermal_guard.is_active()) {
         let t_fan = Instant::now();
         if let Err(err) = thermal_be.set_fan_mode(FanMode::Auto, None) {
             tracing::warn!(%reason, "Failed to restore BIOS Auto fan: {err}");
@@ -2010,6 +2163,389 @@ fn apply_off_state_safety(
         total_ms = t_total.elapsed().as_millis(),
         "Completed off-state hardware safety sequence"
     );
+}
+
+#[cfg(windows)]
+fn sync_win_power_mode_if_enabled(
+    cfg: &AppConfig,
+    mode: PerformanceMode,
+    safe_mode: Option<SafeModeReason>,
+    state: &Arc<Mutex<SharedState>>,
+) {
+    if safe_mode.is_some() || !cfg.thermal_fan.sync_windows_power_mode {
+        return;
+    }
+    let overlay = WindowsPowerOverlay::for_performance_mode(mode);
+    match omvix_windows::power_mode::set_windows_power_overlay(overlay) {
+        Ok(()) => {
+            if let Ok(mut st) = state.lock() {
+                st.active_win_power_mode = Some(overlay);
+            }
+        }
+        Err(err) => {
+            tracing::warn!(?mode, ?overlay, "Windows Power Mode sync skipped: {err}");
+        }
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn apply_fan_override_if_safe(
+    fan_mode: FanMode,
+    curve: &FanCurve,
+    manual_speed_pct: u8,
+    state: &Arc<Mutex<SharedState>>,
+    thermal_be: &WindowsThermalFanBackend,
+    sensor_loss_guard: &SensorLossGuard,
+    thermal_guard: &ThermalSafetyGuard,
+    bios_writes_allowed: bool,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
+) {
+    if !bios_writes_allowed || sensor_loss_guard.is_active() || thermal_guard.is_active() {
+        return;
+    }
+    let snap = state
+        .lock()
+        .map(|st| st.telemetry.clone())
+        .unwrap_or_default();
+    let is_cool = cool_hint_from_snapshot(&snap);
+    let target_pct = resolve_fan_target_pct_with_curve(
+        curve,
+        &snap,
+        fan_mode,
+        Some(manual_speed_pct),
+        prev_curve_temp,
+        prev_curve_speed,
+    );
+    record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+    if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(fan_mode, target_pct, is_cool) {
+        tracing::warn!(?fan_mode, "Profile fan mode write failed: {err}");
+    }
+}
+
+#[cfg(windows)]
+fn apply_refresh_rate_if_set(
+    refresh_hz: Option<u32>,
+    display_be: &WindowsDisplayBackend,
+    state: &Arc<Mutex<SharedState>>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+) {
+    let Some(hz) = refresh_hz else {
+        return;
+    };
+    record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+    if display_be.set_refresh_rate(hz).is_ok() {
+        if let Ok(disp) = display_be.get_display_mode() {
+            if let Ok(mut st) = state.lock() {
+                st.display_mode = Some(disp);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn apply_cpu_boost_if_set(
+    cpu_boost: Option<CpuBoostMode>,
+    tuning_be: &WindowsCpuTuningBackend,
+    state: &Arc<Mutex<SharedState>>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+) {
+    let Some(boost) = cpu_boost else {
+        return;
+    };
+    record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+    if let Err(err) = tuning_be.set_cpu_boost_mode(boost) {
+        tracing::warn!(?boost, "Profile CPU boost write failed: {err}");
+    } else if let Ok(mut st) = state.lock() {
+        st.cpu_boost = Some(boost);
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn apply_auto_profile_action(
+    action: AutoProfileAction,
+    ac: bool,
+    cfg: &mut AppConfig,
+    state: &Arc<Mutex<SharedState>>,
+    thermal_be: &WindowsThermalFanBackend,
+    display_be: &WindowsDisplayBackend,
+    kbd_be: &WindowsKeyboardBackend,
+    app_profile_engine: &mut AppProfileEngine,
+    active_curve_override: &mut Option<FanCurve>,
+    sensor_loss_guard: &SensorLossGuard,
+    thermal_guard: &ThermalSafetyGuard,
+    bios_writes_allowed: bool,
+    safe_mode: Option<SafeModeReason>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
+) {
+    if safe_mode.is_some() {
+        return;
+    }
+    if app_profile_engine.active_rule().is_some() {
+        app_profile_engine.update_baseline_for_ac_dc(&action);
+        tracing::info!(
+            ?action,
+            "Deferred AC/DC auto-profile into active app-profile restore baseline"
+        );
+        return;
+    }
+
+    cfg.thermal_fan.performance_mode = action.performance_mode;
+    let mut applied_perf = false;
+    if bios_writes_allowed {
+        record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+        match thermal_be.set_performance_mode(action.performance_mode) {
+            Ok(()) => applied_perf = true,
+            Err(err) => tracing::warn!("Auto-profile performance mode write failed: {err}"),
+        }
+    }
+    sync_win_power_mode_if_enabled(cfg, action.performance_mode, safe_mode, state);
+
+    if let Some(fan_mode) = action.fan_mode {
+        cfg.thermal_fan.fan_mode = fan_mode;
+        *active_curve_override = if fan_mode == FanMode::CustomCurve {
+            action.curve_preset.map(|p| p.to_curve())
+        } else {
+            None
+        };
+        let active_curve = active_curve_override
+            .as_ref()
+            .unwrap_or(&cfg.thermal_fan.custom_curve);
+        apply_fan_override_if_safe(
+            fan_mode,
+            active_curve,
+            cfg.thermal_fan.manual_speed_pct,
+            state,
+            thermal_be,
+            sensor_loss_guard,
+            thermal_guard,
+            bios_writes_allowed,
+            crash_guard,
+            crash_guard_path,
+            hw_applied_recorded,
+            prev_curve_temp,
+            prev_curve_speed,
+        );
+    }
+
+    apply_refresh_rate_if_set(
+        action.refresh_hz,
+        display_be,
+        state,
+        crash_guard,
+        crash_guard_path,
+        hw_applied_recorded,
+    );
+
+    if bios_writes_allowed {
+        record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+        let kbd_res = if action.dim_keyboard {
+            kbd_be.set_backlight(false, 0, &cfg.lighting.zones)
+        } else if cfg.lighting.enabled {
+            kbd_be.set_backlight(
+                true,
+                cfg.lighting.brightness_pct,
+                &cfg.lighting.zones,
+            )
+        } else {
+            Ok(())
+        };
+        if let Err(err) = kbd_res {
+            tracing::warn!("Auto-profile keyboard backlight write failed: {err}");
+        }
+    }
+
+    if let Ok(mut st) = state.lock() {
+        st.effective_performance_mode = cfg.thermal_fan.performance_mode;
+        st.effective_fan_mode = cfg.thermal_fan.fan_mode;
+        st.auto_applied_revision = st.auto_applied_revision.wrapping_add(1);
+    }
+
+    if applied_perf || !bios_writes_allowed {
+        let src = if ac { "AC" } else { "Battery" };
+        let rgb = crate::tray::performance_mode_ring_rgb(action.performance_mode).0;
+        show_mode_osd(
+            &format!("Auto-Profile ({src})"),
+            &format!("{:?}", action.performance_mode),
+            rgb,
+        );
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn apply_app_profile_transition(
+    transition: AppProfileTransition,
+    cfg: &mut AppConfig,
+    state: &Arc<Mutex<SharedState>>,
+    thermal_be: &WindowsThermalFanBackend,
+    display_be: &WindowsDisplayBackend,
+    tuning_be: &WindowsCpuTuningBackend,
+    active_curve_override: &mut Option<FanCurve>,
+    sensor_loss_guard: &SensorLossGuard,
+    thermal_guard: &ThermalSafetyGuard,
+    bios_writes_allowed: bool,
+    safe_mode: Option<SafeModeReason>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
+) {
+    if safe_mode.is_some() {
+        return;
+    }
+    match transition {
+        AppProfileTransition::None => {}
+        AppProfileTransition::Activate { rule } => {
+            tracing::info!(
+                rule_id = %rule.id,
+                exe = %rule.exe_name,
+                perf = ?rule.performance_mode,
+                "Activating app-based hardware profile"
+            );
+            if bios_writes_allowed {
+                record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+                if let Err(err) = thermal_be.set_performance_mode(rule.performance_mode) {
+                    tracing::warn!("App profile performance write failed: {err}");
+                }
+            }
+            sync_win_power_mode_if_enabled(cfg, rule.performance_mode, safe_mode, state);
+
+            let eff_fan = rule.fan_mode.unwrap_or(cfg.thermal_fan.fan_mode);
+            *active_curve_override = if rule.fan_mode == Some(FanMode::CustomCurve) {
+                rule.curve_preset.map(|p| p.to_curve())
+            } else {
+                None
+            };
+            if let Some(fan_mode) = rule.fan_mode {
+                let active_curve = active_curve_override
+                    .as_ref()
+                    .unwrap_or(&cfg.thermal_fan.custom_curve);
+                apply_fan_override_if_safe(
+                    fan_mode,
+                    active_curve,
+                    cfg.thermal_fan.manual_speed_pct,
+                    state,
+                    thermal_be,
+                    sensor_loss_guard,
+                    thermal_guard,
+                    bios_writes_allowed,
+                    crash_guard,
+                    crash_guard_path,
+                    hw_applied_recorded,
+                    prev_curve_temp,
+                    prev_curve_speed,
+                );
+            }
+
+            apply_refresh_rate_if_set(
+                rule.refresh_hz,
+                display_be,
+                state,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+            );
+            apply_cpu_boost_if_set(
+                rule.cpu_boost_mode,
+                tuning_be,
+                state,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+            );
+
+            let label = rule.display_label().to_string();
+            if let Ok(mut st) = state.lock() {
+                st.active_app_profile = Some(label.clone());
+                st.active_app_profile_id = Some(rule.id.clone());
+                st.effective_performance_mode = rule.performance_mode;
+                st.effective_fan_mode = eff_fan;
+                st.set_toast(format!("App profile active: {label}"), false);
+            }
+            let rgb = crate::tray::performance_mode_ring_rgb(rule.performance_mode).0;
+            show_mode_osd(
+                "App Profile",
+                &format!("{label} · {:?}", rule.performance_mode),
+                rgb,
+            );
+        }
+        AppProfileTransition::Restore(baseline) => {
+            tracing::info!(?baseline.performance_mode, ?baseline.fan_mode, "Restoring baseline after app exit");
+            *active_curve_override = None;
+            cfg.thermal_fan.performance_mode = baseline.performance_mode;
+            cfg.thermal_fan.fan_mode = baseline.fan_mode;
+
+            if bios_writes_allowed {
+                record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+                if let Err(err) = thermal_be.set_performance_mode(baseline.performance_mode) {
+                    tracing::warn!("App profile baseline performance restore failed: {err}");
+                }
+            }
+            sync_win_power_mode_if_enabled(cfg, baseline.performance_mode, safe_mode, state);
+
+            apply_fan_override_if_safe(
+                baseline.fan_mode,
+                &baseline.custom_curve,
+                baseline.manual_speed_pct,
+                state,
+                thermal_be,
+                sensor_loss_guard,
+                thermal_guard,
+                bios_writes_allowed,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+                prev_curve_temp,
+                prev_curve_speed,
+            );
+            apply_refresh_rate_if_set(
+                baseline.refresh_hz,
+                display_be,
+                state,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+            );
+            apply_cpu_boost_if_set(
+                baseline.cpu_boost_mode,
+                tuning_be,
+                state,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+            );
+
+            if let Ok(mut st) = state.lock() {
+                st.active_app_profile = None;
+                st.active_app_profile_id = None;
+                st.effective_performance_mode = baseline.performance_mode;
+                st.effective_fan_mode = baseline.fan_mode;
+                st.auto_applied_revision = st.auto_applied_revision.wrapping_add(1);
+                st.set_toast("Restored baseline profile", false);
+            }
+            let rgb = crate::tray::performance_mode_ring_rgb(baseline.performance_mode).0;
+            show_mode_osd(
+                "Profile Restored",
+                &format!("{:?}", baseline.performance_mode),
+                rgb,
+            );
+        }
+    }
 }
 
 #[cfg(windows)]
