@@ -3,6 +3,7 @@ use crate::theme::{
     status_badge,
 };
 use crate::ui::charts::{ChartSeries, telemetry_area_chart};
+use crate::ui::{default_telemetry_csv_path, show_file_in_folder};
 use crate::worker::{MetricStats, SharedState, WorkerCommand};
 use egui::{Color32, RichText, Ui};
 use omvix_core::{AppConfig, I18n};
@@ -67,8 +68,30 @@ pub fn render(
             if ui.button(i18n.t("monitor.reset_stats")).clicked() {
                 on_cmd(WorkerCommand::ResetTelemetryStats);
             }
+            if ui
+                .add_enabled(
+                    !st.telemetry_csv_rows.is_empty(),
+                    egui::Button::new(i18n.t("monitor.export_csv")),
+                )
+                .clicked()
+            {
+                on_cmd(WorkerCommand::ExportTelemetryCsv(default_telemetry_csv_path()));
+            }
         });
         ui.weak(i18n.t("monitor.ec_note"));
+        if let Some(ref csv_path) = st.last_csv_export_path {
+            ui.add_space(3.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.weak(format!(
+                    "{}: {}",
+                    i18n.t("monitor.csv_saved_label"),
+                    csv_path.display()
+                ));
+                if ui.small_button(i18n.t("support_bundle.show_in_folder")).clicked() {
+                    show_file_in_folder(csv_path);
+                }
+            });
+        }
     });
 
     ui.add_space(8.0);

@@ -179,6 +179,51 @@ pub fn render(
 
     ui.add_space(8.0);
 
+    // Accessibility Card
+    card_frame(&theme_snapshot).show(ui, |ui| {
+        section_title(ui, i18n.t("settings.accessibility"), &theme_snapshot);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(i18n.t("settings.font_scale"));
+            let scale_resp = ui.add(
+                egui::Slider::new(&mut cfg.general.font_scale_pct, 85..=130)
+                    .suffix("%")
+                    .step_by(5.0),
+            );
+            if control_committed(ui, "settings_font_scale", &scale_resp) {
+                actions.theme_changed = true;
+                on_save();
+            }
+            for pct in [85u8, 100, 115, 130] {
+                if ui
+                    .selectable_label(cfg.general.font_scale_pct == pct, format!("{pct}%"))
+                    .clicked()
+                {
+                    cfg.general.font_scale_pct = pct;
+                    actions.theme_changed = true;
+                    on_save();
+                }
+            }
+        });
+        ui.add_space(4.0);
+        let mut high_contrast = cfg.general.custom_theme.is_high_contrast();
+        if ui
+            .checkbox(&mut high_contrast, i18n.t("settings.high_contrast_mode"))
+            .changed()
+        {
+            cfg.general.custom_theme = if high_contrast {
+                CustomThemeConfig::preset_high_contrast()
+            } else {
+                CustomThemeConfig::preset_dark_slate()
+            };
+            actions.theme_changed = true;
+            on_save();
+        }
+        ui.add_space(4.0);
+        ui.weak(i18n.t("settings.keyboard_nav_hint"));
+    });
+
+    ui.add_space(8.0);
+
     // Custom Theme Colors & Copy/Paste Profile Sharing Card
     card_frame(&theme_snapshot).show(ui, |ui| {
         section_title(ui, i18n.t("settings.custom_theme"), &theme_snapshot);

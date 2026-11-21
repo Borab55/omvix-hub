@@ -27,7 +27,9 @@ const COMPACT_SIZE: [f32; 2] = [468.0, 728.0];
 const DRAWER_SIZE: [f32; 2] = [632.0, 728.0];
 
 #[cfg(windows)]
-use omvix_windows::hotkeys::{ListenerHandle, spawn_global_hotkey_listener, spawn_omen_key_listener};
+use omvix_windows::hotkeys::{
+    HotkeyBindError, ListenerHandle, spawn_global_hotkey_listener, spawn_omen_key_listener,
+};
 #[cfg(windows)]
 use omvix_windows::power_events::{
     PowerEventHandle, SystemPowerEvent, spawn_power_event_listener,
@@ -586,7 +588,7 @@ fn main() {
             }
 
             theme::configure_fonts(&cc.egui_ctx);
-            theme::apply_theme(&cc.egui_ctx, &cfg.general.custom_theme);
+            theme::apply_theme(&cc.egui_ctx, &cfg.general.custom_theme, cfg.general.font_scale_pct);
             Ok(Box::new(OmvixApp::new(
                 cc.egui_ctx.clone(),
                 cfg,
@@ -629,6 +631,7 @@ struct OmvixApp {
     battery_draft: ui::battery::BatteryDraftState,
     lighting_draft: ui::lighting_display::LightingDisplayDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
+    hotkey_bind_status: ui::hotkeys::HotkeyBindStatus,
     last_seen_auto_revision: u64,
     last_seen_config_sync_rev: u64,
     window_visible: Arc<AtomicBool>,
@@ -800,6 +803,7 @@ impl OmvixApp {
             battery_draft: ui::battery::BatteryDraftState::default(),
             lighting_draft: ui::lighting_display::LightingDisplayDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
+            hotkey_bind_status: ui::hotkeys::HotkeyBindStatus::Disabled,
             last_seen_auto_revision: 0,
             last_seen_config_sync_rev: 0,
             window_visible,
@@ -890,6 +894,99 @@ impl OmvixApp {
         }
     }
 
+    /// Processes keyboard-only accessibility navigation (`Ctrl+1..4`, `Ctrl+Tab`, `Alt+Left/Right`, `Esc`).
+    /// Returns `true` when `Esc` closed the open drawer viewport.
+    fn process_keyboard_nav(
+        &mut self,
+        ctx: &egui::Context,
+        running_exes_empty: bool,
+        pending_cmds: &mut Vec<WorkerCommand>,
+    ) -> bool {
+        if ctx.wants_keyboard_input() || ctx.memory(|m| m.any_popup_open()) {
+            return false;
+        }
+        let (num1, num2, num3, num4, tab_next, tab_prev, alt_left, alt_right, esc) =
+            ctx.input(|i| {
+                let ctrl_only = i.modifiers.ctrl && !i.modifiers.alt;
+                let alt_only = i.modifiers.alt && !i.modifiers.ctrl && !i.modifiers.shift;
+                (
+                    ctrl_only && i.key_pressed(egui::Key::Num1),
+                    ctrl_only && i.key_pressed(egui::Key::Num2),
+                    ctrl_only && i.key_pressed(egui::Key::Num3),
+                    ctrl_only && i.key_pressed(egui::Key::Num4),
+                    ctrl_only && !i.modifiers.shift && i.key_pressed(egui::Key::Tab),
+                    ctrl_only && i.modifiers.shift && i.key_pressed(egui::Key::Tab),
+                    alt_only && i.key_pressed(egui::Key::ArrowLeft),
+                    alt_only && i.key_pressed(egui::Key::ArrowRight),
+                    !i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(egui::Key::Escape),
+                )
+            });
+
+        let mut changed = false;
+        if num1 {
+            self.open_drawer = Some(Drawer::Monitor);
+            changed = true;
+        } else if num2 {
+            self.open_drawer = Some(Drawer::FansPower);
+            changed = true;
+        } else if num3 {
+            self.open_drawer = Some(Drawer::Battery);
+            changed = true;
+        } else if num4 {
+            self.open_drawer = Some(Drawer::Extra);
+            changed = true;
+        } else if tab_next {
+            self.open_drawer = Some(
+                self.open_drawer
+                    .map(|d| d.next())
+                    .unwrap_or(Drawer::Monitor),
+            );
+            changed = true;
+        } else if tab_prev {
+            self.open_drawer = Some(
+                self.open_drawer
+                    .map(|d| d.prev())
+                    .unwrap_or(Drawer::Extra),
+            );
+            changed = true;
+        } else if alt_left || alt_right {
+            match self.open_drawer {
+                Some(Drawer::FansPower) => {
+                    self.fans_power_tab = if alt_right {
+                        self.fans_power_tab.next()
+                    } else {
+                        self.fans_power_tab.prev()
+                    };
+                    changed = true;
+                }
+                Some(Drawer::Extra) => {
+                    self.extra_tab = if alt_right {
+                        self.extra_tab.next()
+                    } else {
+                        self.extra_tab.prev()
+                    };
+                    changed = true;
+                }
+                _ => {}
+            }
+        } else if esc && self.open_drawer.is_some() {
+            self.open_drawer = None;
+            ctx.request_repaint();
+            return true;
+        }
+
+        if changed {
+            if self.open_drawer == Some(Drawer::FansPower)
+                && self.fans_power_tab == FansPowerSubTab::Profiles
+                && running_exes_empty
+            {
+                pending_cmds.push(WorkerCommand::RefreshRunningProcesses);
+            }
+            ctx.request_repaint();
+        }
+        false
+    }
+
     fn rebind_hotkeys(&mut self, ctx: &egui::Context) {
         self.omen_action_code.store(
             omen_action_to_code(&self.cfg.hotkeys.omen_key_action),
@@ -919,23 +1016,50 @@ impl OmvixApp {
             }
 
             if !self.cfg.hotkeys.global_toggle_shortcut.trim().is_empty() {
+                let combo = self.cfg.hotkeys.global_toggle_shortcut.trim().to_string();
                 let tx = self.signal_tx.clone();
                 let c = ctx.clone();
                 let vis = Arc::clone(&self.window_visible);
                 let hwnd = Arc::clone(&self.hwnd_atomic);
-                match spawn_global_hotkey_listener(
-                    &self.cfg.hotkeys.global_toggle_shortcut,
-                    move || {
-                        let prev = vis.fetch_xor(true, Ordering::SeqCst);
-                        let next = !prev;
-                        win32_set_visible(hwnd.load(Ordering::SeqCst), next);
-                        let _ = tx.send(AppSignal::SyncVisibility(next));
-                        c.request_repaint();
-                    },
-                ) {
-                    Ok(handle) => self.hotkey_listener = Some(handle),
-                    Err(err) => tracing::warn!("Global hotkey bind failed: {err}"),
+                match spawn_global_hotkey_listener(&combo, move || {
+                    let prev = vis.fetch_xor(true, Ordering::SeqCst);
+                    let next = !prev;
+                    win32_set_visible(hwnd.load(Ordering::SeqCst), next);
+                    let _ = tx.send(AppSignal::SyncVisibility(next));
+                    c.request_repaint();
+                }) {
+                    Ok(handle) => {
+                        self.hotkey_listener = Some(handle);
+                        self.hotkey_bind_status = ui::hotkeys::HotkeyBindStatus::Bound(combo);
+                    }
+                    Err(err) => {
+                        tracing::warn!("Global hotkey bind failed: {err}");
+                        match &err {
+                            HotkeyBindError::Conflict { shortcut, .. } => {
+                                self.hotkey_bind_status =
+                                    ui::hotkeys::HotkeyBindStatus::Conflict(shortcut.clone());
+                                if let Ok(mut st) = self.state.lock() {
+                                    st.set_toast(
+                                        self.i18n
+                                            .t("hotkeys.conflict_toast")
+                                            .replace("{shortcut}", shortcut),
+                                        true,
+                                    );
+                                }
+                            }
+                            HotkeyBindError::InvalidSyntax(msg) => {
+                                self.hotkey_bind_status =
+                                    ui::hotkeys::HotkeyBindStatus::Invalid(msg.clone());
+                            }
+                            HotkeyBindError::OsError { message, .. } => {
+                                self.hotkey_bind_status =
+                                    ui::hotkeys::HotkeyBindStatus::Error(message.clone());
+                            }
+                        }
+                    }
                 }
+            } else {
+                self.hotkey_bind_status = ui::hotkeys::HotkeyBindStatus::Disabled;
             }
         }
         #[cfg(not(windows))]
@@ -1378,6 +1502,12 @@ impl eframe::App for OmvixApp {
             };
         }
 
+        self.process_keyboard_nav(
+            ctx,
+            snapshot_state.running_exes_snapshot.is_empty(),
+            &mut pending_cmds,
+        );
+
         // Secondary flicker-free detail viewport opens to the LEFT of the docked cockpit
         if let Some(drawer) = self.open_drawer {
             if self.window_visible.load(Ordering::Relaxed)
@@ -1415,9 +1545,30 @@ impl eframe::App for OmvixApp {
                         close_drawer = true;
                         return;
                     }
+                    if self.process_keyboard_nav(
+                        drawer_ctx,
+                        snapshot_state.running_exes_snapshot.is_empty(),
+                        &mut pending_cmds,
+                    ) {
+                        close_drawer = true;
+                        return;
+                    }
+                    let expected_font_px =
+                        theme::expected_body_font_size(self.cfg.general.font_scale_pct);
+                    let drawer_font_px = drawer_ctx
+                        .style()
+                        .text_styles
+                        .get(&egui::TextStyle::Body)
+                        .map(|f| f.size)
+                        .unwrap_or(0.0);
                     if drawer_ctx.style().visuals.panel_fill != theme::rgb(current_theme.canvas_bg)
+                        || (drawer_font_px - expected_font_px).abs() > 0.1
                     {
-                        theme::apply_theme(drawer_ctx, &self.cfg.general.custom_theme);
+                        theme::apply_theme(
+                            drawer_ctx,
+                            &self.cfg.general.custom_theme,
+                            self.cfg.general.font_scale_pct,
+                        );
                     }
 
                     egui::CentralPanel::default()
@@ -1579,6 +1730,7 @@ impl eframe::App for OmvixApp {
                                             ui,
                                             &mut self.cfg,
                                             &self.i18n,
+                                            &self.hotkey_bind_status,
                                             &mut self.config_warnings,
                                             &mut push_cmd,
                                             &mut mark_save,
@@ -1614,6 +1766,7 @@ impl eframe::App for OmvixApp {
                                                 theme::apply_theme(
                                                     drawer_ctx,
                                                     &self.cfg.general.custom_theme,
+                                                    self.cfg.general.font_scale_pct,
                                                 );
                                             }
                                             if res.dock_changed && self.cfg.general.dock_bottom_right
@@ -1640,7 +1793,11 @@ impl eframe::App for OmvixApp {
                     self.open_drawer = None;
                 }
                 if theme_applied {
-                    theme::apply_theme(ctx, &self.cfg.general.custom_theme);
+                    theme::apply_theme(
+                        ctx,
+                        &self.cfg.general.custom_theme,
+                        self.cfg.general.font_scale_pct,
+                    );
                 }
             }
         }
@@ -1657,8 +1814,13 @@ impl eframe::App for OmvixApp {
             self.battery_draft = ui::battery::BatteryDraftState::default();
             self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();
+            self.last_seen_config_sync_rev = snapshot_state.synced_config_rev;
             self.last_seen_auto_revision = snapshot_state.auto_applied_revision;
-            theme::apply_theme(ctx, &self.cfg.general.custom_theme);
+            theme::apply_theme(
+                ctx,
+                &self.cfg.general.custom_theme,
+                self.cfg.general.font_scale_pct,
+            );
             if let Some(tray) = &mut self.tray {
                 tray.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
             }

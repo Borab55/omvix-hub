@@ -448,5 +448,26 @@
   "support_bundle.create_btn": "Create Support Bundle (.zip)",
   "support_bundle.creating": "Building .zip...",
   "support_bundle.saved_label": "Support Zip",
-  "support_bundle.show_in_folder": "Show in Folder"
+  "support_bundle.show_in_folder": "Show in Folder",
+
+  "monitor.export_csv": "Export CSV",
+  "monitor.csv_saved_label": "CSV",
+
+  "battery.health_history_title": "Weekly Battery Health & Wear History",
+  "battery.log_snapshot_now": "Log Snapshot Now",
+  "battery.health_history_empty": "No battery health records logged yet. Weekly snapshots are saved automatically when battery capacity is detected.",
+  "battery.health_history_table": "Recorded Capacity History",
+  "battery.history_date": "Date (UTC)",
+  "battery.history_capacity": "Full / Design",
+
+  "hotkeys.status_active": "Active",
+  "hotkeys.status_conflict": "Conflict Detected",
+  "hotkeys.conflict_detail": "{shortcut} is already registered by Windows or another app. Pick a different shortcut:",
+  "hotkeys.conflict_toast": "Global hotkey conflict: {shortcut} is already in use by another app.",
+  "hotkeys.conflict_alternatives": "Suggested alternatives:",
+
+  "settings.accessibility": "Accessibility & Keyboard Navigation",
+  "settings.font_scale": "UI Font Scale",
+  "settings.high_contrast_mode": "High Contrast Mode (accessible borders & text)",
+  "settings.keyboard_nav_hint": "Keyboard shortcuts: Ctrl+1..4 open sections, Ctrl+Tab cycles drawers, Alt+Left/Right switches subtabs, Esc closes the drawer."
 }

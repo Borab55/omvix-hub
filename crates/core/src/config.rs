@@ -107,6 +107,23 @@ impl CustomThemeConfig {
         }
     }
 
+    pub fn preset_high_contrast() -> Self {
+        Self {
+            name: "High Contrast".to_string(),
+            dark_base: true,
+            accent: [255, 224, 51],
+            canvas_bg: [0, 0, 0],
+            sidebar_bg: [0, 0, 0],
+            card_bg: [12, 12, 14],
+            card_border: [220, 220, 225],
+            text_primary: [255, 255, 255],
+        }
+    }
+
+    pub fn is_high_contrast(&self) -> bool {
+        self.canvas_bg == [0, 0, 0] && self.text_primary == [255, 255, 255]
+    }
+
     pub fn presets() -> Vec<Self> {
         vec![
             Self::preset_dark_slate(),
@@ -114,6 +131,7 @@ impl CustomThemeConfig {
             Self::preset_omen_crimson(),
             Self::preset_emerald_matrix(),
             Self::preset_midnight_violet(),
+            Self::preset_high_contrast(),
         ]
     }
 
@@ -300,6 +318,7 @@ pub struct GeneralConfig {
     pub experimental_board_id: Option<String>,
     pub first_run_completed: bool,
     pub theme: String,
+    pub font_scale_pct: u8,
     pub telemetry_interval_ms: u64,
     pub custom_theme: CustomThemeConfig,
 }
@@ -317,6 +336,7 @@ impl Default for GeneralConfig {
             experimental_board_id: None,
             first_run_completed: false,
             theme: "dark".to_string(),
+            font_scale_pct: 100,
             telemetry_interval_ms: 1000,
             custom_theme: CustomThemeConfig::preset_dark_slate(),
         }
@@ -628,6 +648,7 @@ impl AppConfig {
         let mut warnings = Vec::new();
 
         self.general.telemetry_interval_ms = self.general.telemetry_interval_ms.clamp(100, 10_000);
+        self.general.font_scale_pct = self.general.font_scale_pct.clamp(85, 130);
         self.logging.max_total_mb = self.logging.max_total_mb.clamp(5, 100);
         self.logging.max_files = self.logging.max_files.clamp(1, 16);
 
@@ -1064,5 +1085,23 @@ mod tests {
         assert!(older.thermal_fan.sync_windows_power_mode);
         assert!(!older.app_profiles.enabled);
         assert_eq!(older.app_profiles.poll_interval_secs, 3);
+        assert_eq!(older.general.font_scale_pct, 100);
+    }
+
+    #[test]
+    fn accessibility_font_scale_clamps_and_high_contrast_preset_detected() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.general.font_scale_pct, 100);
+        cfg.general.font_scale_pct = 50;
+        let _ = cfg.sanitize();
+        assert_eq!(cfg.general.font_scale_pct, 85);
+        cfg.general.font_scale_pct = 220;
+        let _ = cfg.sanitize();
+        assert_eq!(cfg.general.font_scale_pct, 130);
+
+        let hc = CustomThemeConfig::preset_high_contrast();
+        assert!(hc.is_high_contrast());
+        assert!(!CustomThemeConfig::preset_dark_slate().is_high_contrast());
+        assert!(CustomThemeConfig::presets().contains(&hc));
     }
 }

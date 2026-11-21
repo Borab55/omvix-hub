@@ -24,6 +24,15 @@ fn shift_color(c: [u8; 3], delta: i16) -> Color32 {
     Color32::from_rgb(clamp(c[0]), clamp(c[1]), clamp(c[2]))
 }
 
+fn is_bright_color(c: Color32) -> bool {
+    let luma = 0.299 * f32::from(c.r()) + 0.587 * f32::from(c.g()) + 0.114 * f32::from(c.b());
+    luma > 160.0
+}
+
+pub fn expected_body_font_size(font_scale_pct: u8) -> f32 {
+    13.0 * (f32::from(font_scale_pct.clamp(85, 130)) / 100.0)
+}
+
 pub fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     let candidate_paths = [
@@ -49,8 +58,29 @@ pub fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig) {
+pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u8) {
     let mut style: Style = (*ctx.style()).clone();
+    let scale = f32::from(font_scale_pct.clamp(85, 130)) / 100.0;
+    style.text_styles.insert(
+        egui::TextStyle::Small,
+        egui::FontId::proportional(10.5 * scale),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Body,
+        egui::FontId::proportional(13.0 * scale),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Monospace,
+        egui::FontId::monospace(12.5 * scale),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Button,
+        egui::FontId::proportional(13.0 * scale),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Heading,
+        egui::FontId::proportional(19.5 * scale),
+    );
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
 
@@ -65,6 +95,7 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig) {
     let card = rgb(t.card_bg);
     let border = rgb(t.card_border);
     let text = rgb(t.text_primary);
+    let border_w = if t.is_high_contrast() { 1.5_f32 } else { 1.0_f32 };
 
     visuals.panel_fill = canvas;
     visuals.window_fill = canvas;
@@ -76,7 +107,7 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig) {
     visuals.faint_bg_color = card;
 
     visuals.widgets.noninteractive.bg_fill = card;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, border);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(border_w, border);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, text);
 
     visuals.widgets.inactive.bg_fill = if t.dark_base {
@@ -84,7 +115,7 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig) {
     } else {
         shift_color(t.card_bg, -18)
     };
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, border);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(border_w, border);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, text);
 
     visuals.widgets.hovered.bg_fill = if t.dark_base {
@@ -92,12 +123,16 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig) {
     } else {
         shift_color(t.card_bg, -30)
     };
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(border_w.max(1.2), accent);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.2_f32, text);
 
     visuals.widgets.active.bg_fill = accent;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, accent);
-    let active_text = if t.dark_base { Color32::WHITE } else { Color32::WHITE };
+    visuals.widgets.active.bg_stroke = Stroke::new(border_w, accent);
+    let active_text = if is_bright_color(accent) {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    };
     visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, active_text);
 
     visuals.widgets.open.bg_fill = if t.dark_base {
@@ -105,16 +140,22 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig) {
     } else {
         shift_color(t.card_bg, -24)
     };
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, accent);
+    visuals.widgets.open.bg_stroke = Stroke::new(border_w, accent);
     visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, text);
 
     visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(
         accent.r(),
         accent.g(),
         accent.b(),
-        if t.dark_base { 78 } else { 52 },
+        if t.is_high_contrast() {
+            110
+        } else if t.dark_base {
+            78
+        } else {
+            52
+        },
     );
-    visuals.selection.stroke = Stroke::new(1.2_f32, accent);
+    visuals.selection.stroke = Stroke::new(border_w.max(1.2), accent);
 
     let r = CornerRadius::same(8);
     visuals.widgets.noninteractive.corner_radius = r;
@@ -128,17 +169,19 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig) {
 }
 
 pub fn card_frame(t: &CustomThemeConfig) -> egui::Frame {
+    let border_w = if t.is_high_contrast() { 1.5_f32 } else { 1.0_f32 };
     egui::Frame::NONE
         .fill(rgb(t.card_bg))
-        .stroke(Stroke::new(1.0_f32, rgb(t.card_border)))
+        .stroke(Stroke::new(border_w, rgb(t.card_border)))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::same(14))
 }
 
 pub fn compact_card(t: &CustomThemeConfig) -> egui::Frame {
+    let border_w = if t.is_high_contrast() { 1.5_f32 } else { 1.0_f32 };
     egui::Frame::NONE
         .fill(rgb(t.card_bg))
-        .stroke(Stroke::new(1.0_f32, rgb(t.card_border)))
+        .stroke(Stroke::new(border_w, rgb(t.card_border)))
         .corner_radius(CornerRadius::same(9))
         .inner_margin(Margin::symmetric(10, 6))
 }
@@ -151,6 +194,42 @@ pub fn section_title(ui: &mut egui::Ui, text: impl Into<String>, t: &CustomTheme
     );
 }
 
+fn button_palette(selected: bool, t: &CustomThemeConfig) -> (Color32, Stroke, Color32) {
+    let accent = accent_color(t);
+    let border_w = if t.is_high_contrast() { 1.5_f32 } else { 1.0_f32 };
+    if selected {
+        if t.is_high_contrast() {
+            let fg = if is_bright_color(accent) {
+                Color32::BLACK
+            } else {
+                Color32::WHITE
+            };
+            (accent, Stroke::new(2.0_f32, Color32::WHITE), fg)
+        } else {
+            (
+                Color32::from_rgba_unmultiplied(
+                    accent.r(),
+                    accent.g(),
+                    accent.b(),
+                    if t.dark_base { 54 } else { 38 },
+                ),
+                Stroke::new(1.3_f32, accent),
+                if t.dark_base { Color32::WHITE } else { accent },
+            )
+        }
+    } else {
+        (
+            if t.dark_base {
+                shift_color(t.card_bg, 8)
+            } else {
+                shift_color(t.card_bg, -12)
+            },
+            Stroke::new(border_w, rgb(t.card_border)),
+            rgb(t.text_primary),
+        )
+    }
+}
+
 /// Tactile segmented tile button inspired by G-Helper's rounded mode tiles.
 pub fn tile_button(
     ui: &mut egui::Ui,
@@ -160,31 +239,15 @@ pub fn tile_button(
     height: f32,
     t: &CustomThemeConfig,
 ) -> egui::Response {
-    let accent = accent_color(t);
-    let (fill, stroke, text_color) = if selected {
-        (
-            Color32::from_rgba_unmultiplied(
-                accent.r(),
-                accent.g(),
-                accent.b(),
-                if t.dark_base { 54 } else { 38 },
-            ),
-            Stroke::new(1.3_f32, accent),
-            if t.dark_base { Color32::WHITE } else { accent },
-        )
-    } else {
-        (
-            if t.dark_base {
-                shift_color(t.card_bg, 8)
-            } else {
-                shift_color(t.card_bg, -12)
-            },
-            Stroke::new(1.0_f32, rgb(t.card_border)),
-            rgb(t.text_primary),
-        )
-    };
+    let (fill, stroke, text_color) = button_palette(selected, t);
+    let btn_size = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Button)
+        .map(|f| f.size * 0.96)
+        .unwrap_or(12.5);
 
-    let mut rt = egui::RichText::new(label).size(12.5).color(text_color);
+    let mut rt = egui::RichText::new(label).size(btn_size).color(text_color);
     if selected {
         rt = rt.strong();
     }
@@ -208,31 +271,15 @@ pub fn pill_button(
     selected: bool,
     t: &CustomThemeConfig,
 ) -> egui::Response {
-    let accent = accent_color(t);
-    let (fill, stroke, text_color) = if selected {
-        (
-            Color32::from_rgba_unmultiplied(
-                accent.r(),
-                accent.g(),
-                accent.b(),
-                if t.dark_base { 54 } else { 38 },
-            ),
-            Stroke::new(1.3_f32, accent),
-            if t.dark_base { Color32::WHITE } else { accent },
-        )
-    } else {
-        (
-            if t.dark_base {
-                shift_color(t.card_bg, 8)
-            } else {
-                shift_color(t.card_bg, -12)
-            },
-            Stroke::new(1.0_f32, rgb(t.card_border)),
-            rgb(t.text_primary),
-        )
-    };
+    let (fill, stroke, text_color) = button_palette(selected, t);
+    let btn_size = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Button)
+        .map(|f| f.size * 0.96)
+        .unwrap_or(12.5);
 
-    let mut rt = egui::RichText::new(label).size(12.5).color(text_color);
+    let mut rt = egui::RichText::new(label).size(btn_size).color(text_color);
     if selected {
         rt = rt.strong();
     }

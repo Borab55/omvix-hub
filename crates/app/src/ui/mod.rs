@@ -19,12 +19,50 @@ pub enum Drawer {
     Extra,
 }
 
+impl Drawer {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Monitor => Self::FansPower,
+            Self::FansPower => Self::Battery,
+            Self::Battery => Self::Extra,
+            Self::Extra => Self::Monitor,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Monitor => Self::Extra,
+            Self::FansPower => Self::Monitor,
+            Self::Battery => Self::FansPower,
+            Self::Extra => Self::Battery,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FansPowerSubTab {
     #[default]
     PerformanceFans,
     Profiles,
     Tuning,
+}
+
+impl FansPowerSubTab {
+    pub fn next(self) -> Self {
+        match self {
+            Self::PerformanceFans => Self::Profiles,
+            Self::Profiles => Self::Tuning,
+            Self::Tuning => Self::PerformanceFans,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::PerformanceFans => Self::Tuning,
+            Self::Profiles => Self::PerformanceFans,
+            Self::Tuning => Self::Profiles,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,6 +72,26 @@ pub enum ExtraSubTab {
     Hotkeys,
     Diagnostics,
     Settings,
+}
+
+impl ExtraSubTab {
+    pub fn next(self) -> Self {
+        match self {
+            Self::LightingDisplay => Self::Hotkeys,
+            Self::Hotkeys => Self::Diagnostics,
+            Self::Diagnostics => Self::Settings,
+            Self::Settings => Self::LightingDisplay,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::LightingDisplay => Self::Settings,
+            Self::Hotkeys => Self::LightingDisplay,
+            Self::Diagnostics => Self::Hotkeys,
+            Self::Settings => Self::Diagnostics,
+        }
+    }
 }
 
 /// Returns `true` once after a continuous control (`Slider`, `DragValue`, `color_edit_button_srgb`)
@@ -62,17 +120,25 @@ pub fn control_committed(
     }
 }
 
-pub fn default_support_bundle_path() -> std::path::PathBuf {
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let filename = format!("omvix-support-{stamp}.zip");
+fn default_desktop_or_temp_file(filename: &str) -> std::path::PathBuf {
     #[cfg(windows)]
     if let Some(desktop) = std::env::var_os("USERPROFILE") {
         let candidate = std::path::PathBuf::from(desktop).join("Desktop");
         if candidate.exists() {
-            return candidate.join(&filename);
+            return candidate.join(filename);
         }
     }
     std::env::temp_dir().join(filename)
+}
+
+pub fn default_support_bundle_path() -> std::path::PathBuf {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    default_desktop_or_temp_file(&format!("omvix-support-{stamp}.zip"))
+}
+
+pub fn default_telemetry_csv_path() -> std::path::PathBuf {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    default_desktop_or_temp_file(&format!("omvix-telemetry-{stamp}.csv"))
 }
 
 pub fn show_file_in_folder(path: &std::path::Path) {
@@ -92,4 +158,25 @@ pub fn show_file_in_folder(path: &std::path::Path) {
     }
     #[cfg(not(windows))]
     let _ = path;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drawer_and_subtab_cycles_wrap_cleanly() {
+        assert_eq!(Drawer::Monitor.next(), Drawer::FansPower);
+        assert_eq!(Drawer::Extra.next(), Drawer::Monitor);
+        assert_eq!(Drawer::Monitor.prev(), Drawer::Extra);
+        assert_eq!(Drawer::FansPower.prev(), Drawer::Monitor);
+
+        assert_eq!(FansPowerSubTab::PerformanceFans.next(), FansPowerSubTab::Profiles);
+        assert_eq!(FansPowerSubTab::Tuning.next(), FansPowerSubTab::PerformanceFans);
+        assert_eq!(FansPowerSubTab::PerformanceFans.prev(), FansPowerSubTab::Tuning);
+
+        assert_eq!(ExtraSubTab::LightingDisplay.next(), ExtraSubTab::Hotkeys);
+        assert_eq!(ExtraSubTab::Settings.next(), ExtraSubTab::LightingDisplay);
+        assert_eq!(ExtraSubTab::LightingDisplay.prev(), ExtraSubTab::Settings);
+    }
 }

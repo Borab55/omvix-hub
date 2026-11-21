@@ -1,10 +1,16 @@
 use omvix_core::app_profiles::{AppProfileEngine, AppProfileRule, AppProfileTransition, ProfileBaseline};
 use omvix_core::auto_profile::{AutoProfileAction, AutoProfileEngine};
 use omvix_core::battery_care::BatteryCareEngine;
+use omvix_core::battery_history::{
+    BatteryHealthHistory, BatteryHealthRecord, battery_history_path_for,
+};
 use omvix_core::boards::{is_bios_write_allowed, lookup_board};
 use omvix_core::config::{BatteryConfig, LightingConfig};
 use omvix_core::crash_guard::{CrashGuardState, SafeModeReason, current_unix_secs};
 use omvix_core::support_bundle::{SupportBundleInputs, build_support_bundle_zip};
+use omvix_core::telemetry_csv::{
+    MAX_TELEMETRY_CSV_ROWS, TelemetryCsvRow, write_telemetry_csv,
+};
 use omvix_core::thermal::{
     DEFAULT_SENSOR_LOSS_TIMEOUT_SECS, GuardMaxAction, GuardMaxRetryController, SensorLossDecision,
     SensorLossGuard, ThermalGuardConfig, ThermalGuardDecision, ThermalSafetyGuard,
@@ -142,6 +148,9 @@ pub struct SharedState {
     pub synced_config: Option<AppConfig>,
     pub last_support_bundle_path: Option<PathBuf>,
     pub support_bundle_busy: bool,
+    pub telemetry_csv_rows: VecDeque<TelemetryCsvRow>,
+    pub last_csv_export_path: Option<PathBuf>,
+    pub battery_health_history: Vec<BatteryHealthRecord>,
     pub last_toast: Option<(String, bool, Instant)>,
 }
 
@@ -205,6 +214,9 @@ impl Default for SharedState {
             synced_config: None,
             last_support_bundle_path: None,
             support_bundle_busy: false,
+            telemetry_csv_rows: VecDeque::with_capacity(MAX_TELEMETRY_CSV_ROWS),
+            last_csv_export_path: None,
+            battery_health_history: Vec::new(),
             last_toast: None,
         }
     }
@@ -225,6 +237,7 @@ impl SharedState {
         self.cpu_power_history.clear();
         self.gpu_power_history.clear();
         self.battery_power_history.clear();
+        self.telemetry_csv_rows.clear();
         self.cpu_temp_stats = MetricStats::new();
         self.gpu_temp_stats = MetricStats::new();
         self.cpu_power_stats = MetricStats::new();
@@ -282,6 +295,8 @@ pub enum WorkerCommand {
     UndoChangeById(u64),
     ClearChangeHistory,
     CreateSupportBundle(PathBuf),
+    ExportTelemetryCsv(PathBuf),
+    RecordBatteryHealthNow,
     Shutdown,
 }
 
@@ -595,6 +610,22 @@ fn run_worker_loop(
         let copy_status = omvix_windows::autostart::query_installed_copy_status();
         let bat = battery_be.get_battery_status().ok();
         let bat_svc = omvix_windows::battery_service::query_service_info();
+        let battery_history_path = battery_history_path_for(&crash_guard_path);
+        let mut battery_health_init = BatteryHealthHistory::load_from_path(&battery_history_path);
+        if let Some(ref b) = bat {
+            if let (Some(design), Some(full)) = (b.design_capacity_mwh, b.full_charge_capacity_mwh)
+            {
+                let date_label = chrono::Local::now().format("%Y-%m-%d").to_string();
+                if battery_health_init.record_if_due(
+                    design,
+                    full,
+                    current_unix_secs() as i64,
+                    date_label,
+                ) {
+                    let _ = battery_health_init.save_to_path(&battery_history_path);
+                }
+            }
+        }
         let kbd_type = kbd_be.detect_keyboard_type().unwrap_or(KeyboardType::Unknown);
         let gpu_mode = if is_admin {
             gpu_be.get_gpu_mode().ok()
@@ -608,6 +639,7 @@ fn run_worker_loop(
             st.installed_copy_status = copy_status;
             st.battery_status = bat;
             st.battery_service = bat_svc;
+            st.battery_health_history = battery_health_init.records.clone();
             st.keyboard_type = kbd_type;
             st.gpu_mode = gpu_mode;
         }
@@ -680,6 +712,8 @@ fn run_worker_loop(
     let mut last_committed_battery = cfg.battery.clone();
     let mut last_committed_lighting = cfg.lighting.clone();
     let mut last_committed_power_limits = (cfg.tuning.pl1_watts, cfg.tuning.pl2_watts);
+    let battery_history_path = battery_history_path_for(&crash_guard_path);
+    let mut battery_health_history = BatteryHealthHistory::load_from_path(&battery_history_path);
 
     loop {
         let interval_ms = cfg.general.telemetry_interval_ms.clamp(100, 10_000);
@@ -727,6 +761,8 @@ fn run_worker_loop(
                         &mut last_committed_battery,
                         &mut last_committed_lighting,
                         &mut last_committed_power_limits,
+                        &mut battery_health_history,
+                        &battery_history_path,
                     );
                     if should_shutdown {
                         return;
@@ -1273,6 +1309,11 @@ fn record_snapshot(st: &mut SharedState, snap: &TelemetrySnapshot, t: f64) {
     if let Some(bp) = snap.battery_rate_w {
         push_sample(&mut st.battery_power_history, t, bp.abs());
     }
+    if st.telemetry_csv_rows.len() >= MAX_TELEMETRY_CSV_ROWS {
+        st.telemetry_csv_rows.pop_front();
+    }
+    st.telemetry_csv_rows
+        .push_back(TelemetryCsvRow::from_snapshot(snap, t));
     st.telemetry = snap.clone();
 }
 
@@ -1320,6 +1361,8 @@ fn handle_worker_command(
     last_committed_battery: &mut BatteryConfig,
     last_committed_lighting: &mut LightingConfig,
     last_committed_power_limits: &mut (Option<u16>, Option<u16>),
+    battery_health_history: &mut BatteryHealthHistory,
+    battery_history_path: &Path,
 ) -> bool {
     match cmd {
         WorkerCommand::Shutdown => {
@@ -2354,6 +2397,67 @@ fn handle_worker_command(
                 }
             }
         }
+        WorkerCommand::ExportTelemetryCsv(out_path) => {
+            let rows: Vec<TelemetryCsvRow> = state
+                .lock()
+                .map(|st| st.telemetry_csv_rows.iter().cloned().collect())
+                .unwrap_or_default();
+            match write_telemetry_csv(&out_path, &rows) {
+                Ok(count) => {
+                    if let Ok(mut st) = state.lock() {
+                        st.last_csv_export_path = Some(out_path);
+                        st.set_toast(format!("Exported {count} CSV rows"), false);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("Telemetry CSV export failed: {err}");
+                    if let Ok(mut st) = state.lock() {
+                        st.set_toast(err.to_string(), true);
+                    }
+                }
+            }
+        }
+        WorkerCommand::RecordBatteryHealthNow => {
+            match battery_be.get_battery_status() {
+                Ok(bat) => {
+                    if let (Some(design), Some(full)) =
+                        (bat.design_capacity_mwh, bat.full_charge_capacity_mwh)
+                    {
+                        let date_label = chrono::Local::now().format("%Y-%m-%d").to_string();
+                        if battery_health_history.force_record_snapshot(
+                            design,
+                            full,
+                            current_unix_secs() as i64,
+                            date_label,
+                        ) {
+                            let save_res = battery_health_history.save_to_path(battery_history_path);
+                            if let Ok(mut st) = state.lock() {
+                                st.battery_status = Some(bat);
+                                st.battery_health_history = battery_health_history.records.clone();
+                                match save_res {
+                                    Ok(()) => {
+                                        st.set_toast("Logged battery health snapshot", false)
+                                    }
+                                    Err(err) => st.set_toast(err.to_string(), true),
+                                }
+                            }
+                        } else if let Ok(mut st) = state.lock() {
+                            st.set_toast(
+                                "Battery capacity values were invalid for logging",
+                                true,
+                            );
+                        }
+                    } else if let Ok(mut st) = state.lock() {
+                        st.set_toast("Battery capacity telemetry unavailable", true);
+                    }
+                }
+                Err(err) => {
+                    if let Ok(mut st) = state.lock() {
+                        st.set_toast(err.to_string(), true);
+                    }
+                }
+            }
+        }
     }
     false
 }
@@ -3192,6 +3296,8 @@ fn is_barrier_command(cmd: &WorkerCommand) -> bool {
             | WorkerCommand::UndoChangeById(_)
             | WorkerCommand::ClearChangeHistory
             | WorkerCommand::CreateSupportBundle(_)
+            | WorkerCommand::ExportTelemetryCsv(_)
+            | WorkerCommand::RecordBatteryHealthNow
     )
 }
 

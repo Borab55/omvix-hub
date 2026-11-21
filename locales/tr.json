@@ -448,5 +448,26 @@
   "support_bundle.create_btn": "Destek Paketi Oluştur (.zip)",
   "support_bundle.creating": ".zip Hazırlanıyor...",
   "support_bundle.saved_label": "Destek Paketi",
-  "support_bundle.show_in_folder": "Klasörde Göster"
+  "support_bundle.show_in_folder": "Klasörde Göster",
+
+  "monitor.export_csv": "CSV Dışa Aktar",
+  "monitor.csv_saved_label": "CSV",
+
+  "battery.health_history_title": "Haftalık Pil Sağlığı & Aşınma Geçmişi",
+  "battery.log_snapshot_now": "Şimdi Kaydet",
+  "battery.health_history_empty": "Henüz pil sağlığı kaydı oluşturulmadı. Pil kapasitesi okunduğunda haftalık kayıtlar otomatik alınır.",
+  "battery.health_history_table": "Kayıtlı Kapasite Geçmişi",
+  "battery.history_date": "Tarih (UTC)",
+  "battery.history_capacity": "Tam / Tasarım",
+
+  "hotkeys.status_active": "Etkin",
+  "hotkeys.status_conflict": "Çakışma Algılandı",
+  "hotkeys.conflict_detail": "{shortcut} kısayolu Windows veya başka bir uygulama tarafından kullanılıyor. Alternatif seçin:",
+  "hotkeys.conflict_toast": "Genel kısayol çakışması: {shortcut} başka bir uygulama tarafından kullanılıyor.",
+  "hotkeys.conflict_alternatives": "Önerilen alternatifler:",
+
+  "settings.accessibility": "Erişilebilirlik & Klavye Gezintisi",
+  "settings.font_scale": "Arayüz Yazı Ölçeği",
+  "settings.high_contrast_mode": "Yüksek Kontrast Modu (belirgin kenarlık ve metin)",
+  "settings.keyboard_nav_hint": "Klavye kısayolları: Ctrl+1..4 bölümleri açar, Ctrl+Tab çekmeceler arasında geçer, Alt+Sol/Sağ alt sekmeleri değiştirir, Esc çekmeceyi kapatır."
 }

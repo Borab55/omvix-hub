@@ -1,6 +1,6 @@
 use crate::theme::{STATUS_WARN, accent_color, rgb};
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Shape, Stroke, StrokeKind, Ui, Vec2};
-use omvix_core::{CustomThemeConfig, FanCurvePoint};
+use omvix_core::{BatteryHealthRecord, CustomThemeConfig, FanCurvePoint};
 
 pub struct ChartSeries<'a> {
     pub name: &'a str,
@@ -681,4 +681,188 @@ fn eval_linear_pct(points: &[FanCurvePoint], temp_c: f32) -> f32 {
         }
     }
     50.0
+}
+
+pub fn battery_health_chart(
+    ui: &mut Ui,
+    records: &[BatteryHealthRecord],
+    t: &CustomThemeConfig,
+    health_label: &str,
+    wear_label: &str,
+) {
+    if records.is_empty() {
+        return;
+    }
+
+    let health_color = Color32::from_rgb(34, 197, 94);
+    let wear_color = STATUS_WARN;
+    let axis_text = muted_text_color(t);
+    let bg = chart_bg_color(t);
+    let border = rgb(t.card_border);
+    let grid = subtle_grid_color(t);
+
+    if let Some(latest) = records.last() {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for (lbl, val, color) in [
+                (health_label, format!("{:.1}%", latest.health_pct), health_color),
+                (wear_label, format!("{:.1}%", latest.wear_pct), wear_color),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(9.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot_rect.center(), 4.0, color);
+                    ui.label(egui::RichText::new(lbl).size(11.5).color(axis_text));
+                    ui.label(egui::RichText::new(val).size(12.0).strong().color(color));
+                });
+            }
+        });
+    }
+
+    let total_w = ui.available_width().max(240.0);
+    let height = 148.0;
+    let (outer_rect, response) =
+        ui.allocate_exact_size(Vec2::new(total_w, height), egui::Sense::hover());
+    let painter = ui.painter_at(outer_rect);
+
+    painter.rect_filled(outer_rect, CornerRadius::same(8), bg);
+    painter.rect_stroke(
+        outer_rect,
+        CornerRadius::same(8),
+        Stroke::new(1.0_f32, border),
+        StrokeKind::Inside,
+    );
+
+    let plot_rect = Rect::from_min_max(
+        Pos2::new(outer_rect.left() + 40.0, outer_rect.top() + 10.0),
+        Pos2::new(
+            (outer_rect.right() - 14.0).max(outer_rect.left() + 80.0),
+            (outer_rect.bottom() - 22.0).max(outer_rect.top() + 50.0),
+        ),
+    );
+
+    for pct in [0, 25, 50, 75, 100] {
+        let frac = pct as f32 / 100.0;
+        let py = plot_rect.bottom() - frac * plot_rect.height();
+        painter.line_segment(
+            [Pos2::new(plot_rect.left(), py), Pos2::new(plot_rect.right(), py)],
+            Stroke::new(1.0_f32, grid),
+        );
+        painter.text(
+            Pos2::new(plot_rect.left() - 6.0, py),
+            Align2::RIGHT_CENTER,
+            format!("{pct}%"),
+            FontId::proportional(10.0),
+            axis_text,
+        );
+    }
+
+    let count = records.len();
+    let map_x = |idx: usize| -> f32 {
+        if count <= 1 {
+            plot_rect.center().x
+        } else {
+            plot_rect.left() + (idx as f32 / (count - 1) as f32) * plot_rect.width()
+        }
+    };
+    let map_y = |pct: f32| -> f32 {
+        plot_rect.bottom() - (pct.clamp(0.0, 100.0) / 100.0) * plot_rect.height()
+    };
+
+    let health_pts: Vec<Pos2> = records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| Pos2::new(map_x(i), map_y(r.health_pct)))
+        .collect();
+    let wear_pts: Vec<Pos2> = records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| Pos2::new(map_x(i), map_y(r.wear_pct)))
+        .collect();
+
+    if health_pts.len() >= 2 {
+        painter.add(Shape::line(health_pts.clone(), Stroke::new(2.2_f32, health_color)));
+        painter.add(Shape::line(wear_pts.clone(), Stroke::new(2.0_f32, wear_color)));
+    }
+    for (p_h, p_w) in health_pts.iter().zip(wear_pts.iter()) {
+        painter.circle_filled(*p_h, 3.5, health_color);
+        painter.circle_filled(*p_w, 3.0, wear_color);
+    }
+
+    // X-axis date labels (first, middle if >2, last)
+    if let Some(first) = records.first() {
+        painter.text(
+            Pos2::new(plot_rect.left(), plot_rect.bottom() + 4.0),
+            Align2::LEFT_TOP,
+            &first.date_label,
+            FontId::proportional(10.0),
+            axis_text,
+        );
+    }
+    if count >= 3 {
+        let mid_idx = count / 2;
+        painter.text(
+            Pos2::new(map_x(mid_idx), plot_rect.bottom() + 4.0),
+            Align2::CENTER_TOP,
+            &records[mid_idx].date_label,
+            FontId::proportional(10.0),
+            axis_text,
+        );
+    }
+    if count >= 2 {
+        if let Some(last) = records.last() {
+            painter.text(
+                Pos2::new(plot_rect.right(), plot_rect.bottom() + 4.0),
+                Align2::RIGHT_TOP,
+                &last.date_label,
+                FontId::proportional(10.0),
+                axis_text,
+            );
+        }
+    }
+
+    if let Some(hover) = response.hover_pos() {
+        if plot_rect.contains(hover) {
+            let nearest_idx = if count <= 1 {
+                0
+            } else {
+                let norm = ((hover.x - plot_rect.left()) / plot_rect.width().max(1.0))
+                    .clamp(0.0, 1.0);
+                ((norm * (count - 1) as f32).round() as usize).min(count - 1)
+            };
+            let rec = &records[nearest_idx];
+            let px = map_x(nearest_idx);
+            painter.line_segment(
+                [Pos2::new(px, plot_rect.top()), Pos2::new(px, plot_rect.bottom())],
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(220, 225, 235, 110)),
+            );
+            painter.circle_filled(Pos2::new(px, map_y(rec.health_pct)), 5.0, health_color);
+            painter.circle_filled(Pos2::new(px, map_y(rec.wear_pct)), 4.5, wear_color);
+
+            let tip_txt = format!(
+                "{}  ·  {health_label}: {:.1}%  ·  {wear_label}: {:.1}%  ({}/{} mWh)",
+                rec.date_label,
+                rec.health_pct,
+                rec.wear_pct,
+                rec.full_charge_capacity_mwh,
+                rec.design_capacity_mwh
+            );
+            let galley =
+                painter.layout_no_wrap(tip_txt, FontId::proportional(10.8), Color32::WHITE);
+            let pad = Vec2::new(7.0, 3.0);
+            let pill_w = galley.size().x + pad.x * 2.0;
+            let pill_x = (px - pill_w * 0.5)
+                .clamp(plot_rect.left() + 2.0, (plot_rect.right() - pill_w - 2.0).max(plot_rect.left() + 2.0));
+            let pill = Rect::from_min_size(
+                Pos2::new(pill_x, plot_rect.top() + 4.0),
+                galley.size() + pad * 2.0,
+            );
+            painter.rect_filled(
+                pill,
+                CornerRadius::same(5),
+                Color32::from_rgba_unmultiplied(15, 17, 22, 225),
+            );
+            painter.galley(pill.min + pad, galley, Color32::WHITE);
+        }
+    }
 }
