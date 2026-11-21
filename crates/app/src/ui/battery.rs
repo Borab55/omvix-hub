@@ -3,6 +3,7 @@ use crate::theme::{
     status_badge,
 };
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
+use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
 use omvix_core::{
@@ -203,9 +204,6 @@ pub fn render(
                         "{}% / {}%  •  {:?}",
                         prof.stop_threshold_pct, prof.start_threshold_pct, prof.mode
                     ));
-                    if ui.button(i18n.t("common.apply")).clicked() {
-                        apply_profile = Some(prof.clone());
-                    }
                     if ui.button(i18n.t("battery.delete")).clicked() {
                         delete_idx = Some(idx);
                     }
@@ -314,9 +312,15 @@ pub fn render(
                 .checkbox(&mut cfg.battery.enabled, i18n.t("common.enabled"))
                 .changed()
             {
+                if !cfg.battery.enabled {
+                    cfg.battery.mode = BatteryChargeMode::Auto;
+                } else if cfg.battery.mode == BatteryChargeMode::Auto {
+                    cfg.battery.mode = BatteryChargeMode::Inhibit;
+                }
                 cfg.battery.active_profile_id = None;
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                on_cmd(WorkerCommand::ApplyBatteryNow);
             }
         });
 
@@ -330,18 +334,25 @@ pub fn render(
             ] {
                 if pill_button(ui, &i18n.t(key), cfg.battery.mode == m, t).clicked() {
                     cfg.battery.mode = m;
+                    cfg.battery.enabled = m != BatteryChargeMode::Auto;
                     cfg.battery.active_profile_id = None;
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    on_cmd(WorkerCommand::ApplyBatteryNow);
                 }
             }
         });
 
+        let mut commit_battery = false;
         ui.horizontal(|ui| {
             ui.label(i18n.t("battery.stop_threshold"));
-            if ui
-                .add(Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100).suffix("%"))
-                .changed()
-            {
+            let stop_resp =
+                ui.add(Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100).suffix("%"));
+            if stop_resp.changed() {
                 cfg.battery.active_profile_id = None;
+            }
+            if control_committed(ui, "battery_drawer_stop", &stop_resp) {
+                commit_battery = true;
             }
         });
 
@@ -351,13 +362,21 @@ pub fn render(
         }
         ui.horizontal(|ui| {
             ui.label(i18n.t("battery.start_threshold"));
-            if ui
-                .add(Slider::new(&mut cfg.battery.start_threshold_pct, 40..=max_start).suffix("%"))
-                .changed()
-            {
+            let start_resp = ui.add(
+                Slider::new(&mut cfg.battery.start_threshold_pct, 40..=max_start).suffix("%"),
+            );
+            if start_resp.changed() {
                 cfg.battery.active_profile_id = None;
             }
+            if control_committed(ui, "battery_drawer_start", &start_resp) {
+                commit_battery = true;
+            }
         });
+        if commit_battery {
+            on_save();
+            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            on_cmd(WorkerCommand::ApplyBatteryNow);
+        }
 
         ui.add_space(6.0);
         if ui
@@ -374,15 +393,6 @@ pub fn render(
 
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .button(RichText::new(i18n.t("common.apply")).strong())
-                .clicked()
-            {
-                on_save();
-                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                on_cmd(WorkerCommand::ApplyBatteryNow);
-            }
-
             let travel_btn_label = if cfg.battery.one_time_full_charge {
                 format!("✓ {}", i18n.t("battery.one_time_full_charge"))
             } else {

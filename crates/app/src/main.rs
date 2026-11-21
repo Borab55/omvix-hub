@@ -486,6 +486,7 @@ struct OmvixApp {
     pending_dock_frames: u8,
     last_shown_at: Instant,
     prev_focused: bool,
+    config_dirty_since: Option<Instant>,
     battery_draft: ui::battery::BatteryDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
     window_visible: Arc<AtomicBool>,
@@ -620,6 +621,7 @@ impl OmvixApp {
             pending_dock_frames: dock_initial,
             last_shown_at: Instant::now(),
             prev_focused: true,
+            config_dirty_since: None,
             battery_draft: ui::battery::BatteryDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
             window_visible,
@@ -673,9 +675,16 @@ impl OmvixApp {
         app
     }
 
-    fn save_config(&self) {
+    fn save_config(&mut self) {
+        self.config_dirty_since = None;
         if let Err(err) = self.cfg.save_to_path(&self.cfg_path) {
             tracing::warn!("Failed to save config: {err}");
+        }
+    }
+
+    fn flush_config_if_dirty(&mut self) {
+        if self.config_dirty_since.is_some() {
+            self.save_config();
         }
     }
 
@@ -769,6 +778,7 @@ impl OmvixApp {
         } else {
             self.open_drawer = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.flush_config_if_dirty();
         }
         if let Some(tray) = &self.tray {
             tray.update_labels(&self.i18n, visible);
@@ -861,6 +871,7 @@ impl OmvixApp {
     }
 
     fn restart_as_admin(&mut self, ctx: &egui::Context) {
+        self.flush_config_if_dirty();
         #[cfg(windows)]
         {
             // Release global hotkeys & single-instance mutex BEFORE spawning elevated process.
@@ -1258,11 +1269,16 @@ impl eframe::App for OmvixApp {
         }
 
         if should_save {
-            self.save_config();
             self.omen_action_code.store(
                 omen_action_to_code(&self.cfg.hotkeys.omen_key_action),
                 Ordering::SeqCst,
             );
+            if should_restore_defaults || !self.window_visible.load(Ordering::Relaxed) {
+                self.save_config();
+            } else {
+                self.config_dirty_since = Some(Instant::now());
+                ctx.request_repaint_after(Duration::from_millis(450));
+            }
         }
         for cmd in pending_cmds {
             self.send_cmd(cmd);
@@ -1278,6 +1294,11 @@ impl eframe::App for OmvixApp {
         }
         if should_quit {
             self.begin_quit(ctx);
+        } else if self
+            .config_dirty_since
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(400))
+        {
+            self.save_config();
         }
     }
 }

@@ -1,4 +1,5 @@
 use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge};
+use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Slider, Ui};
 use omvix_core::{
@@ -214,57 +215,57 @@ pub fn render(
             .spacing([14.0, 6.0])
             .show(ui, |ui| {
                 ui.label(i18n.t("settings.color_accent"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.accent)
-                    .changed()
-                {
+                let r0 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.accent);
+                if r0.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 0usize), &r0) {
                     on_save();
                 }
 
                 ui.label(i18n.t("settings.color_canvas"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.canvas_bg)
-                    .changed()
-                {
+                let r1 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.canvas_bg);
+                if r1.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 1usize), &r1) {
                     on_save();
                 }
 
                 ui.label(i18n.t("settings.color_sidebar"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.sidebar_bg)
-                    .changed()
-                {
+                let r2 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.sidebar_bg);
+                if r2.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 2usize), &r2) {
                     on_save();
                 }
                 ui.end_row();
 
                 ui.label(i18n.t("settings.color_card"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.card_bg)
-                    .changed()
-                {
+                let r3 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.card_bg);
+                if r3.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 3usize), &r3) {
                     on_save();
                 }
 
                 ui.label(i18n.t("settings.color_border"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.card_border)
-                    .changed()
-                {
+                let r4 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.card_border);
+                if r4.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 4usize), &r4) {
                     on_save();
                 }
 
                 ui.label(i18n.t("settings.color_text"));
-                if ui
-                    .color_edit_button_srgb(&mut cfg.general.custom_theme.text_primary)
-                    .changed()
-                {
+                let r5 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.text_primary);
+                if r5.changed() {
                     actions.theme_changed = true;
+                }
+                if control_committed(ui, ("theme_color", 5usize), &r5) {
                     on_save();
                 }
                 ui.end_row();
@@ -359,10 +360,9 @@ pub fn render(
 
             ui.add_space(12.0);
             ui.label(i18n.t("logs.max_size_mb"));
-            if ui
-                .add(Slider::new(&mut cfg.logging.max_total_mb, 5..=100).suffix(" MB"))
-                .changed()
-            {
+            let log_resp =
+                ui.add(Slider::new(&mut cfg.logging.max_total_mb, 5..=100).suffix(" MB"));
+            if control_committed(ui, "settings_log_max_mb", &log_resp) {
                 on_save();
             }
         });

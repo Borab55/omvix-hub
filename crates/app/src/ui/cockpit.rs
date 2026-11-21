@@ -3,7 +3,7 @@ use crate::theme::{
     clickable_warning_badge, compact_card, pill_button, rgb, section_title, status_badge,
     tile_button,
 };
-use crate::ui::{Drawer, ExtraSubTab};
+use crate::ui::{Drawer, ExtraSubTab, control_committed};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, CornerRadius, RichText, Slider, Stroke, Ui};
 use omvix_core::{
@@ -279,21 +279,18 @@ pub fn render(
                 if cfg.thermal_fan.fan_mode == FanMode::Manual {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().slider_width = 220.0;
-                        ui.add(
+                        ui.spacing_mut().slider_width = (card_inner_w - 72.0).max(220.0);
+                        let resp = ui.add(
                             Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100)
                                 .suffix("%"),
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
-                            if ui.button(i18n.t("common.apply")).clicked() {
-                                on_save();
-                                on_cmd(WorkerCommand::SetFanMode {
-                                    mode: FanMode::Manual,
-                                    manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
-                                });
-                            }
-                        });
+                        if control_committed(ui, "cockpit_manual_fan", &resp) {
+                            on_save();
+                            on_cmd(WorkerCommand::SetFanMode {
+                                mode: FanMode::Manual,
+                                manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                            });
+                        }
                     });
                 }
             });
@@ -388,7 +385,8 @@ pub fn render(
                         ui.spacing_mut().item_spacing.x = 4.0;
                         let c0 = &mut cfg.lighting.zones[0];
                         let mut srgb = [c0.r, c0.g, c0.b];
-                        if ui.color_edit_button_srgb(&mut srgb).changed() {
+                        let resp = ui.color_edit_button_srgb(&mut srgb);
+                        if resp.changed() {
                             let picked = RgbColor {
                                 r: srgb[0],
                                 g: srgb[1],
@@ -396,6 +394,8 @@ pub fn render(
                             };
                             cfg.lighting.zones = [picked; 4];
                             cfg.lighting.enabled = true;
+                        }
+                        if control_committed(ui, "cockpit_kbd_color", &resp) {
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::ApplyLighting);
@@ -430,16 +430,14 @@ pub fn render(
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.label(i18n.t("lighting.brightness"));
-                    ui.spacing_mut().slider_width = 185.0;
-                    ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
-                        if ui.button(i18n.t("common.apply")).clicked() {
-                            on_save();
-                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            on_cmd(WorkerCommand::ApplyLighting);
-                        }
-                    });
+                    ui.spacing_mut().slider_width = (card_inner_w - 135.0).max(185.0);
+                    let resp =
+                        ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
+                    if control_committed(ui, "cockpit_kbd_brightness", &resp) {
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyLighting);
+                    }
                 });
             });
 
@@ -520,30 +518,27 @@ pub fn render(
 
                 ui.add_space(3.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().slider_width = 235.0;
-                    if ui
-                        .add(
-                            Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100)
-                                .suffix("%"),
-                        )
-                        .changed()
-                    {
+                    ui.spacing_mut().slider_width = (card_inner_w - 72.0).max(235.0);
+                    let resp = ui.add(
+                        Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100).suffix("%"),
+                    );
+                    if resp.changed() {
                         cfg.battery.start_threshold_pct =
                             cfg.battery.stop_threshold_pct.saturating_sub(5).max(40);
                         cfg.battery.active_profile_id = None;
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
-                        if ui.button(i18n.t("common.apply")).clicked() {
-                            if !cfg.battery.enabled && cfg.battery.stop_threshold_pct < 100 {
-                                cfg.battery.enabled = true;
-                                cfg.battery.mode = BatteryChargeMode::Inhibit;
-                            }
-                            on_save();
-                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            on_cmd(WorkerCommand::ApplyBatteryNow);
+                    if control_committed(ui, "cockpit_battery_stop", &resp) {
+                        if cfg.battery.stop_threshold_pct >= 100 {
+                            cfg.battery.enabled = false;
+                            cfg.battery.mode = BatteryChargeMode::Auto;
+                        } else if !cfg.battery.enabled {
+                            cfg.battery.enabled = true;
+                            cfg.battery.mode = BatteryChargeMode::Inhibit;
                         }
-                    });
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyBatteryNow);
+                    }
                 });
             });
         });

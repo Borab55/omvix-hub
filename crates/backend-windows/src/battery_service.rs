@@ -156,10 +156,13 @@ impl BatteryServiceConfig {
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        let raw = toml::to_string_pretty(self).map_err(|e| OmvixError::Config(e.to_string()))?;
+        if path.exists() && fs::read_to_string(path).ok().as_deref() == Some(raw.as_str()) {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let raw = toml::to_string_pretty(self).map_err(|e| OmvixError::Config(e.to_string()))?;
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, raw)?;
         if path.exists() {

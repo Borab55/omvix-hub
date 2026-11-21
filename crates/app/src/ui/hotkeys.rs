@@ -74,19 +74,25 @@ pub fn render(
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("hotkeys.global_shortcut"), t);
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut cfg.hotkeys.global_toggle_shortcut);
+            let shortcut_resp = ui.text_edit_singleline(&mut cfg.hotkeys.global_toggle_shortcut);
 
             #[cfg(windows)]
-            {
+            let valid = {
                 let valid = parse_shortcut(&cfg.hotkeys.global_toggle_shortcut).is_ok();
                 if valid {
                     status_badge(ui, &i18n.t("common.status_ok"), STATUS_OK);
                 } else {
                     status_badge(ui, &i18n.t("common.status_error"), STATUS_ERR);
                 }
-            }
+                valid
+            };
+            #[cfg(not(windows))]
+            let valid = true;
 
-            if ui.button(i18n.t("common.apply")).clicked() {
+            let enter_applied =
+                shortcut_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid;
+
+            if ui.button(i18n.t("common.apply")).clicked() || enter_applied {
                 on_save();
                 on_rebind_hotkeys();
             }
