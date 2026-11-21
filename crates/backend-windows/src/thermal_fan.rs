@@ -18,6 +18,35 @@ struct ThermalFanState {
     max_fan_levels: (u8, u8),
 }
 
+/// Restores BIOS automatic fan control over a brand-new WMI connection without acquiring any cached
+/// WMI slot or `WindowsThermalFanBackend` mutex (safe from panic recovery / watchdog threads).
+pub fn restore_fan_auto_fresh_wmi() -> Result<()> {
+    let scheme = collect_system_identity()
+        .map(|id| resolve_scheme_from_identity(&id.board_id, &id.model, &id.system_family))
+        .unwrap_or(ThermalProfileScheme::VictusS);
+    let bios = HpWmiBios::connect()?;
+    let clear_max = bios.execute(0x20008, 0x27, &[0x00, 0x00, 0x00, 0x00], OutputSize::Size0)?;
+    if clear_max.return_code != 0 {
+        return Err(OmvixError::WmiCallFailed {
+            command: 0x20008,
+            command_type: 0x27,
+            return_code: clear_max.return_code,
+            message: describe_wmi_return_code(clear_max.return_code),
+        });
+    }
+    let mode_byte = thermal_profile_byte(scheme, PerformanceMode::Balanced);
+    let apply_auto = bios.execute(0x20008, 0x1A, &[0xFF, mode_byte, 0x01, 0x00], OutputSize::Size0)?;
+    if apply_auto.return_code != 0 {
+        return Err(OmvixError::WmiCallFailed {
+            command: 0x20008,
+            command_type: 0x1A,
+            return_code: apply_auto.return_code,
+            message: describe_wmi_return_code(apply_auto.return_code),
+        });
+    }
+    Ok(())
+}
+
 /// Windows HP WMI BIOS thermal profile and fan controller.
 pub struct WindowsThermalFanBackend {
     state: Mutex<ThermalFanState>,

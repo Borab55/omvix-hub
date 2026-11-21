@@ -29,6 +29,8 @@ pub fn render(
     i18n: &I18n,
     open_drawer: Option<Drawer>,
     pane_width: f32,
+    worker_dead: bool,
+    config_warnings: &mut Vec<String>,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) -> CockpitActions {
@@ -190,6 +192,37 @@ pub fn render(
             });
         });
     });
+
+    if worker_dead {
+        ui.add_space(4.0);
+        compact_card(t).show(ui, |ui| {
+            ui.set_width(card_inner_w);
+            ui.set_max_width(card_inner_w);
+            ui.colored_label(
+                STATUS_ERR,
+                RichText::new(i18n.t("app.worker_dead_warning")).size(11.5).strong(),
+            );
+        });
+    }
+
+    if !config_warnings.is_empty() {
+        ui.add_space(4.0);
+        compact_card(t).show(ui, |ui| {
+            ui.set_width(card_inner_w);
+            ui.set_max_width(card_inner_w);
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    STATUS_WARN,
+                    RichText::new(config_warnings.join(" | ")).size(11.0),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if ui.small_button("×").clicked() {
+                        config_warnings.clear();
+                    }
+                });
+            });
+        });
+    }
 
     if !st.security.is_admin {
         ui.add_space(3.0);

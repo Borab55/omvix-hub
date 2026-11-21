@@ -7,9 +7,9 @@ use omvix_core::thermal::{
 use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryServiceInfo, BatteryStatus,
     ConflictServiceInfo, CpuBoostMode, CpuTuningBackend, DiagnosticReport, DiagnosticsBackend,
-    DisplayBackend, DisplayModeInfo, FanMode, GpuMode, GpuSwitchBackend, KeyboardBackend,
-    KeyboardType, PerformanceMode, Result, RgbColor, SecurityStatus, TelemetryBackend,
-    TelemetrySnapshot, ThermalFanBackend,
+    DisplayBackend, DisplayModeInfo, FanMode, GpuMode, GpuSwitchBackend, InstalledCopyStatus,
+    KeyboardBackend, KeyboardType, PerformanceMode, Result, RgbColor, SecurityStatus,
+    TelemetryBackend, TelemetrySnapshot, ThermalFanBackend,
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -102,6 +102,7 @@ pub struct SharedState {
     pub thermal_guard_active: bool,
     pub pawnio_installing: bool,
     pub pawnio_cpu_active: bool,
+    pub installed_copy_status: InstalledCopyStatus,
     pub battery_service: BatteryServiceInfo,
     pub battery_service_busy: bool,
     pub battery_status: Option<BatteryStatus>,
@@ -139,6 +140,7 @@ impl Default for SharedState {
             thermal_guard_active: false,
             pawnio_installing: false,
             pawnio_cpu_active: false,
+            installed_copy_status: InstalledCopyStatus::default(),
             battery_service: BatteryServiceInfo::default(),
             battery_service_busy: false,
             battery_status: None,
@@ -218,15 +220,30 @@ pub enum WorkerCommand {
     RestartBatteryService,
     UninstallBatteryServiceZeroTrace,
     RefreshBatteryService,
+    SetAutostart(bool),
+    UpdateInstalledCopy,
+    LaunchCustomCommand {
+        command: String,
+        args: String,
+    },
     RestoreAllDefaults,
     RefreshDiagnostics,
     ExportDiagnostics(PathBuf),
     Shutdown,
 }
 
+struct AliveDropGuard(Arc<AtomicBool>);
+
+impl Drop for AliveDropGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct BackgroundWorker {
     tx: Sender<WorkerCommand>,
     state: Arc<Mutex<SharedState>>,
+    alive: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -244,18 +261,26 @@ impl BackgroundWorker {
             initial_state.security.is_admin = system_info::is_process_elevated();
         }
         let state = Arc::new(Mutex::new(initial_state));
+        let alive = Arc::new(AtomicBool::new(true));
         let state_bg = Arc::clone(&state);
+        let alive_bg = Arc::clone(&alive);
         let tx_bg = tx.clone();
 
         let join = thread::spawn(move || {
+            let _alive_guard = AliveDropGuard(alive_bg);
             run_worker_loop(initial_config, state_bg, rx, tx_bg, ctx, window_visible);
         });
 
         Self {
             tx,
             state,
+            alive,
             join: Some(join),
         }
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 
     pub fn send(&self, cmd: WorkerCommand) {
@@ -346,9 +371,20 @@ fn run_worker_loop(
         request_repaint_if_visible(&ctx, &window_visible);
     }
 
-    // Phase 2 discovery: battery, background service, keyboard type, GPU MUX mode
+    // Phase 2 discovery: autostart integrity, battery, background service, keyboard type, GPU MUX mode
     {
         let is_admin = system_info::is_process_elevated();
+        if is_admin {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Err(err) = omvix_windows::autostart::verify_and_repair_autostart_task(
+                    &exe,
+                    cfg.general.start_with_windows,
+                ) {
+                    tracing::warn!("Autostart task integrity check/repair failed: {err}");
+                }
+            }
+        }
+        let copy_status = omvix_windows::autostart::query_installed_copy_status();
         let bat = battery_be.get_battery_status().ok();
         let bat_svc = omvix_windows::battery_service::query_service_info();
         let kbd_type = kbd_be.detect_keyboard_type().unwrap_or(KeyboardType::Unknown);
@@ -358,6 +394,7 @@ fn run_worker_loop(
             None
         };
         if let Ok(mut st) = state.lock() {
+            st.installed_copy_status = copy_status;
             st.battery_status = bat;
             st.battery_service = bat_svc;
             st.keyboard_type = kbd_type;
@@ -1020,11 +1057,66 @@ fn handle_worker_command(
         WorkerCommand::RefreshBatteryService => {
             *last_applied_bat_mode = None;
             let svc_info = omvix_windows::battery_service::query_service_info();
+            let copy_status = omvix_windows::autostart::query_installed_copy_status();
             let bat = battery_be.get_battery_status().ok();
             if let Ok(mut st) = state.lock() {
                 st.battery_service = svc_info;
+                st.installed_copy_status = copy_status;
                 if bat.is_some() {
                     st.battery_status = bat;
+                }
+            }
+        }
+        WorkerCommand::SetAutostart(enabled) => {
+            cfg.general.start_with_windows = enabled;
+            let res = std::env::current_exe()
+                .map_err(Into::into)
+                .and_then(|exe| omvix_windows::autostart::set_autostart(enabled, &exe));
+            let copy_status = omvix_windows::autostart::query_installed_copy_status();
+            if let Ok(mut st) = state.lock() {
+                st.installed_copy_status = copy_status;
+            }
+            record_result(
+                state,
+                res,
+                if enabled {
+                    "Autostart enabled (protected copy)".to_string()
+                } else {
+                    "Autostart disabled".to_string()
+                },
+            );
+        }
+        WorkerCommand::UpdateInstalledCopy => {
+            let res = std::env::current_exe()
+                .map_err(Into::into)
+                .and_then(|exe| omvix_windows::autostart::install_or_update_gui_copy(&exe))
+                .and_then(|installed| {
+                    if cfg.general.start_with_windows
+                        || omvix_windows::autostart::is_elevated_task_autostart_enabled()
+                    {
+                        omvix_windows::autostart::create_elevated_task(&installed)?;
+                    }
+                    Ok(())
+                });
+            let copy_status = omvix_windows::autostart::query_installed_copy_status();
+            if let Ok(mut st) = state.lock() {
+                st.installed_copy_status = copy_status;
+            }
+            record_result(state, res, "Updated Program Files copy".to_string());
+        }
+        WorkerCommand::LaunchCustomCommand { command, args } => {
+            let res = omvix_windows::unelevated::launch_unelevated(&command, &args);
+            match res {
+                Ok(msg) => {
+                    if let Ok(mut st) = state.lock() {
+                        st.set_toast(msg, false);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("Custom command failed: {err}");
+                    if let Ok(mut st) = state.lock() {
+                        st.set_toast(err.to_string(), true);
+                    }
                 }
             }
         }
@@ -1036,6 +1128,8 @@ fn handle_worker_command(
                 || omvix_windows::battery_service::has_service_leftovers()
             {
                 let _ = omvix_windows::battery_service::uninstall_service_zero_trace();
+            } else {
+                omvix_windows::autostart::remove_autostart_and_installed_copy();
             }
             *last_applied_bat_mode = None;
             let _ = battery_be.set_charge_mode(BatteryChargeMode::Auto);
@@ -1055,16 +1149,15 @@ fn handle_worker_command(
                     let _ = display_be.set_refresh_rate(max_hz);
                 }
             }
-            if let Ok(exe) = std::env::current_exe() {
-                let _ = omvix_windows::autostart::set_autostart(false, &exe);
-            }
             let refreshed_disp = display_be.get_display_mode().ok();
             let refreshed_boost = tuning_be.read_cpu_boost_mode().ok();
             let refreshed_bat = battery_be.get_battery_status().ok();
             let refreshed_svc = omvix_windows::battery_service::query_service_info();
+            let refreshed_copy = omvix_windows::autostart::query_installed_copy_status();
             if let Ok(mut st) = state.lock() {
                 st.thermal_guard_active = false;
                 st.battery_service = refreshed_svc;
+                st.installed_copy_status = refreshed_copy;
                 if refreshed_disp.is_some() {
                     st.display_mode = refreshed_disp;
                 }
@@ -1284,6 +1377,7 @@ fn is_barrier_command(cmd: &WorkerCommand) -> bool {
             | WorkerCommand::UninstallBatteryServiceZeroTrace
             | WorkerCommand::InstallPawnIo
             | WorkerCommand::ReloadPawnIo
+            | WorkerCommand::UpdateInstalledCopy
             | WorkerCommand::ExportDiagnostics(_)
     )
 }
