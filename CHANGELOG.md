@@ -3,6 +3,29 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.5.0] - 2026-11-22
+
+### Added & Improved (Phase 3 — UX, Profiles, Accessibility & Signed Updater)
+- **GPU D3 Sleep Detection & Telemetry Stabilization (`telemetry.rs`, `monitor.rs`, `cockpit.rs`):**
+  - Zero-wake NVIDIA D3 sleep detection via `CM_Get_DevNode_PropertyW` (`DEVPKEY_Device_PowerData`), NVML reading smoothing/debounce, and clearer GPU throttle badges with `Sleeping` state indicator instead of misleading idle spikes.
+- **Safe Mode & 3-Launch 60s Crash-Loop Guard (`core/crash_guard.rs`, `main.rs`, `worker.rs`, `cockpit.rs`):**
+  - Added `--safe` startup flag, startup `Shift` key trigger, and automatic Safe Mode activation after 3 consecutive post-apply crashes within 60 seconds, blocking all BIOS/hardware writes until explicitly exited.
+- **5-Step First-Run Onboarding Wizard & Config v4 (`ui/wizard.rs`, `config.rs`, `main.rs`):**
+  - Added a guided 5-step first-run wizard covering language/theme setup, PawnIO CPU sensor, Battery Care presets, elevated autostart, and safety review (`CURRENT_CONFIG_VERSION = 4`).
+- **Tray Quick Submenus, Mode-Colored Icon, Native OSD & Windows Toast Alerts (`tray.rs`, `notifications.rs`, `main.rs`, `worker.rs`):**
+  - Added Performance Mode, Fan Mode, and Battery Limit quick submenus directly in the system tray, dynamic performance-mode colored icon ring, lightweight Win32 OSD popups on mode switch, and Windows Toast alerts for sensor loss and thermal guard events.
+- **Cockpit Status Pills & Fan Curve Presets / Safe Share (`cockpit.rs`, `performance.rs`, `core/models.rs`):**
+  - Added compact status pills in the cockpit, built-in fan curve presets (`Quiet`, `Balanced`, `Aggressive`, `OGH-like`), and safety-normalized curve import/export share codes.
+- **AC/DC Fan Presets, Per-App `.exe` Profiles & Windows Power Mode Sync (`core/app_profiles.rs`, `core/auto_profile.rs`, `backend-windows/processes.rs`, `backend-windows/power_mode.rs`, `ui/profiles.rs`, `worker.rs`):**
+  - Added automatic AC/Battery (`DC`) fan mode & curve preset switching, per-executable `.exe` foreground/running-process profiles with clean debounce & baseline restore, and automatic Windows Power Mode overlay synchronization.
+- **10-Step Hardware Change History (Undo) & 1-Click Support Bundle (`.zip`) (`core/history.rs`, `core/support_bundle.rs`, `ui/diagnostics.rs`, `ui/settings.rs`, `worker.rs`):**
+  - Added a 10-step ring buffer hardware change history with per-entry & last-change undo across Performance Mode, Fan Mode, Battery Limit, RGB Lighting, GPU MUX, CPU Boost, and Power Limits.
+  - Added pure-Rust sanitized `.zip` support bundle creation (`CRC-32` / ZIP archive builder) redacting Windows usernames/user paths and bundling truncated diagnostic logs.
+- **Telemetry CSV Export, Weekly Battery Health History, Hotkey Conflict Detection & Accessibility (`core/telemetry_csv.rs`, `core/battery_history.rs`, `backend-windows/hotkeys.rs`, `ui/charts.rs`, `ui/monitor.rs`, `ui/battery.rs`, `ui/hotkeys.rs`, `ui/settings.rs`, `theme.rs`, `main.rs`):**
+  - Added 600-row atomic CSV telemetry export with **Show in Folder**, persistent weekly battery health & wear tracking with a native trend chart, Win32 global hotkey conflict detection (`ERROR_HOTKEY_ALREADY_REGISTERED` + toast + 1-click alternative shortcuts), `%85–%130` UI font scaling, High Contrast theme preset, and full keyboard navigation (`Ctrl+1..4`, `Ctrl+Tab`, `Alt+Left/Right`, `Esc`).
+- **Signed GitHub Releases Updater (`core/updater.rs`, `backend-windows/updater.rs`, `worker.rs`, `ui/settings.rs`, `ui/cockpit.rs`, `main.rs`):**
+  - Added pinned `Borab55/hp-omen-hub-lite` GitHub Releases version check, mandatory `SHA256SUMS.txt` pure-Rust FIPS 180-4 verification, Authenticode signature policy (fail-closed signed-only by default with explicit user opt-in for SHA-256-only unsigned releases), zero-TOCTOU pre-install re-verification, atomic binary replacement with automatic rollback, and clean relaunch.
+
 ## [0.4.5] - 2026-11-21
 
 ### Added & Hardened (Phase 2 — Hardware Safety)
