@@ -22,7 +22,7 @@ use omvix_core::{
     DiagnosticReport, DiagnosticsBackend, DisplayBackend, DisplayModeInfo, FanCurve, FanMode,
     GpuMode, GpuSwitchBackend, HardwareChangeEntry, InstalledCopyStatus, KeyboardBackend,
     KeyboardType, PerformanceMode, Result, RevertPayload, RgbColor, SecurityStatus,
-    TelemetryBackend, TelemetrySnapshot, ThermalFanBackend, WindowsPowerOverlay,
+    TelemetryBackend, TelemetrySnapshot, ThermalFanBackend, UpdateUiStatus, WindowsPowerOverlay,
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -151,6 +151,8 @@ pub struct SharedState {
     pub telemetry_csv_rows: VecDeque<TelemetryCsvRow>,
     pub last_csv_export_path: Option<PathBuf>,
     pub battery_health_history: Vec<BatteryHealthRecord>,
+    pub update_status: UpdateUiStatus,
+    pub pending_update_relaunch: Option<PathBuf>,
     pub last_toast: Option<(String, bool, Instant)>,
 }
 
@@ -217,6 +219,8 @@ impl Default for SharedState {
             telemetry_csv_rows: VecDeque::with_capacity(MAX_TELEMETRY_CSV_ROWS),
             last_csv_export_path: None,
             battery_health_history: Vec::new(),
+            update_status: UpdateUiStatus::Idle,
+            pending_update_relaunch: None,
             last_toast: None,
         }
     }
@@ -297,6 +301,10 @@ pub enum WorkerCommand {
     CreateSupportBundle(PathBuf),
     ExportTelemetryCsv(PathBuf),
     RecordBatteryHealthNow,
+    CheckForUpdates { silent: bool },
+    DownloadAndVerifyUpdate,
+    ApplyStagedUpdate,
+    OpenReleasePage(String),
     Shutdown,
 }
 
@@ -689,6 +697,9 @@ fn run_worker_loop(
             st.diagnostics = diag;
         }
         request_repaint_if_visible(&ctx, &window_visible);
+        if cfg.general.auto_check_updates && initial_safe_mode.is_none() {
+            let _ = self_tx.send(WorkerCommand::CheckForUpdates { silent: true });
+        }
     }
 
     let mut last_telemetry = Instant::now();
@@ -2458,6 +2469,164 @@ fn handle_worker_command(
                 }
             }
         }
+        WorkerCommand::CheckForUpdates { silent } => {
+            let busy = state
+                .lock()
+                .map(|mut st| {
+                    let active = matches!(
+                        st.update_status,
+                        UpdateUiStatus::Checking
+                            | UpdateUiStatus::Downloading { .. }
+                            | UpdateUiStatus::Applying { .. }
+                    );
+                    if active {
+                        true
+                    } else {
+                        if !silent {
+                            st.update_status = UpdateUiStatus::Checking;
+                        }
+                        false
+                    }
+                })
+                .unwrap_or(true);
+            if !busy {
+                request_repaint_if_visible(ctx, window_visible);
+                let state_bg = Arc::clone(state);
+                let ctx_bg = ctx.clone();
+                let vis_bg = Arc::clone(window_visible);
+                thread::spawn(move || {
+                    let res =
+                        omvix_windows::updater::check_latest_release(env!("CARGO_PKG_VERSION"));
+                    if let Ok(mut st) = state_bg.lock() {
+                        match res {
+                            Ok(
+                                omvix_windows::updater::ReleaseCheckOutcome::UpdateAvailable(rel),
+                            ) => {
+                                st.set_toast(
+                                    format!("Update available: v{}", rel.version),
+                                    false,
+                                );
+                                st.update_status = UpdateUiStatus::UpdateAvailable(rel);
+                            }
+                            Ok(omvix_windows::updater::ReleaseCheckOutcome::UpToDate {
+                                latest_tag,
+                            }) => {
+                                st.update_status = UpdateUiStatus::UpToDate {
+                                    checked_version: latest_tag,
+                                    checked_at_utc: chrono::Utc::now()
+                                        .format("%Y-%m-%d %H:%M UTC")
+                                        .to_string(),
+                                };
+                                if !silent {
+                                    st.set_toast("Omvix Hub is up to date", false);
+                                }
+                            }
+                            Ok(
+                                omvix_windows::updater::ReleaseCheckOutcome::NoReleasesPublished,
+                            ) => {
+                                if !silent {
+                                    st.update_status = UpdateUiStatus::NoReleasesPublished;
+                                    st.set_toast(
+                                        "No published releases found on GitHub yet",
+                                        false,
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!("Update check failed: {err}");
+                                if !silent {
+                                    st.update_status = UpdateUiStatus::Error(err.to_string());
+                                    st.set_toast(err.to_string(), true);
+                                }
+                            }
+                        }
+                    }
+                    request_repaint_if_visible(&ctx_bg, &vis_bg);
+                });
+            }
+        }
+        WorkerCommand::DownloadAndVerifyUpdate => {
+            let rel_opt = state.lock().ok().and_then(|mut st| match st.update_status.clone() {
+                UpdateUiStatus::UpdateAvailable(rel) => {
+                    st.update_status = UpdateUiStatus::Downloading {
+                        version: rel.version.clone(),
+                    };
+                    st.set_toast("Downloading & verifying update...", false);
+                    Some(rel)
+                }
+                _ => None,
+            });
+            if let Some(rel) = rel_opt {
+                request_repaint_if_visible(ctx, window_visible);
+                let state_bg = Arc::clone(state);
+                let ctx_bg = ctx.clone();
+                let vis_bg = Arc::clone(window_visible);
+                thread::spawn(move || {
+                    let res = omvix_windows::updater::download_and_verify_release(&rel);
+                    if let Ok(mut st) = state_bg.lock() {
+                        match res {
+                            Ok(staged) => {
+                                st.update_status = UpdateUiStatus::ReadyToInstall(staged);
+                                st.set_toast("Update downloaded & SHA-256 verified", false);
+                            }
+                            Err(err) => {
+                                tracing::warn!("Update download/verify failed: {err}");
+                                st.update_status = UpdateUiStatus::Error(err.to_string());
+                                st.set_toast(err.to_string(), true);
+                            }
+                        }
+                    }
+                    request_repaint_if_visible(&ctx_bg, &vis_bg);
+                });
+            }
+        }
+        WorkerCommand::ApplyStagedUpdate => {
+            let staged_opt = state
+                .lock()
+                .ok()
+                .and_then(|mut st| match st.update_status.clone() {
+                    UpdateUiStatus::ReadyToInstall(staged) => {
+                        st.update_status = UpdateUiStatus::Applying {
+                            version: staged.version.clone(),
+                        };
+                        Some(staged)
+                    }
+                    _ => None,
+                });
+            if let Some(staged) = staged_opt {
+                request_repaint_if_visible(ctx, window_visible);
+                match omvix_windows::updater::apply_staged_update(
+                    &staged,
+                    cfg.general.allow_unsigned_sha256_updates,
+                ) {
+                    Ok(exe_path) => {
+                        if let Ok(mut st) = state.lock() {
+                            st.pending_update_relaunch = Some(exe_path);
+                            st.set_toast("Update applied — restarting Omvix Hub...", false);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("Applying staged update failed: {err}");
+                        if let Ok(mut st) = state.lock() {
+                            st.update_status = if staged.binary_path.is_file() {
+                                UpdateUiStatus::ReadyToInstall(staged)
+                            } else {
+                                UpdateUiStatus::Error(err.to_string())
+                            };
+                            st.set_toast(err.to_string(), true);
+                        }
+                    }
+                }
+                request_repaint_if_visible(ctx, window_visible);
+            }
+        }
+        WorkerCommand::OpenReleasePage(url) => {
+            if let Err(err) = omvix_windows::updater::open_verified_release_url(&url) {
+                if let Ok(mut st) = state.lock() {
+                    st.set_toast(err.to_string(), true);
+                }
+            }
+        }
     }
     false
 }
@@ -3298,6 +3467,10 @@ fn is_barrier_command(cmd: &WorkerCommand) -> bool {
             | WorkerCommand::CreateSupportBundle(_)
             | WorkerCommand::ExportTelemetryCsv(_)
             | WorkerCommand::RecordBatteryHealthNow
+            | WorkerCommand::CheckForUpdates { .. }
+            | WorkerCommand::DownloadAndVerifyUpdate
+            | WorkerCommand::ApplyStagedUpdate
+            | WorkerCommand::OpenReleasePage(_)
     )
 }
 

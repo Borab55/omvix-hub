@@ -2,8 +2,10 @@ use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, 
 use crate::ui::{control_committed, default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Slider, Ui};
+use omvix_core::updater::GITHUB_RELEASES_PAGE_URL;
 use omvix_core::{
-    AppConfig, CustomThemeConfig, I18n, LogLevel, clear_logs, tail_logs, total_log_bytes,
+    AppConfig, CustomThemeConfig, I18n, LogLevel, UpdateSignatureStatus, UpdateUiStatus,
+    clear_logs, tail_logs, total_log_bytes,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -476,6 +478,199 @@ pub fn render(
                 }
             });
         });
+    });
+
+    ui.add_space(8.0);
+
+    // Software Updates Card
+    card_frame(&theme_snapshot).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            section_title(ui, i18n.t("updates.title"), &theme_snapshot);
+            status_badge(
+                ui,
+                &format!("v{}", env!("CARGO_PKG_VERSION")),
+                crate::theme::accent_color(&theme_snapshot),
+            );
+            match &st.update_status {
+                UpdateUiStatus::Idle => {}
+                UpdateUiStatus::Checking => {
+                    status_badge(ui, &i18n.t("updates.checking"), STATUS_WARN);
+                }
+                UpdateUiStatus::UpToDate { .. } => {
+                    status_badge(ui, &i18n.t("updates.up_to_date"), STATUS_OK);
+                }
+                UpdateUiStatus::NoReleasesPublished => {
+                    status_badge(
+                        ui,
+                        &i18n.t("updates.no_releases"),
+                        ui.visuals().weak_text_color(),
+                    );
+                }
+                UpdateUiStatus::UpdateAvailable(_) => {
+                    status_badge(ui, &i18n.t("updates.available_badge"), STATUS_OK);
+                }
+                UpdateUiStatus::Downloading { .. } => {
+                    status_badge(ui, &i18n.t("updates.downloading"), STATUS_WARN);
+                }
+                UpdateUiStatus::ReadyToInstall(_) => {
+                    status_badge(ui, &i18n.t("updates.install_restart_btn"), STATUS_OK);
+                }
+                UpdateUiStatus::Applying { .. } => {
+                    status_badge(ui, &i18n.t("updates.applying"), STATUS_WARN);
+                }
+                UpdateUiStatus::Error(_) => {
+                    status_badge(ui, &i18n.t("common.status_error"), STATUS_ERR);
+                }
+            }
+        });
+        ui.add_space(4.0);
+
+        if ui
+            .checkbox(
+                &mut cfg.general.auto_check_updates,
+                i18n.t("updates.auto_check"),
+            )
+            .changed()
+        {
+            on_save();
+            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+        }
+        if ui
+            .checkbox(
+                &mut cfg.general.allow_unsigned_sha256_updates,
+                i18n.t("updates.allow_unsigned"),
+            )
+            .changed()
+        {
+            on_save();
+            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+        }
+        ui.weak(RichText::new(i18n.t("updates.signature_policy_note")).size(11.0));
+        ui.add_space(6.0);
+
+        let update_busy = matches!(
+            st.update_status,
+            UpdateUiStatus::Checking
+                | UpdateUiStatus::Downloading { .. }
+                | UpdateUiStatus::Applying { .. }
+        );
+        let release_page_url = match &st.update_status {
+            UpdateUiStatus::UpdateAvailable(rel) => rel.html_url.clone(),
+            UpdateUiStatus::ReadyToInstall(staged) => staged.release_url.clone(),
+            _ => GITHUB_RELEASES_PAGE_URL.to_string(),
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(!update_busy, egui::Button::new(i18n.t("updates.check_btn")))
+                .clicked()
+            {
+                on_cmd(WorkerCommand::CheckForUpdates { silent: false });
+            }
+            if ui.button(i18n.t("updates.open_github_btn")).clicked() {
+                on_cmd(WorkerCommand::OpenReleasePage(release_page_url));
+            }
+        });
+
+        match &st.update_status {
+            UpdateUiStatus::UpToDate {
+                checked_version,
+                checked_at_utc,
+            } => {
+                ui.add_space(4.0);
+                ui.weak(format!(
+                    "{} ({checked_version}, {checked_at_utc})",
+                    i18n.t("updates.up_to_date")
+                ));
+            }
+            UpdateUiStatus::NoReleasesPublished => {
+                ui.add_space(4.0);
+                ui.weak(i18n.t("updates.no_releases"));
+            }
+            UpdateUiStatus::UpdateAvailable(rel) => {
+                ui.add_space(6.0);
+                let size_mb = rel.binary_asset.size_bytes as f64 / (1024.0 * 1024.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(format!("v{}", rel.version));
+                    if !rel.published_at.is_empty() {
+                        ui.weak(&rel.published_at);
+                    }
+                    ui.weak(format!("• {} ({size_mb:.2} MB)", rel.binary_asset.name));
+                    if rel.checksum_asset.is_some() {
+                        status_badge(ui, &i18n.t("updates.checksum_ok"), STATUS_OK);
+                    } else {
+                        status_badge(ui, &i18n.t("updates.checksum_missing"), STATUS_WARN);
+                    }
+                });
+                if !rel.notes.trim().is_empty() {
+                    ui.collapsing(i18n.t("updates.release_notes"), |ui| {
+                        ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                            ui.label(&rel.notes);
+                        });
+                    });
+                }
+                ui.add_space(4.0);
+                ui.add_enabled_ui(rel.checksum_asset.is_some(), |ui| {
+                    if pill_button(
+                        ui,
+                        &i18n.t("updates.download_verify_btn"),
+                        rel.checksum_asset.is_some(),
+                        &theme_snapshot,
+                    )
+                    .clicked()
+                    {
+                        on_cmd(WorkerCommand::DownloadAndVerifyUpdate);
+                    }
+                });
+            }
+            UpdateUiStatus::ReadyToInstall(staged) => {
+                ui.add_space(6.0);
+                ui.monospace(format!("SHA-256: {}", staged.verified_sha256));
+                ui.horizontal_wrapped(|ui| match &staged.signature {
+                    UpdateSignatureStatus::AuthenticodeValid {
+                        subject,
+                        thumbprint,
+                        ..
+                    } => {
+                        status_badge(ui, &i18n.t("updates.sig_valid"), STATUS_OK);
+                        ui.weak(format!("{subject} ({thumbprint})"));
+                    }
+                    UpdateSignatureStatus::UnsignedSha256Only => {
+                        status_badge(ui, &i18n.t("updates.sig_unsigned"), STATUS_WARN);
+                    }
+                    UpdateSignatureStatus::Rejected(reason) => {
+                        status_badge(ui, &i18n.t("updates.sig_rejected"), STATUS_ERR);
+                        ui.colored_label(STATUS_ERR, reason);
+                    }
+                });
+                ui.add_space(4.0);
+                if staged.can_install(cfg.general.allow_unsigned_sha256_updates) {
+                    if pill_button(
+                        ui,
+                        &i18n.t("updates.install_restart_btn"),
+                        true,
+                        &theme_snapshot,
+                    )
+                    .clicked()
+                    {
+                        on_cmd(WorkerCommand::ApplyStagedUpdate);
+                    }
+                } else {
+                    ui.colored_label(
+                        STATUS_WARN,
+                        RichText::new(i18n.t("updates.blocked_by_sig_policy")).size(11.5),
+                    );
+                }
+            }
+            UpdateUiStatus::Error(msg) => {
+                ui.add_space(4.0);
+                ui.colored_label(STATUS_ERR, msg);
+            }
+            UpdateUiStatus::Idle
+            | UpdateUiStatus::Checking
+            | UpdateUiStatus::Downloading { .. }
+            | UpdateUiStatus::Applying { .. } => {}
+        }
     });
 
     ui.add_space(8.0);

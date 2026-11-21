@@ -14,6 +14,7 @@ pub mod support_bundle;
 pub mod telemetry_csv;
 pub mod thermal;
 pub mod traits;
+pub mod updater;
 
 pub use app_profiles::{AppProfileRule, AppProfilesConfig};
 pub use battery_history::{BatteryHealthHistory, BatteryHealthRecord};
@@ -29,3 +30,7 @@ pub use logging::{
 };
 pub use models::*;
 pub use traits::*;
+pub use updater::{
+    AuthenticodeInfo, ReleaseAsset, ReleaseInfo, SemVer, StagedUpdate, UpdateSignatureStatus,
+    UpdateUiStatus,
+};

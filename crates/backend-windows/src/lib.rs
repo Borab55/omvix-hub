@@ -39,6 +39,8 @@ pub mod tuning;
 #[cfg(windows)]
 pub mod unelevated;
 #[cfg(windows)]
+pub mod updater;
+#[cfg(windows)]
 pub mod wmi_bios;
 #[cfg(windows)]
 mod wmi_com;

@@ -320,6 +320,8 @@ pub struct GeneralConfig {
     pub theme: String,
     pub font_scale_pct: u8,
     pub telemetry_interval_ms: u64,
+    pub auto_check_updates: bool,
+    pub allow_unsigned_sha256_updates: bool,
     pub custom_theme: CustomThemeConfig,
 }
 
@@ -338,6 +340,8 @@ impl Default for GeneralConfig {
             theme: "dark".to_string(),
             font_scale_pct: 100,
             telemetry_interval_ms: 1000,
+            auto_check_updates: true,
+            allow_unsigned_sha256_updates: false,
             custom_theme: CustomThemeConfig::preset_dark_slate(),
         }
     }
@@ -1103,5 +1107,19 @@ mod tests {
         assert!(hc.is_high_contrast());
         assert!(!CustomThemeConfig::preset_dark_slate().is_high_contrast());
         assert!(CustomThemeConfig::presets().contains(&hc));
+    }
+
+    #[test]
+    fn updater_config_defaults_fail_closed_and_roundtrip() {
+        let mut cfg = AppConfig::default();
+        assert!(cfg.general.auto_check_updates);
+        assert!(!cfg.general.allow_unsigned_sha256_updates);
+
+        cfg.general.auto_check_updates = false;
+        cfg.general.allow_unsigned_sha256_updates = true;
+        let toml_text = toml::to_string_pretty(&cfg).expect("serialize");
+        let parsed: AppConfig = toml::from_str(&toml_text).expect("deserialize");
+        assert!(!parsed.general.auto_check_updates);
+        assert!(parsed.general.allow_unsigned_sha256_updates);
     }
 }

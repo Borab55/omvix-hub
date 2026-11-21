@@ -504,6 +504,8 @@ fn main() {
             Some(guard)
         }
     };
+    #[cfg(windows)]
+    omvix_windows::updater::cleanup_stale_update_artifacts();
 
     let crash_guard_path = crash_guard_path_for(&cfg_path);
     let mut crash_guard_state = CrashGuardState::load_from_path(&crash_guard_path);
@@ -1274,6 +1276,35 @@ impl OmvixApp {
         #[cfg(not(windows))]
         let _ = ctx;
     }
+
+    fn relaunch_updated_exe(&mut self, ctx: &egui::Context, exe_path: &std::path::Path) {
+        self.flush_config_if_dirty();
+        if let Ok(mut cg) = self.crash_guard.lock() {
+            cg.mark_clean_exit(current_unix_secs());
+            let _ = cg.save_to_path(&self.crash_guard_path);
+        }
+        self.stop_hotkeys();
+        #[cfg(windows)]
+        if let Some(guard) = &mut self.single_instance {
+            guard.release();
+        }
+        match std::process::Command::new(exe_path).spawn() {
+            Ok(_) => {
+                self.begin_quit(ctx);
+            }
+            Err(err) => {
+                tracing::error!(path = %exe_path.display(), "Failed to relaunch updated binary: {err}");
+                if let Ok(mut st) = self.state.lock() {
+                    st.set_toast(format!("Failed to relaunch updated binary: {err}"), true);
+                }
+                #[cfg(windows)]
+                {
+                    self.single_instance = SingleInstanceGuard::acquire().ok();
+                }
+                self.rebind_hotkeys(ctx);
+            }
+        }
+    }
 }
 
 /// Lightweight proxy sender so tray background actions execute immediately even while window is hidden.
@@ -1332,6 +1363,18 @@ impl eframe::App for OmvixApp {
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default();
+
+        if snapshot_state.pending_update_relaunch.is_some() {
+            let relaunch_path = self
+                .state
+                .lock()
+                .ok()
+                .and_then(|mut s| s.pending_update_relaunch.take());
+            if let Some(path) = relaunch_path {
+                self.relaunch_updated_exe(ctx, &path);
+                return;
+            }
+        }
 
         let mut pending_cmds: Vec<WorkerCommand> = Vec::new();
         let mut should_save = false;

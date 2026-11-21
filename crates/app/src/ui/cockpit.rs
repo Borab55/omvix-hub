@@ -8,7 +8,7 @@ use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, CornerRadius, RichText, Slider, Stroke, Ui};
 use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, PerformanceMode,
-    RgbColor, SafeModeReason,
+    RgbColor, SafeModeReason, UpdateUiStatus,
 };
 use std::time::Duration;
 
@@ -96,6 +96,25 @@ pub fn render(
             }
             if st.safe_mode.is_some() {
                 status_badge(ui, &i18n.t("safe_mode.badge"), STATUS_WARN);
+            }
+            match &st.update_status {
+                UpdateUiStatus::UpdateAvailable(rel) => {
+                    if clickable_status_badge(ui, &format!("v{} ↑", rel.version), STATUS_OK)
+                        .on_hover_text(i18n.t("updates.cockpit_tooltip"))
+                        .clicked()
+                    {
+                        actions.open_extra_subtab = Some(ExtraSubTab::Settings);
+                    }
+                }
+                UpdateUiStatus::ReadyToInstall(staged) => {
+                    if clickable_status_badge(ui, &format!("v{} ↑", staged.version), STATUS_OK)
+                        .on_hover_text(i18n.t("updates.cockpit_tooltip"))
+                        .clicked()
+                    {
+                        actions.open_extra_subtab = Some(ExtraSubTab::Settings);
+                    }
+                }
+                _ => {}
             }
         });
     });
