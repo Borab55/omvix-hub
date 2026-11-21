@@ -317,6 +317,15 @@ fn try_shell_elevate_self() -> std::result::Result<(), ()> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "--battery-service") {
+        if let Err(err) = omvix_windows::battery_service::run_service_dispatcher() {
+            eprintln!("OmvixBatteryService error: {err}");
+        }
+        return;
+    }
+
     let smoke_test = args.iter().any(|a| a == "--smoke-test");
     #[cfg(windows)]
     let no_elevate = args.iter().any(|a| a == "--no-elevate");

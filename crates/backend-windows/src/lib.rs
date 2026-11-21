@@ -3,6 +3,8 @@ pub mod autostart;
 #[cfg(windows)]
 pub mod battery;
 #[cfg(windows)]
+pub mod battery_service;
+#[cfg(windows)]
 pub mod display;
 #[cfg(windows)]
 pub mod emi;

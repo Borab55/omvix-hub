@@ -5,11 +5,11 @@ use omvix_core::thermal::{
     is_system_cool_for_zero_rpm,
 };
 use omvix_core::{
-    AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryStatus, ConflictServiceInfo,
-    CpuBoostMode, CpuTuningBackend, DiagnosticReport, DiagnosticsBackend, DisplayBackend,
-    DisplayModeInfo, FanMode, GpuMode, GpuSwitchBackend, KeyboardBackend, KeyboardType,
-    PerformanceMode, Result, RgbColor, SecurityStatus, TelemetryBackend, TelemetrySnapshot,
-    ThermalFanBackend,
+    AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryServiceInfo, BatteryStatus,
+    ConflictServiceInfo, CpuBoostMode, CpuTuningBackend, DiagnosticReport, DiagnosticsBackend,
+    DisplayBackend, DisplayModeInfo, FanMode, GpuMode, GpuSwitchBackend, KeyboardBackend,
+    KeyboardType, PerformanceMode, Result, RgbColor, SecurityStatus, TelemetryBackend,
+    TelemetrySnapshot, ThermalFanBackend,
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -102,6 +102,8 @@ pub struct SharedState {
     pub thermal_guard_active: bool,
     pub pawnio_installing: bool,
     pub pawnio_cpu_active: bool,
+    pub battery_service: BatteryServiceInfo,
+    pub battery_service_busy: bool,
     pub battery_status: Option<BatteryStatus>,
     pub display_mode: Option<DisplayModeInfo>,
     pub diagnostics: Option<DiagnosticReport>,
@@ -137,6 +139,8 @@ impl Default for SharedState {
             thermal_guard_active: false,
             pawnio_installing: false,
             pawnio_cpu_active: false,
+            battery_service: BatteryServiceInfo::default(),
+            battery_service_busy: false,
             battery_status: None,
             display_mode: None,
             diagnostics: None,
@@ -205,6 +209,12 @@ pub enum WorkerCommand {
     SetUndervolt(i16),
     InstallPawnIo,
     ReloadPawnIo,
+    InstallBatteryService,
+    StartBatteryService,
+    StopBatteryService,
+    RestartBatteryService,
+    UninstallBatteryServiceZeroTrace,
+    RefreshBatteryService,
     RestoreAllDefaults,
     RefreshDiagnostics,
     ExportDiagnostics(PathBuf),
@@ -333,10 +343,11 @@ fn run_worker_loop(
         request_repaint_if_visible(&ctx, &window_visible);
     }
 
-    // Phase 2 discovery: battery, keyboard type, GPU MUX mode
+    // Phase 2 discovery: battery, background service, keyboard type, GPU MUX mode
     {
         let is_admin = system_info::is_process_elevated();
         let bat = battery_be.get_battery_status().ok();
+        let bat_svc = omvix_windows::battery_service::query_service_info();
         let kbd_type = kbd_be.detect_keyboard_type().unwrap_or(KeyboardType::Unknown);
         let gpu_mode = if is_admin {
             gpu_be.get_gpu_mode().ok()
@@ -345,6 +356,7 @@ fn run_worker_loop(
         };
         if let Ok(mut st) = state.lock() {
             st.battery_status = bat;
+            st.battery_service = bat_svc;
             st.keyboard_type = kbd_type;
             st.gpu_mode = gpu_mode;
         }
@@ -549,7 +561,8 @@ fn run_worker_loop(
                     .lock()
                     .map(|s| s.hp_charge_service_running)
                     .unwrap_or(false);
-                if cfg.battery.enabled && !conflict_active {
+                let own_svc_running = omvix_windows::battery_service::is_service_running();
+                if cfg.battery.enabled && !conflict_active && !own_svc_running {
                     let target = battery_engine.evaluate(
                         &mut cfg.battery,
                         bat.charge_percent,
@@ -655,17 +668,35 @@ fn handle_worker_command(
                     tracing::info!("Restored BIOS Auto fan control on clean shutdown");
                 }
             }
-            if cfg.battery.enabled && !cfg.battery.hold_when_shutdown {
-                if let Err(err) = battery_be.set_charge_mode(BatteryChargeMode::Auto) {
-                    tracing::warn!("Failed to restore normal battery charging on shutdown: {err}");
-                } else {
-                    tracing::info!("Restored normal battery charging (0x2B Auto) on clean shutdown");
+            if !omvix_windows::battery_service::is_service_running() && cfg.battery.enabled {
+                if !cfg.battery.hold_when_shutdown {
+                    if let Err(err) = battery_be.set_charge_mode(BatteryChargeMode::Auto) {
+                        tracing::warn!("Failed to restore normal battery charging on shutdown: {err}");
+                    } else {
+                        tracing::info!("Restored normal battery charging (0x2B Auto) on clean shutdown");
+                    }
+                } else if let Ok(bat) = battery_be.get_battery_status() {
+                    if !cfg.battery.one_time_full_charge
+                        && bat.charge_percent >= 40
+                        && bat.charge_percent >= cfg.battery.start_threshold_pct
+                    {
+                        if let Err(err) = battery_be.set_charge_mode(BatteryChargeMode::Hold) {
+                            tracing::warn!("Failed to apply Hold mode on clean shutdown: {err}");
+                        } else {
+                            tracing::info!("Applied battery Hold (0x0300) on clean shutdown");
+                        }
+                    }
                 }
             }
             return true;
         }
         WorkerCommand::UpdateConfig(new_cfg) => {
             *cfg = new_cfg;
+            if let Err(err) =
+                omvix_windows::battery_service::sync_config_if_installed(&cfg.battery)
+            {
+                tracing::debug!("Failed syncing battery service config: {err}");
+            }
         }
         WorkerCommand::SetTelemetryIntervalMs(ms) => {
             cfg.general.telemetry_interval_ms = ms.clamp(100, 10_000);
@@ -719,6 +750,7 @@ fn handle_worker_command(
             record_result(state, res, format!("Fan mode -> {mode:?}"));
         }
         WorkerCommand::ApplyBatteryNow => {
+            let _ = omvix_windows::battery_service::sync_config_if_installed(&cfg.battery);
             if let Ok(bat) = battery_be.get_battery_status() {
                 let target = battery_engine.evaluate(
                     &mut cfg.battery,
@@ -728,6 +760,11 @@ fn handle_worker_command(
                 let res = battery_be.set_charge_mode(target);
                 if res.is_ok() {
                     *last_applied_bat_mode = Some(target);
+                }
+                if let Ok(refreshed) = battery_be.get_battery_status() {
+                    if let Ok(mut st) = state.lock() {
+                        st.battery_status = Some(refreshed);
+                    }
                 }
                 record_result(state, res, format!("Battery charge mode -> {target:?}"));
             }
@@ -840,10 +877,77 @@ fn handle_worker_command(
                 }
             }
         }
+        WorkerCommand::InstallBatteryService => {
+            let bat_cfg = cfg.battery.clone();
+            spawn_battery_service_task(
+                state,
+                self_tx,
+                ctx,
+                window_visible,
+                "Installing / updating OmvixBatteryService...",
+                move || omvix_windows::battery_service::install_or_update_service(&bat_cfg),
+            );
+        }
+        WorkerCommand::StartBatteryService => {
+            spawn_battery_service_task(
+                state,
+                self_tx,
+                ctx,
+                window_visible,
+                "Starting OmvixBatteryService...",
+                omvix_windows::battery_service::start_service,
+            );
+        }
+        WorkerCommand::StopBatteryService => {
+            spawn_battery_service_task(
+                state,
+                self_tx,
+                ctx,
+                window_visible,
+                "Stopping OmvixBatteryService...",
+                omvix_windows::battery_service::stop_service,
+            );
+        }
+        WorkerCommand::RestartBatteryService => {
+            spawn_battery_service_task(
+                state,
+                self_tx,
+                ctx,
+                window_visible,
+                "Restarting OmvixBatteryService...",
+                omvix_windows::battery_service::restart_service,
+            );
+        }
+        WorkerCommand::UninstallBatteryServiceZeroTrace => {
+            spawn_battery_service_task(
+                state,
+                self_tx,
+                ctx,
+                window_visible,
+                "Removing OmvixBatteryService & cleaning all traces...",
+                omvix_windows::battery_service::uninstall_service_zero_trace,
+            );
+        }
+        WorkerCommand::RefreshBatteryService => {
+            *last_applied_bat_mode = None;
+            let svc_info = omvix_windows::battery_service::query_service_info();
+            let bat = battery_be.get_battery_status().ok();
+            if let Ok(mut st) = state.lock() {
+                st.battery_service = svc_info;
+                if bat.is_some() {
+                    st.battery_status = bat;
+                }
+            }
+        }
         WorkerCommand::RestoreAllDefaults => {
             *thermal_guard = ThermalSafetyGuard::new();
             let _ = thermal_be.set_fan_mode(FanMode::Auto, None);
             let _ = thermal_be.set_performance_mode(PerformanceMode::Balanced);
+            if omvix_windows::battery_service::is_service_installed()
+                || omvix_windows::battery_service::has_service_leftovers()
+            {
+                let _ = omvix_windows::battery_service::uninstall_service_zero_trace();
+            }
             *last_applied_bat_mode = None;
             let _ = battery_be.set_charge_mode(BatteryChargeMode::Auto);
             let _ = tuning_be.set_cpu_boost_mode(CpuBoostMode::Aggressive);
@@ -868,8 +972,10 @@ fn handle_worker_command(
             let refreshed_disp = display_be.get_display_mode().ok();
             let refreshed_boost = tuning_be.read_cpu_boost_mode().ok();
             let refreshed_bat = battery_be.get_battery_status().ok();
+            let refreshed_svc = omvix_windows::battery_service::query_service_info();
             if let Ok(mut st) = state.lock() {
                 st.thermal_guard_active = false;
+                st.battery_service = refreshed_svc;
                 if refreshed_disp.is_some() {
                     st.display_mode = refreshed_disp;
                 }
@@ -940,6 +1046,51 @@ fn run_worker_loop(
             return;
         }
     }
+}
+
+#[cfg(windows)]
+fn spawn_battery_service_task<F>(
+    state: &Arc<Mutex<SharedState>>,
+    self_tx: &Sender<WorkerCommand>,
+    ctx: &Option<egui::Context>,
+    window_visible: &Arc<AtomicBool>,
+    pending_msg: &str,
+    op: F,
+) where
+    F: FnOnce() -> Result<String> + Send + 'static,
+{
+    let already_busy = state
+        .lock()
+        .map(|mut st| {
+            if st.battery_service_busy {
+                true
+            } else {
+                st.battery_service_busy = true;
+                st.set_toast(pending_msg, false);
+                false
+            }
+        })
+        .unwrap_or(true);
+    if already_busy {
+        return;
+    }
+
+    let state_bg = Arc::clone(state);
+    let tx_bg = self_tx.clone();
+    let ctx_bg = ctx.clone();
+    let vis_bg = Arc::clone(window_visible);
+    thread::spawn(move || {
+        let res = op();
+        if let Ok(mut st) = state_bg.lock() {
+            st.battery_service_busy = false;
+            match res {
+                Ok(msg) => st.set_toast(msg, false),
+                Err(err) => st.set_toast(err.to_string(), true),
+            }
+        }
+        let _ = tx_bg.send(WorkerCommand::RefreshBatteryService);
+        request_repaint_if_visible(&ctx_bg, &vis_bg);
+    });
 }
 
 fn record_result(state: &Arc<Mutex<SharedState>>, res: Result<()>, ok_msg: String) {

@@ -3,6 +3,17 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.4.2] - 2026-11-21
+
+### Added & Changed
+- **Shutdown Charge Hold Default On (`config.rs`, `worker.rs`):**
+  - Changed `BatteryConfig::default().hold_when_shutdown` to `true` and added `AppConfig::config_version = 2` so pre-v0.4.2 configs automatically migrate `hold_when_shutdown` to `true` once without overriding explicit user toggles afterwards.
+  - When `OmvixBatteryService` is not installed and `hold_when_shutdown == true`, quitting Omvix Hub cleanly applies `Hold (0x0300)` instead of resetting to `Auto` (as long as battery `>= 40%` and `>= start_threshold_pct`).
+- **Native Pure-Rust Windows Battery Background Service (`battery_service.rs`, `main.rs`, `worker.rs`, `battery.rs`):**
+  - Added built-in Windows SCM service mode (`OmvixBatteryService` via `--battery-service` flag in `omvix-hub.exe`, installed cleanly to `C:\Program Files\OmvixHub\omvix-battery-svc.exe` with config & logs under `C:\ProgramData\OmvixHub`).
+  - Handles `SERVICE_CONTROL_STOP`, `SERVICE_CONTROL_PRESHUTDOWN`, and `SERVICE_CONTROL_POWEREVENT` (`PBT_APMSUSPEND` / `PBT_APMRESUME*`) synchronously so `Hold (0x0300)` is written before sleep/hibernate/shutdown (when above `off_min_pct = 40%` and `start_threshold_pct`), and hot-reloads threshold/mode changes made in the UI within 2 seconds.
+  - Added full service status, visible binary/data folder paths with 1-click **Open Folder** buttons, Install/Update/Start/Stop/Restart actions, and 2-step **Zero-Trace Uninstall** in the **Battery Care** tab (stops/deletes SCM service, restores `0x2B Auto`, removes both `C:\Program Files\OmvixHub` and `C:\ProgramData\OmvixHub`, also wired into **Restore All Defaults**).
+
 ## [0.4.1] - 2026-11-21
 
 ### Added & Improved
