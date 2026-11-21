@@ -38,9 +38,41 @@ enum AppSignal {
     SyncVisibility(bool),
     TrayPerfChanged(PerformanceMode),
     TrayFanChanged(omvix_core::FanMode),
-    TrayBatteryToggled,
+    TrayBatteryPreset {
+        enabled: bool,
+        stop_pct: u8,
+        start_pct: u8,
+    },
     OmenKeyNonToggle,
     QuitRequested,
+}
+
+fn perf_mode_label(i18n: &I18n, mode: PerformanceMode) -> String {
+    match mode {
+        PerformanceMode::Eco => i18n.t("thermal.mode_eco"),
+        PerformanceMode::Quiet => i18n.t("thermal.mode_quiet"),
+        PerformanceMode::Balanced => i18n.t("thermal.mode_balanced"),
+        PerformanceMode::Performance => i18n.t("thermal.mode_performance"),
+    }
+}
+
+fn fan_mode_label(i18n: &I18n, mode: omvix_core::FanMode) -> String {
+    match mode {
+        omvix_core::FanMode::Auto => i18n.t("fan.mode_auto"),
+        omvix_core::FanMode::Max => i18n.t("fan.mode_max"),
+        omvix_core::FanMode::Manual => i18n.t("fan.mode_manual"),
+        omvix_core::FanMode::CustomCurve => i18n.t("fan.mode_curve"),
+    }
+}
+
+fn show_mode_change_osd(title: &str, subtitle: &str, mode: PerformanceMode) {
+    #[cfg(windows)]
+    {
+        let rgb = tray::performance_mode_ring_rgb(mode).0;
+        omvix_windows::notifications::show_mode_osd(title, subtitle, rgb);
+    }
+    #[cfg(not(windows))]
+    let _ = (title, subtitle, mode);
 }
 
 fn omen_action_to_code(action: &OmenKeyAction) -> u8 {
@@ -685,9 +717,7 @@ impl OmvixApp {
                     TrayAction::SetPerformance(mode) => {
                         let _ = _worker_clone_for_tray.send(WorkerCommand::SetPerformanceMode(mode));
                         let _ = tray_tx.send(AppSignal::TrayPerfChanged(mode));
-                        if tray_vis.load(Ordering::Relaxed) {
-                            wake_ctx.request_repaint();
-                        }
+                        wake_ctx.request_repaint();
                     }
                     TrayAction::SetFan(mode) => {
                         let _ = _worker_clone_for_tray.send(WorkerCommand::SetFanMode {
@@ -695,12 +725,18 @@ impl OmvixApp {
                             manual_speed_pct: Some(tray_cfg_manual_speed),
                         });
                         let _ = tray_tx.send(AppSignal::TrayFanChanged(mode));
-                        if tray_vis.load(Ordering::Relaxed) {
-                            wake_ctx.request_repaint();
-                        }
+                        wake_ctx.request_repaint();
                     }
-                    TrayAction::ToggleBatteryLimit => {
-                        let _ = tray_tx.send(AppSignal::TrayBatteryToggled);
+                    TrayAction::ApplyBatteryPreset {
+                        enabled,
+                        stop_pct,
+                        start_pct,
+                    } => {
+                        let _ = tray_tx.send(AppSignal::TrayBatteryPreset {
+                            enabled,
+                            stop_pct,
+                            start_pct,
+                        });
                         wake_ctx.request_repaint();
                     }
                     TrayAction::Quit => {
@@ -920,12 +956,24 @@ impl OmvixApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.flush_config_if_dirty();
         }
-        if let Some(tray) = &self.tray {
+        if let Some(tray) = &mut self.tray {
             tray.update_labels(&self.i18n, visible);
         }
     }
 
     fn cycle_performance_mode(&mut self) {
+        if self
+            .state
+            .lock()
+            .ok()
+            .and_then(|s| s.safe_mode)
+            .is_some()
+        {
+            self.send_cmd(WorkerCommand::SetPerformanceMode(
+                self.cfg.thermal_fan.performance_mode,
+            ));
+            return;
+        }
         let next = match self.cfg.thermal_fan.performance_mode {
             PerformanceMode::Eco => PerformanceMode::Quiet,
             PerformanceMode::Quiet => PerformanceMode::Balanced,
@@ -935,6 +983,11 @@ impl OmvixApp {
         self.cfg.thermal_fan.performance_mode = next;
         self.save_config();
         self.send_cmd(WorkerCommand::SetPerformanceMode(next));
+        show_mode_change_osd(
+            &self.i18n.t("osd.perf_mode_title"),
+            &perf_mode_label(&self.i18n, next),
+            next,
+        );
     }
 
     fn launch_custom_omen_command(&self) {
@@ -988,20 +1041,67 @@ impl OmvixApp {
                     if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
                         self.cfg.thermal_fan.performance_mode = mode;
                         self.save_config();
+                        show_mode_change_osd(
+                            &self.i18n.t("osd.perf_mode_title"),
+                            &perf_mode_label(&self.i18n, mode),
+                            mode,
+                        );
+                    } else if let Some(tray) = &mut self.tray {
+                        tray.invalidate_checked_cache();
                     }
                 }
                 AppSignal::TrayFanChanged(mode) => {
                     if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
                         self.cfg.thermal_fan.fan_mode = mode;
                         self.save_config();
+                        show_mode_change_osd(
+                            &self.i18n.t("osd.fan_mode_title"),
+                            &fan_mode_label(&self.i18n, mode),
+                            self.cfg.thermal_fan.performance_mode,
+                        );
+                    } else if let Some(tray) = &mut self.tray {
+                        tray.invalidate_checked_cache();
                     }
                 }
-                AppSignal::TrayBatteryToggled => {
+                AppSignal::TrayBatteryPreset {
+                    enabled,
+                    stop_pct,
+                    start_pct,
+                } => {
                     if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
-                        self.cfg.battery.enabled = !self.cfg.battery.enabled;
+                        self.cfg.battery.enabled = enabled;
+                        self.cfg.battery.stop_threshold_pct = stop_pct;
+                        self.cfg.battery.start_threshold_pct = start_pct;
+                        self.cfg.battery.one_time_full_charge = false;
+                        self.cfg.battery.mode = if enabled {
+                            omvix_core::BatteryChargeMode::Inhibit
+                        } else {
+                            omvix_core::BatteryChargeMode::Auto
+                        };
+                        self.cfg.battery.active_profile_id = Some(
+                            match stop_pct {
+                                60 => "desktop",
+                                80 => "balanced",
+                                90 => "travel",
+                                _ => "full",
+                            }
+                            .to_string(),
+                        );
                         self.save_config();
                         self.send_cmd(WorkerCommand::UpdateConfig(self.cfg.clone()));
                         self.send_cmd(WorkerCommand::ApplyBatteryNow);
+                        let sub = if enabled {
+                            format!("{stop_pct}%")
+                        } else {
+                            self.i18n.t("battery.preset_full")
+                        };
+                        show_mode_change_osd(
+                            &self.i18n.t("osd.battery_profile_title"),
+                            &sub,
+                            self.cfg.thermal_fan.performance_mode,
+                        );
+                    } else if let Some(tray) = &mut self.tray {
+                        tray.invalidate_checked_cache();
                     }
                 }
                 AppSignal::OmenKeyNonToggle => match self.cfg.hotkeys.omen_key_action {
@@ -1107,7 +1207,14 @@ impl eframe::App for OmvixApp {
                 .as_ref()
                 .map(|b| b.current_mode)
                 .unwrap_or(omvix_core::BatteryChargeMode::Auto);
-            tray.update_battery_badge(bat_mode, &self.i18n);
+            tray.update_visual_state(
+                self.cfg.thermal_fan.performance_mode,
+                self.cfg.thermal_fan.fan_mode,
+                self.cfg.battery.enabled,
+                self.cfg.battery.stop_threshold_pct,
+                bat_mode,
+                &self.i18n,
+            );
         }
 
         if !self.quitting && self.worker.as_ref().is_some_and(|w| !w.is_alive()) {
@@ -1166,7 +1273,7 @@ impl eframe::App for OmvixApp {
                     &mut mark_save,
                 );
                 if res.language_changed {
-                    if let Some(tray) = &self.tray {
+                    if let Some(tray) = &mut self.tray {
                         tray.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
                     }
                 }
@@ -1431,7 +1538,7 @@ impl eframe::App for OmvixApp {
                                                 &mut mark_save,
                                             );
                                             if res.language_changed {
-                                                if let Some(tray) = &self.tray {
+                                                if let Some(tray) = &mut self.tray {
                                                     tray.update_labels(
                                                         &self.i18n,
                                                         self.window_visible.load(Ordering::Relaxed),
@@ -1485,7 +1592,7 @@ impl eframe::App for OmvixApp {
             self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();
             theme::apply_theme(ctx, &self.cfg.general.custom_theme);
-            if let Some(tray) = &self.tray {
+            if let Some(tray) = &mut self.tray {
                 tray.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
             }
             should_save = true;

@@ -5,10 +5,13 @@
   "app.tray.hide": "Hide to Tray",
   "app.tray.quit": "Quit Omvix Hub",
   "app.tray.mode_eco": "Mode: Eco",
+  "app.tray.mode_quiet": "Mode: Quiet",
   "app.tray.mode_balanced": "Mode: Balanced",
   "app.tray.mode_performance": "Mode: Performance",
   "app.tray.fan_auto": "Fan: Auto",
   "app.tray.fan_max": "Fan: Max",
+  "app.tray.fan_manual": "Fan: Manual",
+  "app.tray.fan_curve": "Fan: Custom Curve",
   "app.tray.toggle_battery_limit": "Toggle Battery Limit",
   "app.tray.tooltip_hold": "Omvix Hub — Battery Hold active (will not charge)",
   "app.tray.tooltip_inhibit": "Omvix Hub — Battery Inhibit active (limit enabled)",
@@ -357,5 +360,9 @@
   "wizard.summary_autostart": "Autostart",
   "wizard.summary_pawnio": "CPU Die Sensor",
   "wizard.summary_battery": "Battery Limit",
-  "wizard.safe_mode_tip": "Tip: Hold Shift during startup or launch with --safe anytime to open in read-only Safe Mode."
+  "wizard.safe_mode_tip": "Tip: Hold Shift during startup or launch with --safe anytime to open in read-only Safe Mode.",
+
+  "osd.perf_mode_title": "Performance Mode",
+  "osd.fan_mode_title": "Fan Control",
+  "osd.battery_profile_title": "Battery Profile"
 }

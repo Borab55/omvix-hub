@@ -15,6 +15,8 @@ pub mod hotkeys;
 #[cfg(windows)]
 pub mod keyboard;
 #[cfg(windows)]
+pub mod notifications;
+#[cfg(windows)]
 pub mod paths;
 #[cfg(windows)]
 pub mod pawnio;

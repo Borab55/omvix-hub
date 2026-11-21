@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 use omvix_windows::{
     WindowsBatteryBackend, WindowsCpuTuningBackend, WindowsDiagnosticsBackend,
     WindowsDisplayBackend, WindowsGpuSwitchBackend, WindowsKeyboardBackend,
-    WindowsTelemetryBackend, WindowsThermalFanBackend, system_info, wmi_bios::HpWmiBios,
+    WindowsTelemetryBackend, WindowsThermalFanBackend,
+    notifications::{ToastSeverity, send_windows_toast, show_mode_osd},
+    system_info, wmi_bios::HpWmiBios,
 };
 
 const MAX_HISTORY_SAMPLES: usize = 180;
@@ -632,6 +634,7 @@ fn run_worker_loop(
     let mut hw_applied_recorded = false;
     let mut stabilized_recorded = false;
     let mut last_stability_check = Instant::now();
+    let mut bat_limit_toast_sent = false;
 
     loop {
         let interval_ms = cfg.general.telemetry_interval_ms.clamp(100, 10_000);
@@ -771,6 +774,11 @@ fn run_worker_loop(
                             timeout_secs = DEFAULT_SENSOR_LOSS_TIMEOUT_SECS,
                             "All temperature sensors missing; forcing BIOS Auto fan control"
                         );
+                        send_windows_toast(
+                            "Omvix Hub — Sensor Loss",
+                            "Temperature sensors lost (>6s). Fans reverted to BIOS Auto mode.",
+                            ToastSeverity::Warning,
+                        );
                         if let Ok(mut st) = state.lock() {
                             st.sensor_loss_active = true;
                             st.set_toast(
@@ -805,12 +813,22 @@ fn run_worker_loop(
                                     &crash_guard_path,
                                     &mut hw_applied_recorded,
                                 );
-                                if let Err(err) =
-                                    thermal_be.set_performance_mode(action.performance_mode)
-                                {
-                                    tracing::warn!(
-                                        "Auto-profile performance mode write failed: {err}"
-                                    );
+                                match thermal_be.set_performance_mode(action.performance_mode) {
+                                    Ok(()) => {
+                                        let src = if ac { "AC" } else { "Battery" };
+                                        let rgb =
+                                            crate::tray::performance_mode_ring_rgb(action.performance_mode).0;
+                                        show_mode_osd(
+                                            &format!("Auto-Profile ({src})"),
+                                            &format!("{:?}", action.performance_mode),
+                                            rgb,
+                                        );
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            "Auto-profile performance mode write failed: {err}"
+                                        );
+                                    }
                                 }
                             }
                             if let Some(hz) = action.refresh_hz {
@@ -890,6 +908,11 @@ fn run_worker_loop(
                                 match retry_ctrl.record_attempt_result(res.is_ok(), t) {
                                     GuardMaxAction::FallbackToAuto(msg) => {
                                         tracing::error!("{msg}");
+                                        send_windows_toast(
+                                            "Omvix Hub — Thermal Guard Fallback",
+                                            &msg,
+                                            ToastSeverity::Error,
+                                        );
                                         if let Err(err) = thermal_be.set_fan_mode(FanMode::Auto, None) {
                                             tracing::error!("Guard Auto fan fallback failed: {err}");
                                         }
@@ -899,6 +922,11 @@ fn run_worker_loop(
                                         }
                                     }
                                     _ => {
+                                        send_windows_toast(
+                                            "Omvix Hub — Thermal Guard",
+                                            &format!("Emergency Max Fan active ({reason})."),
+                                            ToastSeverity::Warning,
+                                        );
                                         if let Ok(mut st) = state.lock() {
                                             st.thermal_guard_active = true;
                                             st.set_toast(format!("Thermal Guard: {reason} -> Max Fan"), true);
@@ -951,6 +979,11 @@ fn run_worker_loop(
                                             retry_ctrl.record_attempt_result(res.is_ok(), t)
                                         {
                                             tracing::error!("{msg}");
+                                            send_windows_toast(
+                                                "Omvix Hub — Thermal Guard Fallback",
+                                                &msg,
+                                                ToastSeverity::Error,
+                                            );
                                             if let Err(err) =
                                                 thermal_be.set_fan_mode(FanMode::Auto, None)
                                             {
@@ -969,6 +1002,11 @@ fn run_worker_loop(
                                     }
                                     GuardMaxAction::FallbackToAuto(msg) => {
                                         tracing::error!("{msg}");
+                                        send_windows_toast(
+                                            "Omvix Hub — Thermal Guard Fallback",
+                                            &msg,
+                                            ToastSeverity::Error,
+                                        );
                                         record_hw_write_attempt(
                                             &crash_guard,
                                             &crash_guard_path,
@@ -1069,6 +1107,28 @@ fn run_worker_loop(
                             last_applied_bat_mode = Some(target);
                         }
                     }
+                }
+                if cfg.battery.enabled
+                    && !cfg.battery.one_time_full_charge
+                    && bat.ac_connected
+                    && bat.charge_percent >= cfg.battery.stop_threshold_pct
+                {
+                    if !bat_limit_toast_sent {
+                        bat_limit_toast_sent = true;
+                        send_windows_toast(
+                            "Omvix Hub — Battery Care",
+                            &format!(
+                                "Battery charge limit reached ({}%). Charging paused.",
+                                bat.charge_percent
+                            ),
+                            ToastSeverity::Info,
+                        );
+                    }
+                } else if !cfg.battery.enabled
+                    || !bat.ac_connected
+                    || bat.charge_percent < cfg.battery.start_threshold_pct
+                {
+                    bat_limit_toast_sent = false;
                 }
                 if let Ok(mut st) = state.lock() {
                     st.battery_status = Some(bat);

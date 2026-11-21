@@ -5,10 +5,13 @@
   "app.tray.hide": "Tepsiye Gizle",
   "app.tray.quit": "Omvix Hub'dan Çık",
   "app.tray.mode_eco": "Mod: Eco",
+  "app.tray.mode_quiet": "Mod: Sessiz",
   "app.tray.mode_balanced": "Mod: Dengeli",
   "app.tray.mode_performance": "Mod: Performans",
   "app.tray.fan_auto": "Fan: Otomatik",
   "app.tray.fan_max": "Fan: Maksimum",
+  "app.tray.fan_manual": "Fan: Manuel",
+  "app.tray.fan_curve": "Fan: Özel Eğri",
   "app.tray.toggle_battery_limit": "Şarj Sınırını Aç/Kapat",
   "app.tray.tooltip_hold": "Omvix Hub — Batarya Tut (Hold) aktif (şarj olmaz)",
   "app.tray.tooltip_inhibit": "Omvix Hub — Batarya Sınırla (Inhibit) aktif",
@@ -357,5 +360,9 @@
   "wizard.summary_autostart": "Oto-Başlatma",
   "wizard.summary_pawnio": "CPU Sensörü",
   "wizard.summary_battery": "Batarya Sınırı",
-  "wizard.safe_mode_tip": "İpucu: Açılışta Shift tuşuna basılı tutarak veya --safe bayrağıyla donanım yazma olmadan Güvenli Modda açabilirsiniz."
+  "wizard.safe_mode_tip": "İpucu: Açılışta Shift tuşuna basılı tutarak veya --safe bayrağıyla donanım yazma olmadan Güvenli Modda açabilirsiniz.",
+
+  "osd.perf_mode_title": "Performans Modu",
+  "osd.fan_mode_title": "Fan Kontrolü",
+  "osd.battery_profile_title": "Batarya Profili"
 }
