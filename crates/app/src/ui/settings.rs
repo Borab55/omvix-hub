@@ -6,9 +6,6 @@ use omvix_core::{
     AppConfig, CustomThemeConfig, I18n, LogLevel, clear_logs, tail_logs, total_log_bytes,
 };
 
-#[cfg(windows)]
-use omvix_windows::autostart;
-
 #[derive(Debug, Default, Clone)]
 pub struct SettingsThemeDraft {
     pub import_input: String,
@@ -141,22 +138,37 @@ pub fn render(
                 )
                 .changed()
             {
-                #[cfg(windows)]
-                if let Ok(exe) = std::env::current_exe() {
-                    if let Err(err) = autostart::set_autostart(cfg.general.start_with_windows, &exe)
-                    {
-                        tracing::warn!("Autostart update failed: {err}");
-                        draft.status_msg = Some((err.to_string(), true));
-                    }
-                }
                 on_save();
+                on_cmd(WorkerCommand::SetAutostart(cfg.general.start_with_windows));
             }
-            #[cfg(windows)]
-            if autostart::is_elevated_task_autostart_enabled() {
+            if st.installed_copy_status.task_exists {
                 status_badge(ui, &i18n.t("settings.autostart_elevated_badge"), STATUS_OK);
             }
         });
         ui.weak(RichText::new(i18n.t("settings.autostart_admin_note")).size(11.0));
+        if !st.installed_copy_status.installed_path.is_empty() {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{}:", i18n.t("settings.installed_copy_path")));
+                ui.monospace(&st.installed_copy_status.installed_path);
+                if pill_button(
+                    ui,
+                    &i18n.t("settings.update_installed_copy"),
+                    st.installed_copy_status.installed_is_outdated,
+                    &theme_snapshot,
+                )
+                .clicked()
+                {
+                    on_cmd(WorkerCommand::UpdateInstalledCopy);
+                }
+            });
+            if st.installed_copy_status.installed_is_outdated {
+                ui.colored_label(
+                    STATUS_WARN,
+                    RichText::new(i18n.t("settings.installed_copy_outdated")).size(11.5),
+                );
+            }
+        }
     });
 
     ui.add_space(8.0);

@@ -1,7 +1,7 @@
-use crate::theme::{STATUS_ERR, STATUS_OK, card_frame, section_title, status_badge};
+use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, section_title, status_badge};
 use crate::worker::WorkerCommand;
-use egui::Ui;
-use omvix_core::config::OmenKeyAction;
+use egui::{RichText, Ui};
+use omvix_core::config::{OmenKeyAction, is_valid_custom_command_syntax};
 use omvix_core::{AppConfig, I18n};
 
 #[cfg(windows)]
@@ -11,6 +11,7 @@ pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
     i18n: &I18n,
+    config_warnings: &mut Vec<String>,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
     on_rebind_hotkeys: &mut dyn FnMut(),
@@ -55,15 +56,54 @@ pub fn render(
             }
 
             if cfg.hotkeys.omen_key_action == OmenKeyAction::LaunchCustomCommand {
-                ui.horizontal(|ui| {
+                if !config_warnings.is_empty() {
+                    ui.colored_label(
+                        STATUS_WARN,
+                        RichText::new(config_warnings.join(" | ")).size(11.5),
+                    );
+                }
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
                     ui.label(i18n.t("hotkeys.custom_command"));
                     if ui
                         .text_edit_singleline(&mut cfg.hotkeys.custom_command)
                         .changed()
                     {
                         on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    }
+                    let cmd_trimmed = cfg.hotkeys.custom_command.trim();
+                    let cmd_valid =
+                        !cmd_trimmed.is_empty() && is_valid_custom_command_syntax(cmd_trimmed);
+                    if !cmd_trimmed.is_empty() {
+                        if cmd_valid {
+                            status_badge(ui, &i18n.t("common.status_ok"), STATUS_OK);
+                        } else {
+                            status_badge(ui, &i18n.t("common.status_error"), STATUS_ERR);
+                        }
+                    }
+                    if ui
+                        .add_enabled(cmd_valid, egui::Button::new(i18n.t("hotkeys.test_command")))
+                        .clicked()
+                    {
+                        on_cmd(WorkerCommand::LaunchCustomCommand {
+                            command: cfg.hotkeys.custom_command.clone(),
+                            args: cfg.hotkeys.custom_args.clone(),
+                        });
                     }
                 });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(i18n.t("hotkeys.custom_args"));
+                    if ui
+                        .text_edit_singleline(&mut cfg.hotkeys.custom_args)
+                        .changed()
+                    {
+                        cfg.hotkeys.custom_args.retain(|c| !matches!(c, '\0' | '\r' | '\n'));
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    }
+                });
+                ui.weak(RichText::new(i18n.t("hotkeys.custom_command_hint")).size(11.0));
             }
         });
     });

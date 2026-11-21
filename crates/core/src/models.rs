@@ -309,6 +309,17 @@ pub struct DiagnosticReport {
     pub probes: Vec<WmiProbeEntry>,
 }
 
+/// Installation & autostart integrity status for the protected `Program Files` GUI copy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstalledCopyStatus {
+    pub installed_path: String,
+    pub installed_exists: bool,
+    pub running_from_installed: bool,
+    pub installed_is_outdated: bool,
+    pub task_exists: bool,
+    pub task_path_matches: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
