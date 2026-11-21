@@ -800,6 +800,27 @@ pub fn render(
                 {
                     actions.hide_to_tray = true;
                 }
+                if let Some(latest) = st.change_history.first() {
+                    let domain_lbl = i18n.t(latest.domain.i18n_key());
+                    let tip = i18n.t_fmt(
+                        "history.undo_latest_tooltip",
+                        &[
+                            ("domain", &domain_lbl),
+                            ("old", &latest.old_summary),
+                            ("new", &latest.new_summary),
+                        ],
+                    );
+                    if ui
+                        .small_button(
+                            RichText::new(format!("↶ {}", i18n.t("history.undo_short")))
+                                .size(11.5),
+                        )
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        on_cmd(WorkerCommand::UndoLastChange);
+                    }
+                }
             });
         });
 

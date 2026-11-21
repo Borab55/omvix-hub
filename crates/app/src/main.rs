@@ -630,6 +630,7 @@ struct OmvixApp {
     lighting_draft: ui::lighting_display::LightingDisplayDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
     last_seen_auto_revision: u64,
+    last_seen_config_sync_rev: u64,
     window_visible: Arc<AtomicBool>,
     hwnd_atomic: Arc<AtomicIsize>,
     force_quit: Arc<AtomicBool>,
@@ -800,6 +801,7 @@ impl OmvixApp {
             lighting_draft: ui::lighting_display::LightingDisplayDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
             last_seen_auto_revision: 0,
+            last_seen_config_sync_rev: 0,
             window_visible,
             hwnd_atomic,
             force_quit,
@@ -1209,7 +1211,15 @@ impl eframe::App for OmvixApp {
 
         let mut pending_cmds: Vec<WorkerCommand> = Vec::new();
         let mut should_save = false;
-        if snapshot_state.auto_applied_revision != self.last_seen_auto_revision {
+        if snapshot_state.synced_config_rev != self.last_seen_config_sync_rev {
+            self.last_seen_config_sync_rev = snapshot_state.synced_config_rev;
+            self.last_seen_auto_revision = snapshot_state.auto_applied_revision;
+            if let Some(ref synced) = snapshot_state.synced_config {
+                self.cfg = synced.clone();
+                self.config_dirty_since = None;
+                should_save = true;
+            }
+        } else if snapshot_state.auto_applied_revision != self.last_seen_auto_revision {
             self.last_seen_auto_revision = snapshot_state.auto_applied_revision;
             if snapshot_state.active_app_profile.is_none() {
                 self.cfg.thermal_fan.performance_mode = snapshot_state.effective_performance_mode;

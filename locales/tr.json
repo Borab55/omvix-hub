@@ -428,5 +428,25 @@
   "profiles.no_rules": "Henüz uygulama kuralı eklenmedi.",
   "profiles.rule_running_badge": "Çalışıyor",
   "profiles.cockpit_active_badge": "Uyg: {name}",
-  "profiles.cockpit_auto_badge": "Oto AC/DC"
+  "profiles.cockpit_auto_badge": "Oto AC/DC",
+
+  "history.title": "Son Donanım Değişiklikleri (Son 10)",
+  "history.empty": "Bu oturumda henüz donanım değişikliği kaydedilmedi.",
+  "history.undo_short": "Geri Al",
+  "history.undo_btn": "Geri Al",
+  "history.undo_latest": "Sonuncuyu Geri Al",
+  "history.clear": "Temizle",
+  "history.undo_latest_tooltip": "Son {domain} değişikliğini geri al: {new} -> {old}",
+  "history.domain_performance": "Performans Modu",
+  "history.domain_fan": "Fan Kontrolü",
+  "history.domain_battery": "Batarya Sınırı",
+  "history.domain_display": "Ekran Hz",
+  "history.domain_cpu_boost": "CPU Turbo Boost",
+  "history.domain_lighting": "Klavye Aydınlatma",
+  "history.domain_power_limits": "Güç Limitleri",
+
+  "support_bundle.create_btn": "Destek Paketi Oluştur (.zip)",
+  "support_bundle.creating": ".zip Hazırlanıyor...",
+  "support_bundle.saved_label": "Destek Paketi",
+  "support_bundle.show_in_folder": "Klasörde Göster"
 }

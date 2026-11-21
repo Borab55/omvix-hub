@@ -61,3 +61,35 @@ pub fn control_committed(
         false
     }
 }
+
+pub fn default_support_bundle_path() -> std::path::PathBuf {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let filename = format!("omvix-support-{stamp}.zip");
+    #[cfg(windows)]
+    if let Some(desktop) = std::env::var_os("USERPROFILE") {
+        let candidate = std::path::PathBuf::from(desktop).join("Desktop");
+        if candidate.exists() {
+            return candidate.join(&filename);
+        }
+    }
+    std::env::temp_dir().join(filename)
+}
+
+pub fn show_file_in_folder(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if path.exists() {
+            let safe = path.to_string_lossy().replace('"', "");
+            let _ = std::process::Command::new("explorer.exe")
+                .raw_arg(format!("/select,\"{safe}\""))
+                .spawn();
+        } else if let Some(parent) = path.parent() {
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(parent)
+                .spawn();
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+}

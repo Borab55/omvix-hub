@@ -1,5 +1,5 @@
 use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge};
-use crate::ui::control_committed;
+use crate::ui::{control_committed, default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Slider, Ui};
 use omvix_core::{
@@ -385,7 +385,7 @@ pub fn render(
             }
         });
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(i18n.t("logs.open_folder")).clicked() {
                 #[cfg(windows)]
                 {
@@ -397,7 +397,31 @@ pub fn render(
             if ui.button(i18n.t("logs.clear_logs")).clicked() {
                 let _ = clear_logs(&log_dir);
             }
+            let bundle_lbl = if st.support_bundle_busy {
+                i18n.t("support_bundle.creating")
+            } else {
+                i18n.t("support_bundle.create_btn")
+            };
+            if ui
+                .add_enabled(!st.support_bundle_busy, egui::Button::new(bundle_lbl))
+                .clicked()
+            {
+                on_cmd(WorkerCommand::CreateSupportBundle(default_support_bundle_path()));
+            }
         });
+
+        if let Some(ref zip_path) = st.last_support_bundle_path {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak(format!(
+                    "{}: {}",
+                    i18n.t("support_bundle.saved_label"),
+                    zip_path.display()
+                ));
+                if ui.small_button(i18n.t("support_bundle.show_in_folder")).clicked() {
+                    show_file_in_folder(zip_path);
+                }
+            });
+        }
 
         ui.collapsing(i18n.t("logs.preview"), |ui| {
             let lines = tail_logs(&log_dir, 30);

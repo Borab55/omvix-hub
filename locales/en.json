@@ -428,5 +428,25 @@
   "profiles.no_rules": "No application rules added yet.",
   "profiles.rule_running_badge": "Running",
   "profiles.cockpit_active_badge": "App: {name}",
-  "profiles.cockpit_auto_badge": "Auto AC/DC"
+  "profiles.cockpit_auto_badge": "Auto AC/DC",
+
+  "history.title": "Recent Hardware Changes (Last 10)",
+  "history.empty": "No hardware changes recorded in this session yet.",
+  "history.undo_short": "Undo",
+  "history.undo_btn": "Undo",
+  "history.undo_latest": "Undo Latest",
+  "history.clear": "Clear",
+  "history.undo_latest_tooltip": "Undo latest {domain}: revert {new} -> {old}",
+  "history.domain_performance": "Performance Mode",
+  "history.domain_fan": "Fan Control",
+  "history.domain_battery": "Battery Limit",
+  "history.domain_display": "Refresh Rate",
+  "history.domain_cpu_boost": "CPU Turbo Boost",
+  "history.domain_lighting": "Keyboard Lighting",
+  "history.domain_power_limits": "Power Limits",
+
+  "support_bundle.create_btn": "Create Support Bundle (.zip)",
+  "support_bundle.creating": "Building .zip...",
+  "support_bundle.saved_label": "Support Zip",
+  "support_bundle.show_in_folder": "Show in Folder"
 }
