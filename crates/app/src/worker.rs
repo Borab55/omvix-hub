@@ -411,7 +411,7 @@ fn run_worker_loop(
                 while let Ok(more) = rx.try_recv() {
                     cmds.push(more);
                 }
-                for cmd in cmds {
+                for cmd in coalesce_worker_commands(cmds) {
                     let should_shutdown = handle_worker_command(
                         cmd,
                         &mut cfg,
@@ -749,11 +749,44 @@ fn handle_worker_command(
             tracing::info!("Re-applied thermal, fan, and lighting state after system resume");
         }
         WorkerCommand::UpdateConfig(new_cfg) => {
+            let curve_changed =
+                cfg.thermal_fan.custom_curve.points != new_cfg.thermal_fan.custom_curve.points;
+            let bat_changed = cfg.battery.enabled != new_cfg.battery.enabled
+                || cfg.battery.mode != new_cfg.battery.mode
+                || cfg.battery.stop_threshold_pct != new_cfg.battery.stop_threshold_pct
+                || cfg.battery.start_threshold_pct != new_cfg.battery.start_threshold_pct
+                || cfg.battery.hold_when_shutdown != new_cfg.battery.hold_when_shutdown
+                || cfg.battery.one_time_full_charge != new_cfg.battery.one_time_full_charge;
             *cfg = new_cfg;
-            if let Err(err) =
-                omvix_windows::battery_service::sync_config_if_installed(&cfg.battery)
+            if bat_changed {
+                if let Err(err) =
+                    omvix_windows::battery_service::sync_config_if_installed(&cfg.battery)
+                {
+                    tracing::debug!("Failed syncing battery service config: {err}");
+                }
+            }
+            if curve_changed
+                && cfg.thermal_fan.fan_mode == FanMode::CustomCurve
+                && !thermal_guard.is_active()
             {
-                tracing::debug!("Failed syncing battery service config: {err}");
+                let snap = state
+                    .lock()
+                    .map(|st| st.telemetry.clone())
+                    .unwrap_or_default();
+                let is_cool = cool_hint_from_snapshot(&snap);
+                let target_pct = resolve_fan_target_pct(
+                    cfg,
+                    &snap,
+                    FanMode::CustomCurve,
+                    Some(cfg.thermal_fan.manual_speed_pct),
+                    prev_curve_temp,
+                    prev_curve_speed,
+                );
+                let _ = thermal_be.set_fan_mode_with_cool_hint(
+                    FanMode::CustomCurve,
+                    target_pct,
+                    is_cool,
+                );
             }
         }
         WorkerCommand::SetTelemetryIntervalMs(ms) => {
@@ -806,16 +839,23 @@ fn handle_worker_command(
                     bat.charge_percent,
                     bat.ac_connected,
                 );
-                let res = battery_be.set_charge_mode(target);
-                if res.is_ok() {
-                    *last_applied_bat_mode = Some(target);
-                }
-                if let Ok(refreshed) = battery_be.get_battery_status() {
+                if bat.current_mode == target && *last_applied_bat_mode == Some(target) {
                     if let Ok(mut st) = state.lock() {
-                        st.battery_status = Some(refreshed);
+                        st.battery_status = Some(bat);
+                        st.set_toast(format!("Battery charge mode -> {target:?}"), false);
                     }
+                } else {
+                    let res = battery_be.set_charge_mode(target);
+                    if res.is_ok() {
+                        *last_applied_bat_mode = Some(target);
+                    }
+                    if let Ok(refreshed) = battery_be.get_battery_status() {
+                        if let Ok(mut st) = state.lock() {
+                            st.battery_status = Some(refreshed);
+                        }
+                    }
+                    record_result(state, res, format!("Battery charge mode -> {target:?}"));
                 }
-                record_result(state, res, format!("Battery charge mode -> {target:?}"));
             }
         }
         WorkerCommand::ApplyLighting => {
@@ -1213,5 +1253,163 @@ fn record_result(state: &Arc<Mutex<SharedState>>, res: Result<()>, ok_msg: Strin
                 st.set_toast(err.to_string(), true);
             }
         }
+    }
+}
+
+fn latest_wins_kind(cmd: &WorkerCommand) -> Option<u8> {
+    match cmd {
+        WorkerCommand::SetPerformanceMode(_) => Some(0),
+        WorkerCommand::SetFanMode { .. } => Some(1),
+        WorkerCommand::ApplyLighting => Some(2),
+        WorkerCommand::ApplyBatteryNow => Some(3),
+        WorkerCommand::SetTelemetryIntervalMs(_) => Some(4),
+        WorkerCommand::SetRefreshRate(_) => Some(5),
+        WorkerCommand::SetCpuBoost(_) => Some(6),
+        _ => None,
+    }
+}
+
+fn is_barrier_command(cmd: &WorkerCommand) -> bool {
+    matches!(
+        cmd,
+        WorkerCommand::Shutdown
+            | WorkerCommand::SystemSuspending(_)
+            | WorkerCommand::SystemShuttingDown(_)
+            | WorkerCommand::SystemResumed
+            | WorkerCommand::RestoreAllDefaults
+            | WorkerCommand::InstallBatteryService
+            | WorkerCommand::StartBatteryService
+            | WorkerCommand::StopBatteryService
+            | WorkerCommand::RestartBatteryService
+            | WorkerCommand::UninstallBatteryServiceZeroTrace
+            | WorkerCommand::InstallPawnIo
+            | WorkerCommand::ReloadPawnIo
+            | WorkerCommand::ExportDiagnostics(_)
+    )
+}
+
+fn coalesce_segment(seg: Vec<WorkerCommand>, out: &mut Vec<WorkerCommand>) {
+    if seg.is_empty() {
+        return;
+    }
+    let mut last_idx_by_kind = [None::<usize>; 7];
+    for (idx, cmd) in seg.iter().enumerate() {
+        if let Some(kind) = latest_wins_kind(cmd) {
+            last_idx_by_kind[kind as usize] = Some(idx);
+        }
+    }
+
+    let start_out = out.len();
+    for (idx, cmd) in seg.into_iter().enumerate() {
+        if let Some(kind) = latest_wins_kind(&cmd) {
+            if last_idx_by_kind[kind as usize] != Some(idx) {
+                continue;
+            }
+        }
+        let is_update_cfg = matches!(cmd, WorkerCommand::UpdateConfig(_));
+        if is_update_cfg
+            && out.len() > start_out
+            && matches!(out.last(), Some(WorkerCommand::UpdateConfig(_)))
+        {
+            *out.last_mut().expect("non-empty segment") = cmd;
+        } else {
+            out.push(cmd);
+        }
+    }
+}
+
+/// Deduplicates queued burst hardware commands per barrier-free segment (keeping only the latest
+/// setting for each hardware domain) while preserving ordering around barriers and consumer steps.
+fn coalesce_worker_commands(cmds: Vec<WorkerCommand>) -> Vec<WorkerCommand> {
+    if cmds.len() <= 1 {
+        return cmds;
+    }
+    let mut out = Vec::with_capacity(cmds.len());
+    let mut seg = Vec::new();
+    for cmd in cmds {
+        if is_barrier_command(&cmd) {
+            coalesce_segment(std::mem::take(&mut seg), &mut out);
+            out.push(cmd);
+        } else {
+            seg.push(cmd);
+        }
+    }
+    coalesce_segment(seg, &mut out);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coalesce_worker_commands_deduplicates_bursts_and_respects_barriers() {
+        let mut cfg1 = AppConfig::default();
+        cfg1.lighting.brightness_pct = 20;
+        let mut cfg2 = AppConfig::default();
+        cfg2.lighting.brightness_pct = 80;
+
+        let cmds = vec![
+            WorkerCommand::UpdateConfig(cfg1.clone()),
+            WorkerCommand::ApplyLighting,
+            WorkerCommand::UpdateConfig(cfg2.clone()),
+            WorkerCommand::ApplyLighting,
+            WorkerCommand::SetFanMode {
+                mode: FanMode::Manual,
+                manual_speed_pct: Some(30),
+            },
+            WorkerCommand::SetFanMode {
+                mode: FanMode::Manual,
+                manual_speed_pct: Some(55),
+            },
+            WorkerCommand::SetPowerLimits {
+                pl1: Some(45),
+                pl2: Some(90),
+            },
+            WorkerCommand::UpdateConfig(cfg1),
+            WorkerCommand::RestoreAllDefaults,
+            WorkerCommand::SetFanMode {
+                mode: FanMode::Auto,
+                manual_speed_pct: None,
+            },
+            WorkerCommand::SetFanMode {
+                mode: FanMode::Max,
+                manual_speed_pct: None,
+            },
+        ];
+
+        let coalesced = coalesce_worker_commands(cmds);
+        assert_eq!(coalesced.len(), 7);
+        assert!(matches!(
+            &coalesced[0],
+            WorkerCommand::UpdateConfig(c) if c.lighting.brightness_pct == 80
+        ));
+        assert!(matches!(coalesced[1], WorkerCommand::ApplyLighting));
+        assert!(matches!(
+            coalesced[2],
+            WorkerCommand::SetFanMode {
+                mode: FanMode::Manual,
+                manual_speed_pct: Some(55)
+            }
+        ));
+        assert!(matches!(
+            coalesced[3],
+            WorkerCommand::SetPowerLimits {
+                pl1: Some(45),
+                pl2: Some(90)
+            }
+        ));
+        assert!(matches!(
+            &coalesced[4],
+            WorkerCommand::UpdateConfig(c) if c.lighting.brightness_pct == 20
+        ));
+        assert!(matches!(coalesced[5], WorkerCommand::RestoreAllDefaults));
+        assert!(matches!(
+            coalesced[6],
+            WorkerCommand::SetFanMode {
+                mode: FanMode::Max,
+                manual_speed_pct: None
+            }
+        ));
     }
 }

@@ -3,6 +3,18 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.4.4] - 2026-11-21
+
+### Added & Changed
+- **Instant Commit-on-Release Controls & Redundant Apply Button Cleanup (`ui/mod.rs`, `cockpit.rs`, `performance.rs`, `battery.rs`, `lighting_display.rs`, `settings.rs`, `hotkeys.rs`):**
+  - Added `control_committed` helper so sliders, drag values, and color pickers apply hardware commands and save settings once upon pointer release or keyboard commit — never flooding WMI/EC or disk on every drag frame.
+  - Removed redundant `Apply` buttons for safe/live controls (cockpit & drawer Manual Fan Speed, Keyboard Lighting brightness & RGB colors, Cockpit & Battery Charge Limit sliders/toggles/presets, Custom Fan Curve edits, Hysteresis, Theme color pickers, Log Max Size, and Auto-Profile AC/Battery Hz combos).
+  - Preserved safety-critical and validation-gated `Apply` buttons: CPU Power Limits (PL1/PL2), TCC Temperature Limit, Core Undervolt, Global Shortcut (plus Enter-to-apply when valid), and the non-admin UAC elevation button.
+- **3-Layer SSD & Hardware Write Protection (`config.rs`, `battery_service.rs`, `main.rs`, `worker.rs`):**
+  - **Identical-content disk skip:** `AppConfig::save_to_path` and `BatteryServiceConfig::save_to_path` compare serialized TOML against existing files on disk and skip temporary-file write + rename when unchanged.
+  - **400 ms UI config debounce:** Interactive config writes batch within a 400 ms window (flushed immediately on hide-to-tray, UAC restart, quit, or factory reset).
+  - **Worker command coalescing & redundant WMI skip:** `coalesce_worker_commands` deduplicates burst latest-wins hardware commands while respecting lifecycle barriers, `UpdateConfig` skips `OmvixBatteryService` disk sync unless battery fields changed and immediately re-evaluates `CustomCurve` points, and `ApplyBatteryNow` skips `0x2B` WMI writes when firmware already matches the target charge mode.
+
 ## [0.4.3] - 2026-11-21
 
 ### Added & Improved

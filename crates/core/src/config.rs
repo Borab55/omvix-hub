@@ -527,11 +527,14 @@ impl AppConfig {
 
     /// Saves configuration atomically via a temporary file + rename.
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        let serialized =
+            toml::to_string_pretty(self).map_err(|e| OmvixError::Config(e.to_string()))?;
+        if path.exists() && fs::read_to_string(path).ok().as_deref() == Some(serialized.as_str()) {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let serialized =
-            toml::to_string_pretty(self).map_err(|e| OmvixError::Config(e.to_string()))?;
         let tmp_path = path.with_extension("toml.tmp");
         fs::write(&tmp_path, serialized)?;
         if path.exists() {
@@ -654,6 +657,29 @@ mod tests {
         let explicit = AppConfig::load_from_path(&path).expect("load v2");
         assert_eq!(explicit.config_version, CURRENT_CONFIG_VERSION);
         assert!(!explicit.battery.hold_when_shutdown);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_to_path_skips_redundant_identical_write() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_noop_save_test_{nanos}"));
+        let path = dir.join("config.toml");
+
+        let cfg = AppConfig::default();
+        cfg.save_to_path(&path).expect("initial save");
+        let first_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cfg.save_to_path(&path).expect("identical save should succeed");
+        let second_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        assert_eq!(first_mtime, second_mtime);
+        assert!(!path.with_extension("toml.tmp").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
