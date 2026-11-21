@@ -624,6 +624,7 @@ struct OmvixApp {
     config_dirty_since: Option<Instant>,
     worker_dead: bool,
     worker_dead_recovery_attempted: bool,
+    performance_draft: ui::performance::PerformanceDraftState,
     battery_draft: ui::battery::BatteryDraftState,
     lighting_draft: ui::lighting_display::LightingDisplayDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
@@ -791,6 +792,7 @@ impl OmvixApp {
             config_dirty_since: None,
             worker_dead: false,
             worker_dead_recovery_attempted: false,
+            performance_draft: ui::performance::PerformanceDraftState::default(),
             battery_draft: ui::battery::BatteryDraftState::default(),
             lighting_draft: ui::lighting_display::LightingDisplayDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
@@ -1477,6 +1479,7 @@ impl eframe::App for OmvixApp {
                                                 &mut self.cfg,
                                                 &snapshot_state,
                                                 &self.i18n,
+                                                &mut self.performance_draft,
                                                 &mut push_cmd,
                                                 &mut mark_save,
                                             )
@@ -1588,6 +1591,7 @@ impl eframe::App for OmvixApp {
             self.cfg.general.start_minimized = false;
             self.cfg.general.first_run_completed = true;
             self.config_warnings.clear();
+            self.performance_draft = ui::performance::PerformanceDraftState::default();
             self.battery_draft = ui::battery::BatteryDraftState::default();
             self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();

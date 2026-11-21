@@ -1,4 +1,4 @@
-use crate::theme::{STATUS_WARN, card_frame, pill_button, section_title, status_badge};
+use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge};
 use crate::ui::charts::interactive_fan_curve;
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
@@ -9,11 +9,18 @@ use omvix_core::thermal::{
 };
 use omvix_core::{AppConfig, FanCurve, FanCurvePoint, FanMode, I18n, PerformanceMode};
 
+#[derive(Debug, Default, Clone)]
+pub struct PerformanceDraftState {
+    pub curve_import_input: String,
+    pub curve_status_msg: Option<(String, bool)>,
+}
+
 pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
     st: &SharedState,
     i18n: &I18n,
+    draft: &mut PerformanceDraftState,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) {
@@ -256,6 +263,24 @@ pub fn render(
             }
             ui.weak(RichText::new(i18n.t("fan.curve_drag_hint")).size(11.5));
             ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(i18n.t("fan.curve_presets"));
+                for (key, preset) in [
+                    ("fan.preset_quiet", FanCurve::preset_quiet()),
+                    ("fan.preset_balanced", FanCurve::preset_balanced()),
+                    ("fan.preset_aggressive", FanCurve::preset_aggressive()),
+                    ("fan.preset_ogh_like", FanCurve::preset_ogh_like()),
+                ] {
+                    let selected = cfg.thermal_fan.custom_curve == preset;
+                    if pill_button(ui, &i18n.t(key), selected, t).clicked() {
+                        cfg.thermal_fan.custom_curve = preset;
+                        draft.curve_status_msg = None;
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    }
+                }
+            });
+            ui.add_space(4.0);
             cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
 
             let live_temp = effective_fan_curve_temp_c(
@@ -331,8 +356,59 @@ pub fn render(
                 }
                 if ui.button(i18n.t("fan.reset_curve")).clicked() {
                     cfg.thermal_fan.custom_curve = FanCurve::default();
+                    draft.curve_status_msg = None;
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.collapsing(i18n.t("fan.curve_share"), |ui| {
+                let mut code = cfg.thermal_fan.custom_curve.encode_share_code();
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut code)
+                            .desired_width(260.0)
+                            .interactive(false),
+                    );
+                    if ui.button(i18n.t("fan.curve_copy_code")).clicked() {
+                        ui.ctx().copy_text(code.clone());
+                        draft.curve_status_msg = Some((i18n.t("fan.curve_copied"), false));
+                    }
+                    if ui.button(i18n.t("fan.curve_copy_json")).clicked() {
+                        if let Ok(json) = serde_json::to_string_pretty(&cfg.thermal_fan.custom_curve)
+                        {
+                            ui.ctx().copy_text(json);
+                            draft.curve_status_msg = Some((i18n.t("fan.curve_copied"), false));
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.curve_import_input)
+                            .desired_width(260.0)
+                            .hint_text(i18n.t("fan.curve_import_placeholder")),
+                    );
+                    if pill_button(ui, &i18n.t("fan.curve_import_btn"), false, t).clicked() {
+                        match FanCurve::decode_share_code(&draft.curve_import_input) {
+                            Ok(imported) => {
+                                cfg.thermal_fan.custom_curve = imported;
+                                draft.curve_import_input.clear();
+                                draft.curve_status_msg =
+                                    Some((i18n.t("fan.curve_imported"), false));
+                                on_save();
+                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                            }
+                            Err(err) => {
+                                draft.curve_status_msg = Some((err.to_string(), true));
+                            }
+                        }
+                    }
+                });
+
+                if let Some((msg, is_err)) = &draft.curve_status_msg {
+                    ui.colored_label(if *is_err { STATUS_ERR } else { STATUS_OK }, msg);
                 }
             });
         }

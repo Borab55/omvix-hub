@@ -173,6 +173,121 @@ impl FanCurve {
 
         floor_if_hot(prev_speed_pct.clamp(0, 100))
     }
+
+    pub fn preset_quiet() -> Self {
+        Self {
+            points: vec![
+                FanCurvePoint { temp_c: 35, speed_pct: 18 },
+                FanCurvePoint { temp_c: 45, speed_pct: 22 },
+                FanCurvePoint { temp_c: 55, speed_pct: 30 },
+                FanCurvePoint { temp_c: 65, speed_pct: 40 },
+                FanCurvePoint { temp_c: 72, speed_pct: 48 },
+                FanCurvePoint { temp_c: 80, speed_pct: 55 },
+                FanCurvePoint { temp_c: 88, speed_pct: 74 },
+                FanCurvePoint { temp_c: 95, speed_pct: 92 },
+            ],
+            hysteresis_c: 4,
+        }
+    }
+
+    pub fn preset_balanced() -> Self {
+        Self::default()
+    }
+
+    pub fn preset_aggressive() -> Self {
+        Self {
+            points: vec![
+                FanCurvePoint { temp_c: 35, speed_pct: 35 },
+                FanCurvePoint { temp_c: 45, speed_pct: 45 },
+                FanCurvePoint { temp_c: 55, speed_pct: 60 },
+                FanCurvePoint { temp_c: 65, speed_pct: 75 },
+                FanCurvePoint { temp_c: 72, speed_pct: 86 },
+                FanCurvePoint { temp_c: 80, speed_pct: 94 },
+                FanCurvePoint { temp_c: 88, speed_pct: 100 },
+                FanCurvePoint { temp_c: 95, speed_pct: 100 },
+            ],
+            hysteresis_c: 2,
+        }
+    }
+
+    pub fn preset_ogh_like() -> Self {
+        Self {
+            points: vec![
+                FanCurvePoint { temp_c: 35, speed_pct: 0 },
+                FanCurvePoint { temp_c: 45, speed_pct: 20 },
+                FanCurvePoint { temp_c: 55, speed_pct: 32 },
+                FanCurvePoint { temp_c: 65, speed_pct: 48 },
+                FanCurvePoint { temp_c: 72, speed_pct: 62 },
+                FanCurvePoint { temp_c: 80, speed_pct: 76 },
+                FanCurvePoint { temp_c: 88, speed_pct: 90 },
+                FanCurvePoint { temp_c: 95, speed_pct: 100 },
+            ],
+            hysteresis_c: 3,
+        }
+    }
+
+    /// Encodes the fan curve as a compact shareable code (`OMVIXCURVE1|<hyst>|<t:s,...>`).
+    pub fn encode_share_code(&self) -> String {
+        let mut sorted = self.points.clone();
+        sorted.sort_by_key(|p| p.temp_c);
+        let pairs: Vec<String> = sorted
+            .iter()
+            .map(|p| format!("{}:{}", p.temp_c, p.speed_pct))
+            .collect();
+        format!("OMVIXCURVE1|{}|{}", self.hysteresis_c.clamp(1, 10), pairs.join(","))
+    }
+
+    /// Imports a fan curve from either an `OMVIXCURVE1|...` code or JSON, enforcing safety normalization.
+    pub fn decode_share_code(raw: &str) -> crate::Result<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(crate::OmvixError::Config("Fan curve input is empty".to_string()));
+        }
+
+        let mut curve = if trimmed.starts_with('{') {
+            serde_json::from_str::<Self>(trimmed)
+                .map_err(|e| crate::OmvixError::Config(format!("Invalid curve JSON: {e}")))?
+        } else {
+            let parts: Vec<&str> = trimmed.split('|').collect();
+            if parts.len() != 3 || parts[0] != "OMVIXCURVE1" {
+                return Err(crate::OmvixError::Config(
+                    "Invalid curve format (expected OMVIXCURVE1|<hyst>|<t:s,...> or JSON)".to_string(),
+                ));
+            }
+            let hysteresis_c: u8 = parts[1].trim().parse().map_err(|_| {
+                crate::OmvixError::Config("Invalid curve hysteresis value".to_string())
+            })?;
+            let mut points = Vec::new();
+            for pair in parts[2].split(',') {
+                let Some((t_str, s_str)) = pair.trim().split_once(':') else {
+                    return Err(crate::OmvixError::Config(format!(
+                        "Invalid curve point `{pair}` (expected temp:speed)"
+                    )));
+                };
+                let temp_c: u8 = t_str.trim().parse().map_err(|_| {
+                    crate::OmvixError::Config(format!("Invalid point temp `{t_str}`"))
+                })?;
+                let speed_pct: u8 = s_str.trim().parse().map_err(|_| {
+                    crate::OmvixError::Config(format!("Invalid point speed `{s_str}`"))
+                })?;
+                points.push(FanCurvePoint { temp_c, speed_pct });
+            }
+            if points.len() < 2 {
+                return Err(crate::OmvixError::Config(
+                    "Imported fan curve must contain at least 2 points".to_string(),
+                ));
+            }
+            Self { points, hysteresis_c }
+        };
+
+        if curve.points.len() < 2 {
+            return Err(crate::OmvixError::Config(
+                "Imported fan curve must contain at least 2 points".to_string(),
+            ));
+        }
+        let _ = curve.normalize();
+        Ok(curve)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -428,5 +543,41 @@ mod tests {
             hysteresis_c: 3,
         };
         assert_eq!(sub80.evaluate(82.0, 75.0, 20), FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+    }
+
+    #[test]
+    fn fan_curve_presets_are_valid_monotonic_and_respect_safety_floor() {
+        for mut preset in [
+            FanCurve::preset_quiet(),
+            FanCurve::preset_balanced(),
+            FanCurve::preset_aggressive(),
+            FanCurve::preset_ogh_like(),
+        ] {
+            let before = preset.clone();
+            assert!(!preset.normalize());
+            assert_eq!(preset, before);
+            assert_eq!(preset.points.len(), 8);
+            assert!(preset.evaluate(80.0, 72.0, 40) >= FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+        }
+    }
+
+    #[test]
+    fn fan_curve_share_code_and_json_roundtrip_enforces_safety_normalization() {
+        let orig = FanCurve::preset_ogh_like();
+        let code = orig.encode_share_code();
+        assert!(code.starts_with("OMVIXCURVE1|3|"));
+        let decoded = FanCurve::decode_share_code(&code).expect("decode code");
+        assert_eq!(decoded, orig);
+
+        let json = serde_json::to_string(&orig).expect("json");
+        let decoded_json = FanCurve::decode_share_code(&json).expect("decode json");
+        assert_eq!(decoded_json, orig);
+
+        assert!(FanCurve::decode_share_code("").is_err());
+        assert!(FanCurve::decode_share_code("INVALID|3|40:20,80:80").is_err());
+
+        // Importing an unsafe high-temp curve is normalized up to >= 50% at >= 80C
+        let unsafe_curve = FanCurve::decode_share_code("OMVIXCURVE1|3|40:30,90:10").expect("import unsafe");
+        assert_eq!(unsafe_curve.points[1].speed_pct, FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
     }
 }

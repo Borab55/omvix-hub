@@ -1,7 +1,7 @@
 use crate::theme::{
     STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, clickable_status_badge,
-    clickable_warning_badge, compact_card, pill_button, rgb, section_title, status_badge,
-    tile_button,
+    clickable_warning_badge, compact_card, compact_status_pill, pill_button, rgb, section_title,
+    status_badge, tile_button,
 };
 use crate::ui::{Drawer, ExtraSubTab, control_committed};
 use crate::worker::{SharedState, WorkerCommand};
@@ -205,6 +205,74 @@ pub fn render(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak(RichText::new(format!("{ram}  |  {bat}")).size(11.0));
             });
+        });
+
+        ui.add_space(2.0);
+        let muted_pill = Color32::from_rgb(138, 148, 162);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(5.0, 3.0);
+
+            let (guard_lbl, guard_clr) = if st.thermal_guard_active {
+                (i18n.t("cockpit.badge_guard_active"), STATUS_ERR)
+            } else if st.safe_mode.is_some() {
+                (i18n.t("cockpit.badge_guard_paused"), STATUS_WARN)
+            } else {
+                (
+                    i18n.t_fmt(
+                        "cockpit.badge_guard_ready",
+                        &[("temp", &cfg.thermal_fan.guard_cpu_temp_c.to_string())],
+                    ),
+                    STATUS_OK,
+                )
+            };
+            compact_status_pill(ui, &guard_lbl, guard_clr).on_hover_text(i18n.t_fmt(
+                "cockpit.badge_guard_tooltip",
+                &[
+                    ("temp", &cfg.thermal_fan.guard_cpu_temp_c.to_string()),
+                    ("secs", &cfg.thermal_fan.guard_sustain_secs.to_string()),
+                ],
+            ));
+
+            let bat_hw_mode = st
+                .battery_status
+                .as_ref()
+                .map(|b| b.current_mode)
+                .unwrap_or(BatteryChargeMode::Auto);
+            let (hold_lbl, hold_clr) = match bat_hw_mode {
+                BatteryChargeMode::Hold => (i18n.t("cockpit.badge_hold_active"), STATUS_WARN),
+                BatteryChargeMode::Inhibit => (i18n.t("cockpit.badge_hold_inhibit"), STATUS_OK),
+                BatteryChargeMode::Auto
+                    if cfg.battery.enabled && cfg.battery.hold_when_shutdown =>
+                {
+                    (i18n.t("cockpit.badge_hold_armed"), accent)
+                }
+                BatteryChargeMode::Auto => (i18n.t("cockpit.badge_hold_off"), muted_pill),
+            };
+            compact_status_pill(ui, &hold_lbl, hold_clr)
+                .on_hover_text(i18n.t("cockpit.badge_hold_tooltip"));
+
+            let (ka_lbl, ka_clr) = if st.sensor_loss_active || st.safe_mode.is_some() {
+                (i18n.t("cockpit.badge_keepalive_paused"), STATUS_WARN)
+            } else if cfg.thermal_fan.keep_alive_enabled
+                && matches!(
+                    cfg.thermal_fan.fan_mode,
+                    FanMode::Manual | FanMode::CustomCurve
+                )
+            {
+                (i18n.t("cockpit.badge_keepalive_on"), STATUS_OK)
+            } else {
+                (i18n.t("cockpit.badge_keepalive_off"), muted_pill)
+            };
+            compact_status_pill(ui, &ka_lbl, ka_clr)
+                .on_hover_text(i18n.t("cockpit.badge_keepalive_tooltip"));
+
+            let (pawn_lbl, pawn_clr) = if st.pawnio_cpu_active {
+                (i18n.t("cockpit.badge_pawnio_ready"), STATUS_OK)
+            } else {
+                (i18n.t("cockpit.badge_pawnio_missing"), STATUS_WARN)
+            };
+            compact_status_pill(ui, &pawn_lbl, pawn_clr)
+                .on_hover_text(i18n.t("cockpit.badge_pawnio_tooltip"));
         });
     });
 
