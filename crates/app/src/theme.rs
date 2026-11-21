@@ -248,9 +248,9 @@ pub fn pill_button(
     .inner
 }
 
-pub fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
+pub fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
     let bg = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 32);
-    egui::Frame::NONE
+    let inner = egui::Frame::NONE
         .fill(bg)
         .stroke(Stroke::new(1.0_f32, color))
         .corner_radius(CornerRadius::same(12))
@@ -258,6 +258,7 @@ pub fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
         });
+    inner.response.interact(egui::Sense::hover())
 }
 
 pub fn clickable_status_badge(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {

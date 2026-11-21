@@ -137,11 +137,20 @@ pub fn render(
         ui.horizontal(|ui| {
             ui.label(RichText::new(cpu_line).size(12.5).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!("GPU {gpu_u} · {gpu_t} · {gpu_w}"))
-                        .size(12.5)
-                        .strong(),
-                );
+                if st.telemetry.gpu_sleeping {
+                    ui.label(
+                        RichText::new(format!("GPU — · {}", i18n.t("cockpit.gpu_sleep_short")))
+                            .size(12.5)
+                            .color(Color32::from_rgb(138, 162, 194)),
+                    )
+                    .on_hover_text(i18n.t("monitor.gpu_sleeping_tooltip"));
+                } else {
+                    ui.label(
+                        RichText::new(format!("GPU {gpu_u} · {gpu_t} · {gpu_w}"))
+                            .size(12.5)
+                            .strong(),
+                    );
+                }
             });
         });
 

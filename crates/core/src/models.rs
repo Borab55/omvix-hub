@@ -301,6 +301,7 @@ pub struct TelemetrySnapshot {
     pub cpu_clock_mhz: Option<u32>,
     pub cpu_power_w: Option<f32>,
     pub gpu_name: Option<String>,
+    pub gpu_sleeping: bool,
     pub gpu_temp_c: Option<f32>,
     pub gpu_usage_pct: Option<f32>,
     pub gpu_power_w: Option<f32>,
