@@ -1,6 +1,16 @@
-use omvix_core::auto_profile::AutoProfileEngine;
+use omvix_core::app_profiles::{AppProfileEngine, AppProfileRule, AppProfileTransition, ProfileBaseline};
+use omvix_core::auto_profile::{AutoProfileAction, AutoProfileEngine};
 use omvix_core::battery_care::BatteryCareEngine;
+use omvix_core::battery_history::{
+    BatteryHealthHistory, BatteryHealthRecord, battery_history_path_for,
+};
 use omvix_core::boards::{is_bios_write_allowed, lookup_board};
+use omvix_core::config::{BatteryConfig, LightingConfig};
+use omvix_core::crash_guard::{CrashGuardState, SafeModeReason, current_unix_secs};
+use omvix_core::support_bundle::{SupportBundleInputs, build_support_bundle_zip};
+use omvix_core::telemetry_csv::{
+    MAX_TELEMETRY_CSV_ROWS, TelemetryCsvRow, write_telemetry_csv,
+};
 use omvix_core::thermal::{
     DEFAULT_SENSOR_LOSS_TIMEOUT_SECS, GuardMaxAction, GuardMaxRetryController, SensorLossDecision,
     SensorLossGuard, ThermalGuardConfig, ThermalGuardDecision, ThermalSafetyGuard,
@@ -8,14 +18,15 @@ use omvix_core::thermal::{
 };
 use omvix_core::{
     AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryServiceInfo, BatteryStatus,
-    ConflictServiceInfo, CpuBoostMode, CpuTuningBackend, DiagnosticReport, DiagnosticsBackend,
-    DisplayBackend, DisplayModeInfo, FanMode, GpuMode, GpuSwitchBackend, InstalledCopyStatus,
-    KeyboardBackend, KeyboardType, PerformanceMode, Result, RgbColor, SecurityStatus,
-    TelemetryBackend, TelemetrySnapshot, ThermalFanBackend,
+    ChangeDomain, ChangeHistory, ConflictServiceInfo, CpuBoostMode, CpuTuningBackend,
+    DiagnosticReport, DiagnosticsBackend, DisplayBackend, DisplayModeInfo, FanCurve, FanMode,
+    GpuMode, GpuSwitchBackend, HardwareChangeEntry, InstalledCopyStatus, KeyboardBackend,
+    KeyboardType, PerformanceMode, Result, RevertPayload, RgbColor, SecurityStatus,
+    TelemetryBackend, TelemetrySnapshot, ThermalFanBackend, UpdateUiStatus, WindowsPowerOverlay,
 };
 use std::collections::VecDeque;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -26,7 +37,9 @@ use std::time::{Duration, Instant};
 use omvix_windows::{
     WindowsBatteryBackend, WindowsCpuTuningBackend, WindowsDiagnosticsBackend,
     WindowsDisplayBackend, WindowsGpuSwitchBackend, WindowsKeyboardBackend,
-    WindowsTelemetryBackend, WindowsThermalFanBackend, system_info, wmi_bios::HpWmiBios,
+    WindowsTelemetryBackend, WindowsThermalFanBackend,
+    notifications::{ToastSeverity, send_windows_toast, show_mode_osd},
+    system_info, wmi_bios::HpWmiBios,
 };
 
 const MAX_HISTORY_SAMPLES: usize = 180;
@@ -101,6 +114,7 @@ pub struct SharedState {
     pub cpu_usage_stats: MetricStats,
     pub gpu_usage_stats: MetricStats,
     pub telemetry_paused: bool,
+    pub safe_mode: Option<SafeModeReason>,
     pub thermal_guard_active: bool,
     pub sensor_loss_active: bool,
     pub board_id: String,
@@ -122,6 +136,23 @@ pub struct SharedState {
     pub security: SecurityStatus,
     pub conflict_services: Vec<ConflictServiceInfo>,
     pub hp_charge_service_running: bool,
+    pub effective_performance_mode: PerformanceMode,
+    pub effective_fan_mode: FanMode,
+    pub active_app_profile: Option<String>,
+    pub active_app_profile_id: Option<String>,
+    pub active_win_power_mode: Option<WindowsPowerOverlay>,
+    pub auto_applied_revision: u64,
+    pub running_exes_snapshot: Vec<String>,
+    pub change_history: Vec<HardwareChangeEntry>,
+    pub synced_config_rev: u64,
+    pub synced_config: Option<AppConfig>,
+    pub last_support_bundle_path: Option<PathBuf>,
+    pub support_bundle_busy: bool,
+    pub telemetry_csv_rows: VecDeque<TelemetryCsvRow>,
+    pub last_csv_export_path: Option<PathBuf>,
+    pub battery_health_history: Vec<BatteryHealthRecord>,
+    pub update_status: UpdateUiStatus,
+    pub pending_update_relaunch: Option<PathBuf>,
     pub last_toast: Option<(String, bool, Instant)>,
 }
 
@@ -145,6 +176,7 @@ impl Default for SharedState {
             cpu_usage_stats: MetricStats::new(),
             gpu_usage_stats: MetricStats::new(),
             telemetry_paused: false,
+            safe_mode: None,
             thermal_guard_active: false,
             sensor_loss_active: false,
             board_id: String::new(),
@@ -172,6 +204,23 @@ impl Default for SharedState {
             },
             conflict_services: Vec::new(),
             hp_charge_service_running: false,
+            effective_performance_mode: PerformanceMode::default(),
+            effective_fan_mode: FanMode::default(),
+            active_app_profile: None,
+            active_app_profile_id: None,
+            active_win_power_mode: None,
+            auto_applied_revision: 0,
+            running_exes_snapshot: Vec::new(),
+            change_history: Vec::new(),
+            synced_config_rev: 0,
+            synced_config: None,
+            last_support_bundle_path: None,
+            support_bundle_busy: false,
+            telemetry_csv_rows: VecDeque::with_capacity(MAX_TELEMETRY_CSV_ROWS),
+            last_csv_export_path: None,
+            battery_health_history: Vec::new(),
+            update_status: UpdateUiStatus::Idle,
+            pending_update_relaunch: None,
             last_toast: None,
         }
     }
@@ -192,6 +241,7 @@ impl SharedState {
         self.cpu_power_history.clear();
         self.gpu_power_history.clear();
         self.battery_power_history.clear();
+        self.telemetry_csv_rows.clear();
         self.cpu_temp_stats = MetricStats::new();
         self.gpu_temp_stats = MetricStats::new();
         self.cpu_power_stats = MetricStats::new();
@@ -239,9 +289,22 @@ pub enum WorkerCommand {
         args: String,
     },
     RestoreAllDefaults,
+    ExitSafeMode,
     RebootSystem,
     RefreshDiagnostics,
     ExportDiagnostics(PathBuf),
+    ApplyAutoProfileNow,
+    RefreshRunningProcesses,
+    UndoLastChange,
+    UndoChangeById(u64),
+    ClearChangeHistory,
+    CreateSupportBundle(PathBuf),
+    ExportTelemetryCsv(PathBuf),
+    RecordBatteryHealthNow,
+    CheckForUpdates { silent: bool },
+    DownloadAndVerifyUpdate,
+    ApplyStagedUpdate,
+    OpenReleasePage(String),
     Shutdown,
 }
 
@@ -265,9 +328,15 @@ impl BackgroundWorker {
         initial_config: AppConfig,
         ctx: Option<egui::Context>,
         window_visible: Arc<AtomicBool>,
+        initial_safe_mode: Option<SafeModeReason>,
+        crash_guard: Arc<Mutex<CrashGuardState>>,
+        crash_guard_path: PathBuf,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<WorkerCommand>();
         let mut initial_state = SharedState::default();
+        initial_state.safe_mode = initial_safe_mode;
+        initial_state.effective_performance_mode = initial_config.thermal_fan.performance_mode;
+        initial_state.effective_fan_mode = initial_config.thermal_fan.fan_mode;
         #[cfg(windows)]
         {
             // Populate Admin elevation synchronously (<0.01ms) so Frame 1 shows accurate badge immediately.
@@ -281,7 +350,17 @@ impl BackgroundWorker {
 
         let join = thread::spawn(move || {
             let _alive_guard = AliveDropGuard(alive_bg);
-            run_worker_loop(initial_config, state_bg, rx, tx_bg, ctx, window_visible);
+            run_worker_loop(
+                initial_config,
+                state_bg,
+                rx,
+                tx_bg,
+                ctx,
+                window_visible,
+                initial_safe_mode,
+                crash_guard,
+                crash_guard_path,
+            );
         });
 
         Self {
@@ -425,7 +504,47 @@ fn check_bios_write_allowed(
     false
 }
 
+fn record_hw_write_attempt(
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    path: &Path,
+    recorded: &mut bool,
+) {
+    if *recorded {
+        return;
+    }
+    if let Ok(mut guard) = crash_guard.lock() {
+        if guard.record_hw_applied(current_unix_secs()) {
+            let _ = guard.save_to_path(path);
+        }
+        *recorded = true;
+    }
+}
+
+fn check_hw_write_allowed(
+    safe_mode: Option<SafeModeReason>,
+    bios_writes_allowed: bool,
+    requires_bios: bool,
+    state: &Arc<Mutex<SharedState>>,
+    action_name: &str,
+) -> bool {
+    if safe_mode.is_some() {
+        tracing::warn!(%action_name, "Blocked hardware write: Safe Mode is active");
+        if let Ok(mut st) = state.lock() {
+            st.set_toast(
+                format!("Blocked {action_name}: Safe Mode is active"),
+                true,
+            );
+        }
+        return false;
+    }
+    if requires_bios && !bios_writes_allowed {
+        return check_bios_write_allowed(false, state, action_name);
+    }
+    true
+}
+
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 fn run_worker_loop(
     mut cfg: AppConfig,
     state: Arc<Mutex<SharedState>>,
@@ -433,6 +552,9 @@ fn run_worker_loop(
     self_tx: Sender<WorkerCommand>,
     ctx: Option<egui::Context>,
     window_visible: Arc<AtomicBool>,
+    initial_safe_mode: Option<SafeModeReason>,
+    crash_guard: Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: PathBuf,
 ) {
     // Hold a single persistent COM/WMI session on this worker thread for its entire lifetime.
     let _wmi_scope = HpWmiBios::enable_thread_cache();
@@ -448,20 +570,24 @@ fn run_worker_loop(
 
     let mut battery_engine = BatteryCareEngine::new();
     let mut auto_profile_engine = AutoProfileEngine::new();
+    let mut app_profile_engine = AppProfileEngine::new();
+    let mut active_curve_override: Option<FanCurve> = None;
 
     let started = Instant::now();
 
-    // Phase 1 discovery: instant live telemetry + display modes + CPU boost
+    // Phase 1 discovery: instant live telemetry + display modes + CPU boost + Windows power overlay
     {
         let snap = telemetry_be.read_telemetry().ok();
         let disp = display_be.get_display_mode().ok();
         let boost = tuning_be.read_cpu_boost_mode().ok();
+        let win_overlay = omvix_windows::power_mode::read_windows_power_overlay();
         if let Ok(mut st) = state.lock() {
             if let Some(s) = snap {
                 record_snapshot(&mut st, &s, started.elapsed().as_secs_f64());
             }
             st.display_mode = disp;
             st.cpu_boost = boost;
+            st.active_win_power_mode = win_overlay;
             st.pawnio_cpu_active = telemetry_be.is_pawnio_active();
         }
         request_repaint_if_visible(&ctx, &window_visible);
@@ -492,6 +618,22 @@ fn run_worker_loop(
         let copy_status = omvix_windows::autostart::query_installed_copy_status();
         let bat = battery_be.get_battery_status().ok();
         let bat_svc = omvix_windows::battery_service::query_service_info();
+        let battery_history_path = battery_history_path_for(&crash_guard_path);
+        let mut battery_health_init = BatteryHealthHistory::load_from_path(&battery_history_path);
+        if let Some(ref b) = bat {
+            if let (Some(design), Some(full)) = (b.design_capacity_mwh, b.full_charge_capacity_mwh)
+            {
+                let date_label = chrono::Local::now().format("%Y-%m-%d").to_string();
+                if battery_health_init.record_if_due(
+                    design,
+                    full,
+                    current_unix_secs() as i64,
+                    date_label,
+                ) {
+                    let _ = battery_health_init.save_to_path(&battery_history_path);
+                }
+            }
+        }
         let kbd_type = kbd_be.detect_keyboard_type().unwrap_or(KeyboardType::Unknown);
         let gpu_mode = if is_admin {
             gpu_be.get_gpu_mode().ok()
@@ -505,6 +647,7 @@ fn run_worker_loop(
             st.installed_copy_status = copy_status;
             st.battery_status = bat;
             st.battery_service = bat_svc;
+            st.battery_health_history = battery_health_init.records.clone();
             st.keyboard_type = kbd_type;
             st.gpu_mode = gpu_mode;
         }
@@ -554,6 +697,9 @@ fn run_worker_loop(
             st.diagnostics = diag;
         }
         request_repaint_if_visible(&ctx, &window_visible);
+        if cfg.general.auto_check_updates && initial_safe_mode.is_none() {
+            let _ = self_tx.send(WorkerCommand::CheckForUpdates { silent: true });
+        }
     }
 
     let mut last_telemetry = Instant::now();
@@ -561,12 +707,24 @@ fn run_worker_loop(
     let mut last_guard_eval = Instant::now();
     let mut last_curve_eval = Instant::now();
     let mut last_keep_alive = Instant::now();
+    let mut last_app_profile_poll = Instant::now();
     let mut prev_curve_temp: f32 = 45.0;
     let mut prev_curve_speed: u8 = 40;
     let mut last_applied_bat_mode: Option<BatteryChargeMode> = None;
     let mut sensor_loss_guard = SensorLossGuard::new(DEFAULT_SENSOR_LOSS_TIMEOUT_SECS);
     let mut thermal_guard = ThermalSafetyGuard::new();
     let mut retry_ctrl = GuardMaxRetryController::new();
+    let mut safe_mode = initial_safe_mode;
+    let mut hw_applied_recorded = false;
+    let mut stabilized_recorded = false;
+    let mut last_stability_check = Instant::now();
+    let mut bat_limit_toast_sent = false;
+    let mut change_history = ChangeHistory::default();
+    let mut last_committed_battery = cfg.battery.clone();
+    let mut last_committed_lighting = cfg.lighting.clone();
+    let mut last_committed_power_limits = (cfg.tuning.pl1_watts, cfg.tuning.pl2_watts);
+    let battery_history_path = battery_history_path_for(&crash_guard_path);
+    let mut battery_health_history = BatteryHealthHistory::load_from_path(&battery_history_path);
 
     loop {
         let interval_ms = cfg.general.telemetry_interval_ms.clamp(100, 10_000);
@@ -595,14 +753,27 @@ fn run_worker_loop(
                         &display_be,
                         &tuning_be,
                         &mut battery_engine,
+                        &mut auto_profile_engine,
+                        &mut app_profile_engine,
+                        &mut active_curve_override,
                         &mut sensor_loss_guard,
                         &mut thermal_guard,
                         &mut retry_ctrl,
                         &board_id,
                         &mut bios_writes_allowed,
+                        &mut safe_mode,
+                        &crash_guard,
+                        &crash_guard_path,
+                        &mut hw_applied_recorded,
                         &mut last_applied_bat_mode,
                         &mut prev_curve_temp,
                         &mut prev_curve_speed,
+                        &mut change_history,
+                        &mut last_committed_battery,
+                        &mut last_committed_lighting,
+                        &mut last_committed_power_limits,
+                        &mut battery_health_history,
+                        &battery_history_path,
                     );
                     if should_shutdown {
                         return;
@@ -612,6 +783,22 @@ fn run_worker_loop(
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        if hw_applied_recorded
+            && !stabilized_recorded
+            && last_stability_check.elapsed() >= Duration::from_secs(2)
+        {
+            last_stability_check = Instant::now();
+            if let Ok(mut cg) = crash_guard.lock() {
+                if cg.check_and_mark_stabilized(current_unix_secs()) {
+                    let _ = cg.save_to_path(&crash_guard_path);
+                    stabilized_recorded = true;
+                    tracing::info!(
+                        "Hardware session stabilized (>=60s); crash-loop guard marked healthy"
+                    );
+                }
+            }
         }
 
         // Periodic telemetry poll (throttled to >= 1.0s & Optimus-safe when hidden in tray)
@@ -646,38 +833,56 @@ fn run_worker_loop(
                 }
 
                 // R1: Evaluate temperature sensor-loss safety timeout (default 6s)
+                let eff_fan_mode = effective_fan_mode(&cfg, app_profile_engine.active_rule());
                 let has_any_temp = snap.cpu_temp_c.is_some()
                     || snap.gpu_temp_c.is_some()
                     || snap.chassis_temp_c.is_some();
                 let cool_hint = cool_hint_from_snapshot(&snap);
-                let restore_pct = if cfg.thermal_fan.fan_mode == FanMode::CustomCurve {
-                    resolve_fan_target_pct(
-                        &cfg,
-                        &snap,
-                        FanMode::CustomCurve,
-                        Some(cfg.thermal_fan.manual_speed_pct),
-                        &mut prev_curve_temp,
-                        &mut prev_curve_speed,
-                    )
-                } else {
-                    Some(cfg.thermal_fan.manual_speed_pct)
+                let restore_pct = {
+                    let active_curve = active_curve_override
+                        .as_ref()
+                        .unwrap_or(&cfg.thermal_fan.custom_curve);
+                    if eff_fan_mode == FanMode::CustomCurve {
+                        resolve_fan_target_pct_with_curve(
+                            active_curve,
+                            &snap,
+                            FanMode::CustomCurve,
+                            Some(cfg.thermal_fan.manual_speed_pct),
+                            &mut prev_curve_temp,
+                            &mut prev_curve_speed,
+                        )
+                    } else {
+                        Some(cfg.thermal_fan.manual_speed_pct)
+                    }
                 };
                 let (sl_dec, _) = step_sensor_loss_cycle(
                     &mut sensor_loss_guard,
                     has_any_temp,
                     t,
-                    bios_writes_allowed,
+                    bios_writes_allowed && safe_mode.is_none(),
                     thermal_guard.is_active(),
-                    cfg.thermal_fan.fan_mode,
+                    eff_fan_mode,
                     restore_pct,
                     cool_hint,
-                    |m, pct, cool| thermal_be.set_fan_mode_with_cool_hint(m, pct, cool),
+                    |m, pct, cool| {
+                        record_hw_write_attempt(
+                            &crash_guard,
+                            &crash_guard_path,
+                            &mut hw_applied_recorded,
+                        );
+                        thermal_be.set_fan_mode_with_cool_hint(m, pct, cool)
+                    },
                 );
                 match sl_dec {
                     SensorLossDecision::EngageAutoFallback => {
                         tracing::warn!(
                             timeout_secs = DEFAULT_SENSOR_LOSS_TIMEOUT_SECS,
                             "All temperature sensors missing; forcing BIOS Auto fan control"
+                        );
+                        send_windows_toast(
+                            "Omvix Hub — Sensor Loss",
+                            "Temperature sensors lost (>6s). Fans reverted to BIOS Auto mode.",
+                            ToastSeverity::Warning,
                         );
                         if let Ok(mut st) = state.lock() {
                             st.sensor_loss_active = true;
@@ -689,7 +894,7 @@ fn run_worker_loop(
                     }
                     SensorLossDecision::RestoreUserMode => {
                         tracing::info!(
-                            mode = ?cfg.thermal_fan.fan_mode,
+                            mode = ?eff_fan_mode,
                             "Thermal sensors recovered -> restored user fan control"
                         );
                         if let Ok(mut st) = state.lock() {
@@ -700,47 +905,41 @@ fn run_worker_loop(
                     SensorLossDecision::NoChange => {}
                 }
 
-                // Evaluate AC/DC Auto-Profile on transitions
-                if let Some(ac) = snap.ac_connected {
-                    if let Some(action) = auto_profile_engine.evaluate(&cfg.auto_profile, ac, false)
-                    {
-                        tracing::info!(?action, "AC/DC transition triggered auto-profile");
-                        if bios_writes_allowed {
-                            if let Err(err) = thermal_be.set_performance_mode(action.performance_mode)
-                            {
-                                tracing::warn!("Auto-profile performance mode write failed: {err}");
-                            }
-                        }
-                        if let Some(hz) = action.refresh_hz {
-                            if display_be.set_refresh_rate(hz).is_ok() {
-                                if let Ok(disp) = display_be.get_display_mode() {
-                                    if let Ok(mut st) = state.lock() {
-                                        st.display_mode = Some(disp);
-                                    }
-                                }
-                            }
-                        }
-                        if bios_writes_allowed {
-                            let kbd_res = if action.dim_keyboard {
-                                kbd_be.set_backlight(false, 0, &cfg.lighting.zones)
-                            } else if cfg.lighting.enabled {
-                                kbd_be.set_backlight(
-                                    true,
-                                    cfg.lighting.brightness_pct,
-                                    &cfg.lighting.zones,
-                                )
-                            } else {
-                                Ok(())
-                            };
-                            if let Err(err) = kbd_res {
-                                tracing::warn!("Auto-profile keyboard backlight write failed: {err}");
-                            }
+                // Evaluate AC/DC Auto-Profile on transitions (skipped while Safe Mode active)
+                if safe_mode.is_none() {
+                    if let Some(ac) = snap.ac_connected {
+                        if let Some(action) =
+                            auto_profile_engine.evaluate(&cfg.auto_profile, ac, false)
+                        {
+                            tracing::info!(?action, "AC/DC transition triggered auto-profile");
+                            apply_auto_profile_action(
+                                action,
+                                ac,
+                                &mut cfg,
+                                &state,
+                                &thermal_be,
+                                &display_be,
+                                &kbd_be,
+                                &mut app_profile_engine,
+                                &mut active_curve_override,
+                                &sensor_loss_guard,
+                                &thermal_guard,
+                                bios_writes_allowed,
+                                safe_mode,
+                                &crash_guard,
+                                &crash_guard_path,
+                                &mut hw_applied_recorded,
+                                &mut prev_curve_temp,
+                                &mut prev_curve_speed,
+                            );
                         }
                     }
                 }
 
                 // Evaluate thermal safety guard & R3 Max-retry at >= 1s intervals
-                if !sensor_loss_guard.is_active()
+                let eff_fan_mode = effective_fan_mode(&cfg, app_profile_engine.active_rule());
+                if safe_mode.is_none()
+                    && !sensor_loss_guard.is_active()
                     && last_guard_eval.elapsed() >= Duration::from_millis(950)
                 {
                     last_guard_eval = Instant::now();
@@ -750,7 +949,7 @@ fn run_worker_loop(
                     };
                     match thermal_guard.evaluate(
                         guard_cfg,
-                        cfg.thermal_fan.fan_mode,
+                        eff_fan_mode,
                         snap.cpu_temp_c,
                         snap.gpu_temp_c,
                         snap.chassis_temp_c,
@@ -762,6 +961,11 @@ fn run_worker_loop(
                             tracing::warn!(%reason, "Thermal safety guard engaging emergency Max Fan");
                             retry_ctrl.begin_engage(&snap.fan_rpms, t);
                             if bios_writes_allowed {
+                                record_hw_write_attempt(
+                                    &crash_guard,
+                                    &crash_guard_path,
+                                    &mut hw_applied_recorded,
+                                );
                                 let res = thermal_be.set_fan_mode(FanMode::Max, None);
                                 if let Err(ref err) = res {
                                     tracing::warn!("Emergency Max Fan write failed: {err}");
@@ -769,6 +973,11 @@ fn run_worker_loop(
                                 match retry_ctrl.record_attempt_result(res.is_ok(), t) {
                                     GuardMaxAction::FallbackToAuto(msg) => {
                                         tracing::error!("{msg}");
+                                        send_windows_toast(
+                                            "Omvix Hub — Thermal Guard Fallback",
+                                            &msg,
+                                            ToastSeverity::Error,
+                                        );
                                         if let Err(err) = thermal_be.set_fan_mode(FanMode::Auto, None) {
                                             tracing::error!("Guard Auto fan fallback failed: {err}");
                                         }
@@ -778,6 +987,11 @@ fn run_worker_loop(
                                         }
                                     }
                                     _ => {
+                                        send_windows_toast(
+                                            "Omvix Hub — Thermal Guard",
+                                            &format!("Emergency Max Fan active ({reason})."),
+                                            ToastSeverity::Warning,
+                                        );
                                         if let Ok(mut st) = state.lock() {
                                             st.thermal_guard_active = true;
                                             st.set_toast(format!("Thermal Guard: {reason} -> Max Fan"), true);
@@ -793,9 +1007,16 @@ fn run_worker_loop(
                             tracing::info!("Thermal safety guard releasing emergency Max Fan");
                             retry_ctrl.reset();
                             if bios_writes_allowed {
+                                record_hw_write_attempt(
+                                    &crash_guard,
+                                    &crash_guard_path,
+                                    &mut hw_applied_recorded,
+                                );
                                 let is_cool = cool_hint_from_snapshot(&snap);
+                                let rel_fan_mode =
+                                    effective_fan_mode(&cfg, app_profile_engine.active_rule());
                                 if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(
-                                    cfg.thermal_fan.fan_mode,
+                                    rel_fan_mode,
                                     Some(cfg.thermal_fan.manual_speed_pct),
                                     is_cool,
                                 ) {
@@ -812,6 +1033,11 @@ fn run_worker_loop(
                                 match retry_ctrl.tick(&snap.fan_rpms, &snap.fan_max_rpms, t) {
                                     GuardMaxAction::RetryMax { attempt } => {
                                         tracing::warn!(attempt, "Retrying Emergency Max Fan command");
+                                        record_hw_write_attempt(
+                                            &crash_guard,
+                                            &crash_guard_path,
+                                            &mut hw_applied_recorded,
+                                        );
                                         let res = thermal_be.set_fan_mode(FanMode::Max, None);
                                         if let Err(ref err) = res {
                                             tracing::warn!(attempt, "Max Fan retry failed: {err}");
@@ -820,6 +1046,11 @@ fn run_worker_loop(
                                             retry_ctrl.record_attempt_result(res.is_ok(), t)
                                         {
                                             tracing::error!("{msg}");
+                                            send_windows_toast(
+                                                "Omvix Hub — Thermal Guard Fallback",
+                                                &msg,
+                                                ToastSeverity::Error,
+                                            );
                                             if let Err(err) =
                                                 thermal_be.set_fan_mode(FanMode::Auto, None)
                                             {
@@ -838,6 +1069,16 @@ fn run_worker_loop(
                                     }
                                     GuardMaxAction::FallbackToAuto(msg) => {
                                         tracing::error!("{msg}");
+                                        send_windows_toast(
+                                            "Omvix Hub — Thermal Guard Fallback",
+                                            &msg,
+                                            ToastSeverity::Error,
+                                        );
+                                        record_hw_write_attempt(
+                                            &crash_guard,
+                                            &crash_guard_path,
+                                            &mut hw_applied_recorded,
+                                        );
                                         if let Err(err) = thermal_be.set_fan_mode(FanMode::Auto, None)
                                         {
                                             tracing::error!("Guard Auto fallback failed: {err}");
@@ -854,10 +1095,12 @@ fn run_worker_loop(
                 }
 
                 // Evaluate custom fan curve (every 2s) when emergency & sensor-loss guards are inactive
-                if bios_writes_allowed
+                let eff_fan_mode = effective_fan_mode(&cfg, app_profile_engine.active_rule());
+                if safe_mode.is_none()
+                    && bios_writes_allowed
                     && !sensor_loss_guard.is_active()
                     && !thermal_guard.is_active()
-                    && cfg.thermal_fan.fan_mode == FanMode::CustomCurve
+                    && eff_fan_mode == FanMode::CustomCurve
                     && last_curve_eval.elapsed() >= Duration::from_secs(2)
                 {
                     last_curve_eval = Instant::now();
@@ -867,13 +1110,21 @@ fn run_worker_loop(
                         snap.chassis_temp_c,
                         snap.cpu_power_w,
                     ) {
-                        let target_pct = cfg.thermal_fan.custom_curve.evaluate(
+                        let active_curve = active_curve_override
+                            .as_ref()
+                            .unwrap_or(&cfg.thermal_fan.custom_curve);
+                        let target_pct = active_curve.evaluate(
                             temp,
                             prev_curve_temp,
                             prev_curve_speed,
                         );
                         let is_cool = cool_hint_from_snapshot(&snap);
                         if target_pct != prev_curve_speed {
+                            record_hw_write_attempt(
+                                &crash_guard,
+                                &crash_guard_path,
+                                &mut hw_applied_recorded,
+                            );
                             if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(
                                 FanMode::CustomCurve,
                                 Some(target_pct),
@@ -895,6 +1146,63 @@ fn run_worker_loop(
             }
         }
 
+        // Evaluate app-based .exe profiles (skipped while Safe Mode active)
+        let app_poll_interval =
+            Duration::from_secs(cfg.app_profiles.poll_interval_secs.clamp(2, 15));
+        let should_eval_apps = safe_mode.is_none()
+            && ((cfg.app_profiles.enabled && !cfg.app_profiles.rules.is_empty())
+                || app_profile_engine.active_rule().is_some());
+        if should_eval_apps
+            && ((!cfg.app_profiles.enabled && app_profile_engine.active_rule().is_some())
+                || last_app_profile_poll.elapsed() >= app_poll_interval)
+        {
+            last_app_profile_poll = Instant::now();
+            let running = if cfg.app_profiles.enabled {
+                omvix_windows::processes::running_process_names_lower()
+            } else {
+                std::collections::HashSet::new()
+            };
+            let transition = app_profile_engine.evaluate(&cfg.app_profiles, &running, || {
+                let st_guard = state.lock().ok();
+                let refresh_hz = st_guard
+                    .as_ref()
+                    .and_then(|s| s.display_mode.as_ref().map(|d| d.current_hz));
+                let cpu_boost_mode = st_guard
+                    .as_ref()
+                    .and_then(|s| s.cpu_boost)
+                    .or(cfg.tuning.cpu_boost_mode);
+                ProfileBaseline {
+                    performance_mode: cfg.thermal_fan.performance_mode,
+                    fan_mode: cfg.thermal_fan.fan_mode,
+                    manual_speed_pct: cfg.thermal_fan.manual_speed_pct,
+                    custom_curve: active_curve_override
+                        .clone()
+                        .unwrap_or_else(|| cfg.thermal_fan.custom_curve.clone()),
+                    refresh_hz,
+                    cpu_boost_mode,
+                }
+            });
+            apply_app_profile_transition(
+                transition,
+                &mut cfg,
+                &state,
+                &thermal_be,
+                &display_be,
+                &tuning_be,
+                &mut active_curve_override,
+                &sensor_loss_guard,
+                &thermal_guard,
+                bios_writes_allowed,
+                safe_mode,
+                &crash_guard,
+                &crash_guard_path,
+                &mut hw_applied_recorded,
+                &mut prev_curve_temp,
+                &mut prev_curve_speed,
+            );
+            request_repaint_if_visible(&ctx, &window_visible);
+        }
+
         // Periodic battery care poll (5s)
         if last_battery.elapsed() >= Duration::from_secs(5) {
             last_battery = Instant::now();
@@ -904,19 +1212,51 @@ fn run_worker_loop(
                     .map(|s| s.hp_charge_service_running)
                     .unwrap_or(false);
                 let own_svc_running = omvix_windows::battery_service::is_service_running();
-                if bios_writes_allowed && cfg.battery.enabled && !conflict_active && !own_svc_running {
+                if safe_mode.is_none()
+                    && bios_writes_allowed
+                    && cfg.battery.enabled
+                    && !conflict_active
+                    && !own_svc_running
+                {
                     let target = battery_engine.evaluate(
                         &mut cfg.battery,
                         bat.charge_percent,
                         bat.ac_connected,
                     );
                     if last_applied_bat_mode != Some(target) {
+                        record_hw_write_attempt(
+                            &crash_guard,
+                            &crash_guard_path,
+                            &mut hw_applied_recorded,
+                        );
                         if let Err(err) = battery_be.set_charge_mode(target) {
                             tracing::debug!("Auto battery limit skipped: {err}");
                         } else {
                             last_applied_bat_mode = Some(target);
                         }
                     }
+                }
+                if cfg.battery.enabled
+                    && !cfg.battery.one_time_full_charge
+                    && bat.ac_connected
+                    && bat.charge_percent >= cfg.battery.stop_threshold_pct
+                {
+                    if !bat_limit_toast_sent {
+                        bat_limit_toast_sent = true;
+                        send_windows_toast(
+                            "Omvix Hub — Battery Care",
+                            &format!(
+                                "Battery charge limit reached ({}%). Charging paused.",
+                                bat.charge_percent
+                            ),
+                            ToastSeverity::Info,
+                        );
+                    }
+                } else if !cfg.battery.enabled
+                    || !bat.ac_connected
+                    || bat.charge_percent < cfg.battery.start_threshold_pct
+                {
+                    bat_limit_toast_sent = false;
                 }
                 if let Ok(mut st) = state.lock() {
                     st.battery_status = Some(bat);
@@ -925,15 +1265,16 @@ fn run_worker_loop(
             }
         }
 
-        // BIOS 2-minute timeout keep-alive guard (disabled during R1 sensor-loss fallback)
+        // BIOS 2-minute timeout keep-alive guard (disabled during R1 sensor-loss fallback or Safe Mode)
         let ka_secs = cfg.thermal_fan.keep_alive_interval_secs.max(15);
         if should_run_keep_alive(
             cfg.thermal_fan.keep_alive_enabled,
             sensor_loss_guard.is_active(),
-            bios_writes_allowed,
+            bios_writes_allowed && safe_mode.is_none(),
         ) && last_keep_alive.elapsed() >= Duration::from_secs(ka_secs)
         {
             last_keep_alive = Instant::now();
+            record_hw_write_attempt(&crash_guard, &crash_guard_path, &mut hw_applied_recorded);
             let is_cool = current_cool_hint(&state);
             if let Err(err) = thermal_be.keep_alive_tick_with_cool_hint(is_cool) {
                 tracing::warn!("BIOS fan keep-alive tick failed: {err}");
@@ -979,7 +1320,19 @@ fn record_snapshot(st: &mut SharedState, snap: &TelemetrySnapshot, t: f64) {
     if let Some(bp) = snap.battery_rate_w {
         push_sample(&mut st.battery_power_history, t, bp.abs());
     }
+    if st.telemetry_csv_rows.len() >= MAX_TELEMETRY_CSV_ROWS {
+        st.telemetry_csv_rows.pop_front();
+    }
+    st.telemetry_csv_rows
+        .push_back(TelemetryCsvRow::from_snapshot(snap, t));
     st.telemetry = snap.clone();
+}
+
+#[cfg(windows)]
+fn effective_fan_mode(cfg: &AppConfig, active_rule: Option<&AppProfileRule>) -> FanMode {
+    active_rule
+        .and_then(|r| r.fan_mode)
+        .unwrap_or(cfg.thermal_fan.fan_mode)
 }
 
 #[cfg(windows)]
@@ -1000,38 +1353,65 @@ fn handle_worker_command(
     display_be: &WindowsDisplayBackend,
     tuning_be: &WindowsCpuTuningBackend,
     battery_engine: &mut BatteryCareEngine,
+    auto_profile_engine: &mut AutoProfileEngine,
+    app_profile_engine: &mut AppProfileEngine,
+    active_curve_override: &mut Option<FanCurve>,
     sensor_loss_guard: &mut SensorLossGuard,
     thermal_guard: &mut ThermalSafetyGuard,
     retry_ctrl: &mut GuardMaxRetryController,
     board_id: &str,
     bios_writes_allowed: &mut bool,
+    safe_mode: &mut Option<SafeModeReason>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
     last_applied_bat_mode: &mut Option<BatteryChargeMode>,
     prev_curve_temp: &mut f32,
     prev_curve_speed: &mut u8,
+    change_history: &mut ChangeHistory,
+    last_committed_battery: &mut BatteryConfig,
+    last_committed_lighting: &mut LightingConfig,
+    last_committed_power_limits: &mut (Option<u16>, Option<u16>),
+    battery_health_history: &mut BatteryHealthHistory,
+    battery_history_path: &Path,
 ) -> bool {
     match cmd {
         WorkerCommand::Shutdown => {
             tracing::info!("Background worker shutting down");
             apply_off_state_safety(
                 cfg,
+                effective_fan_mode(cfg, app_profile_engine.active_rule()),
                 thermal_guard,
                 thermal_be,
                 battery_be,
                 state,
-                *bios_writes_allowed,
+                *bios_writes_allowed && safe_mode.is_none(),
                 "clean shutdown",
             );
+            if let Ok(mut cg) = crash_guard.lock() {
+                cg.mark_clean_exit(current_unix_secs());
+                let _ = cg.save_to_path(crash_guard_path);
+            }
             return true;
+        }
+        WorkerCommand::ExitSafeMode => {
+            *safe_mode = None;
+            if let Ok(mut st) = state.lock() {
+                st.safe_mode = None;
+                st.set_toast("Exited Safe Mode — hardware controls enabled", false);
+            }
+            tracing::info!("User exited Safe Mode; hardware controls enabled");
         }
         WorkerCommand::SystemSuspending(ack) => {
             tracing::info!("System suspending -> applying Fan Auto & Battery off-state safety");
             apply_off_state_safety(
                 cfg,
+                effective_fan_mode(cfg, app_profile_engine.active_rule()),
                 thermal_guard,
                 thermal_be,
                 battery_be,
                 state,
-                *bios_writes_allowed,
+                *bios_writes_allowed && safe_mode.is_none(),
                 "system suspend",
             );
             let _ = ack.send(());
@@ -1040,13 +1420,18 @@ fn handle_worker_command(
             tracing::info!("System shutting down -> applying Fan Auto & Battery off-state safety");
             apply_off_state_safety(
                 cfg,
+                effective_fan_mode(cfg, app_profile_engine.active_rule()),
                 thermal_guard,
                 thermal_be,
                 battery_be,
                 state,
-                *bios_writes_allowed,
+                *bios_writes_allowed && safe_mode.is_none(),
                 "system shutdown",
             );
+            if let Ok(mut cg) = crash_guard.lock() {
+                cg.mark_clean_exit(current_unix_secs());
+                let _ = cg.save_to_path(crash_guard_path);
+            }
             let _ = ack.send(());
         }
         WorkerCommand::SystemResumed => {
@@ -1055,30 +1440,36 @@ fn handle_worker_command(
             sensor_loss_guard.reset();
             retry_ctrl.reset();
             *last_applied_bat_mode = None;
-            if *bios_writes_allowed {
-                if let Err(err) = thermal_be.set_performance_mode(cfg.thermal_fan.performance_mode)
-                {
+            let eff_perf = app_profile_engine
+                .active_rule()
+                .map(|r| r.performance_mode)
+                .unwrap_or(cfg.thermal_fan.performance_mode);
+            let eff_fan = effective_fan_mode(cfg, app_profile_engine.active_rule());
+            if *bios_writes_allowed && safe_mode.is_none() {
+                record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+                if let Err(err) = thermal_be.set_performance_mode(eff_perf) {
                     tracing::warn!("Failed restoring performance mode on resume: {err}");
                 }
+                sync_win_power_mode_if_enabled(cfg, eff_perf, *safe_mode, state);
 
                 let snap = state
                     .lock()
                     .map(|st| st.telemetry.clone())
                     .unwrap_or_default();
                 let is_cool = cool_hint_from_snapshot(&snap);
-                let target_pct = resolve_fan_target_pct(
-                    cfg,
+                let active_curve = active_curve_override
+                    .as_ref()
+                    .unwrap_or(&cfg.thermal_fan.custom_curve);
+                let target_pct = resolve_fan_target_pct_with_curve(
+                    active_curve,
                     &snap,
-                    cfg.thermal_fan.fan_mode,
+                    eff_fan,
                     Some(cfg.thermal_fan.manual_speed_pct),
                     prev_curve_temp,
                     prev_curve_speed,
                 );
-                if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(
-                    cfg.thermal_fan.fan_mode,
-                    target_pct,
-                    is_cool,
-                ) {
+                if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(eff_fan, target_pct, is_cool)
+                {
                     tracing::warn!("Failed restoring fan mode on resume: {err}");
                 }
                 if cfg.lighting.enabled {
@@ -1090,6 +1481,8 @@ fn handle_worker_command(
                         tracing::warn!("Failed restoring keyboard backlight on resume: {err}");
                     }
                 }
+            } else if safe_mode.is_some() {
+                tracing::info!("System resumed while Safe Mode active; skipping hardware restore");
             }
             if let Ok(mut st) = state.lock() {
                 st.thermal_guard_active = false;
@@ -1101,6 +1494,9 @@ fn handle_worker_command(
             let _ = new_cfg.thermal_fan.custom_curve.normalize();
             let curve_changed =
                 cfg.thermal_fan.custom_curve.points != new_cfg.thermal_fan.custom_curve.points;
+            if curve_changed {
+                *active_curve_override = None;
+            }
             let bat_changed = cfg.battery.enabled != new_cfg.battery.enabled
                 || cfg.battery.mode != new_cfg.battery.mode
                 || cfg.battery.stop_threshold_pct != new_cfg.battery.stop_threshold_pct
@@ -1119,16 +1515,18 @@ fn handle_worker_command(
             if let Ok(mut st) = state.lock() {
                 st.bios_writes_allowed = *bios_writes_allowed;
             }
-            if bat_changed {
+            if bat_changed && safe_mode.is_none() {
                 if let Err(err) =
                     omvix_windows::battery_service::sync_config_if_installed(&cfg.battery)
                 {
                     tracing::debug!("Failed syncing battery service config: {err}");
                 }
             }
-            if *bios_writes_allowed
+            let eff_fan = effective_fan_mode(cfg, app_profile_engine.active_rule());
+            if safe_mode.is_none()
+                && *bios_writes_allowed
                 && curve_changed
-                && cfg.thermal_fan.fan_mode == FanMode::CustomCurve
+                && eff_fan == FanMode::CustomCurve
                 && !thermal_guard.is_active()
                 && !sensor_loss_guard.is_active()
             {
@@ -1137,14 +1535,18 @@ fn handle_worker_command(
                     .map(|st| st.telemetry.clone())
                     .unwrap_or_default();
                 let is_cool = cool_hint_from_snapshot(&snap);
-                let target_pct = resolve_fan_target_pct(
-                    cfg,
+                let active_curve = active_curve_override
+                    .as_ref()
+                    .unwrap_or(&cfg.thermal_fan.custom_curve);
+                let target_pct = resolve_fan_target_pct_with_curve(
+                    active_curve,
                     &snap,
                     FanMode::CustomCurve,
                     Some(cfg.thermal_fan.manual_speed_pct),
                     prev_curve_temp,
                     prev_curve_speed,
                 );
+                record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
                 if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(
                     FanMode::CustomCurve,
                     target_pct,
@@ -1168,20 +1570,56 @@ fn handle_worker_command(
             }
         }
         WorkerCommand::SetPerformanceMode(mode) => {
-            if !check_bios_write_allowed(*bios_writes_allowed, state, "SetPerformanceMode") {
+            if !check_hw_write_allowed(
+                *safe_mode,
+                *bios_writes_allowed,
+                true,
+                state,
+                "SetPerformanceMode",
+            ) {
                 return false;
             }
+            let prev_mode = cfg.thermal_fan.performance_mode;
+            record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             cfg.thermal_fan.performance_mode = mode;
             let res = thermal_be.set_performance_mode(mode);
+            if res.is_ok() {
+                sync_win_power_mode_if_enabled(cfg, mode, *safe_mode, state);
+                if let Ok(mut st) = state.lock() {
+                    st.effective_performance_mode = mode;
+                }
+                record_history_entry(
+                    change_history,
+                    state,
+                    ChangeDomain::PerformanceMode,
+                    format!("{prev_mode:?}"),
+                    format!("{mode:?}"),
+                    RevertPayload::PerformanceMode(prev_mode),
+                );
+            }
             record_result(state, res, format!("Performance mode -> {mode:?}"));
         }
         WorkerCommand::SetFanMode {
             mode,
             manual_speed_pct,
         } => {
-            if !check_bios_write_allowed(*bios_writes_allowed, state, "SetFanMode") {
+            if !check_hw_write_allowed(
+                *safe_mode,
+                *bios_writes_allowed,
+                true,
+                state,
+                "SetFanMode",
+            ) {
                 return false;
             }
+            let prev_mode = cfg.thermal_fan.fan_mode;
+            let prev_pct = cfg.thermal_fan.manual_speed_pct;
+            let prev_curve = active_curve_override
+                .clone()
+                .unwrap_or_else(|| cfg.thermal_fan.custom_curve.clone());
+            let old_sum = format_fan_summary(prev_mode, prev_pct);
+
+            *active_curve_override = None;
             cfg.thermal_fan.fan_mode = mode;
             if let Some(pct) = manual_speed_pct {
                 cfg.thermal_fan.manual_speed_pct = pct;
@@ -1201,37 +1639,98 @@ fn handle_worker_command(
                 .map(|st| st.telemetry.clone())
                 .unwrap_or_default();
             let is_cool = cool_hint_from_snapshot(&snap);
-            let target_pct = resolve_fan_target_pct(
-                cfg,
+            let target_pct = resolve_fan_target_pct_with_curve(
+                &cfg.thermal_fan.custom_curve,
                 &snap,
                 mode,
                 manual_speed_pct,
                 prev_curve_temp,
                 prev_curve_speed,
             );
+            record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             let res = thermal_be.set_fan_mode_with_cool_hint(mode, target_pct, is_cool);
+            if res.is_ok() {
+                if let Ok(mut st) = state.lock() {
+                    st.effective_fan_mode = mode;
+                }
+                let new_sum = format_fan_summary(mode, cfg.thermal_fan.manual_speed_pct);
+                record_history_entry(
+                    change_history,
+                    state,
+                    ChangeDomain::FanMode,
+                    old_sum,
+                    new_sum,
+                    RevertPayload::FanMode {
+                        mode: prev_mode,
+                        manual_speed_pct: prev_pct,
+                        custom_curve: prev_curve,
+                    },
+                );
+            }
             record_result(state, res, format!("Fan mode -> {mode:?}"));
         }
         WorkerCommand::ApplyBatteryNow => {
-            let _ = omvix_windows::battery_service::sync_config_if_installed(&cfg.battery);
-            if !check_bios_write_allowed(*bios_writes_allowed, state, "Battery 0x2B") {
+            if !check_hw_write_allowed(
+                *safe_mode,
+                *bios_writes_allowed,
+                true,
+                state,
+                "Battery 0x2B",
+            ) {
                 return false;
             }
+            let _ = omvix_windows::battery_service::sync_config_if_installed(&cfg.battery);
             if let Ok(bat) = battery_be.get_battery_status() {
+                let prev_bat = last_committed_battery.clone();
                 let target = battery_engine.evaluate(
                     &mut cfg.battery,
                     bat.charge_percent,
                     bat.ac_connected,
                 );
                 if bat.current_mode == target && *last_applied_bat_mode == Some(target) {
+                    record_history_entry(
+                        change_history,
+                        state,
+                        ChangeDomain::BatteryLimit,
+                        format_battery_summary(&prev_bat),
+                        format_battery_summary(&cfg.battery),
+                        RevertPayload::BatteryLimit {
+                            enabled: prev_bat.enabled,
+                            mode: prev_bat.mode,
+                            stop_threshold_pct: prev_bat.stop_threshold_pct,
+                            start_threshold_pct: prev_bat.start_threshold_pct,
+                            hold_when_shutdown: prev_bat.hold_when_shutdown,
+                            one_time_full_charge: prev_bat.one_time_full_charge,
+                            active_profile_id: prev_bat.active_profile_id,
+                        },
+                    );
+                    *last_committed_battery = cfg.battery.clone();
                     if let Ok(mut st) = state.lock() {
                         st.battery_status = Some(bat);
                         st.set_toast(format!("Battery charge mode -> {target:?}"), false);
                     }
                 } else {
+                    record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
                     let res = battery_be.set_charge_mode(target);
                     if res.is_ok() {
                         *last_applied_bat_mode = Some(target);
+                        record_history_entry(
+                            change_history,
+                            state,
+                            ChangeDomain::BatteryLimit,
+                            format_battery_summary(&prev_bat),
+                            format_battery_summary(&cfg.battery),
+                            RevertPayload::BatteryLimit {
+                                enabled: prev_bat.enabled,
+                                mode: prev_bat.mode,
+                                stop_threshold_pct: prev_bat.stop_threshold_pct,
+                                start_threshold_pct: prev_bat.start_threshold_pct,
+                                hold_when_shutdown: prev_bat.hold_when_shutdown,
+                                one_time_full_charge: prev_bat.one_time_full_charge,
+                                active_profile_id: prev_bat.active_profile_id,
+                            },
+                        );
+                        *last_committed_battery = cfg.battery.clone();
                     }
                     if let Ok(refreshed) = battery_be.get_battery_status() {
                         if let Ok(mut st) = state.lock() {
@@ -1243,19 +1742,66 @@ fn handle_worker_command(
             }
         }
         WorkerCommand::ApplyLighting => {
-            if !check_bios_write_allowed(*bios_writes_allowed, state, "Keyboard Lighting") {
+            if !check_hw_write_allowed(
+                *safe_mode,
+                *bios_writes_allowed,
+                true,
+                state,
+                "Keyboard Lighting",
+            ) {
                 return false;
             }
+            let prev_light = last_committed_lighting.clone();
+            record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             let res = kbd_be.set_backlight(
                 cfg.lighting.enabled,
                 cfg.lighting.brightness_pct,
                 &cfg.lighting.zones,
             );
+            if res.is_ok() {
+                record_history_entry(
+                    change_history,
+                    state,
+                    ChangeDomain::KeyboardLighting,
+                    format_lighting_summary(&prev_light),
+                    format_lighting_summary(&cfg.lighting),
+                    RevertPayload::KeyboardLighting {
+                        enabled: prev_light.enabled,
+                        brightness_pct: prev_light.brightness_pct,
+                        zones: prev_light.zones,
+                    },
+                );
+                *last_committed_lighting = cfg.lighting.clone();
+            }
             record_result(state, res, "Keyboard lighting updated".to_string());
         }
         WorkerCommand::SetRefreshRate(hz) => {
+            if !check_hw_write_allowed(
+                *safe_mode,
+                *bios_writes_allowed,
+                false,
+                state,
+                "SetRefreshRate",
+            ) {
+                return false;
+            }
+            let prev_hz = state
+                .lock()
+                .ok()
+                .and_then(|s| s.display_mode.as_ref().map(|d| d.current_hz));
+            record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             let res = display_be.set_refresh_rate(hz);
             if res.is_ok() {
+                if let Some(old_hz) = prev_hz {
+                    record_history_entry(
+                        change_history,
+                        state,
+                        ChangeDomain::DisplayRefreshRate,
+                        format!("{old_hz} Hz"),
+                        format!("{hz} Hz"),
+                        RevertPayload::DisplayRefreshRate(old_hz),
+                    );
+                }
                 if let Ok(disp) = display_be.get_display_mode() {
                     if let Ok(mut st) = state.lock() {
                         st.display_mode = Some(disp);
@@ -1265,9 +1811,16 @@ fn handle_worker_command(
             record_result(state, res, format!("Refresh rate -> {hz} Hz"));
         }
         WorkerCommand::SetGpuMode(mode) => {
-            if !check_bios_write_allowed(*bios_writes_allowed, state, "GPU MUX Switch") {
+            if !check_hw_write_allowed(
+                *safe_mode,
+                *bios_writes_allowed,
+                true,
+                state,
+                "GPU MUX Switch",
+            ) {
                 return false;
             }
+            record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             let res = gpu_be.set_gpu_mode(mode);
             if res.is_ok() {
                 if let Ok(mut st) = state.lock() {
@@ -1282,19 +1835,71 @@ fn handle_worker_command(
             );
         }
         WorkerCommand::SetCpuBoost(mode) => {
+            if !check_hw_write_allowed(
+                *safe_mode,
+                *bios_writes_allowed,
+                false,
+                state,
+                "SetCpuBoost",
+            ) {
+                return false;
+            }
+            let prev_boost = state
+                .lock()
+                .ok()
+                .and_then(|s| s.cpu_boost)
+                .or(cfg.tuning.cpu_boost_mode);
+            record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             let res = tuning_be.set_cpu_boost_mode(mode);
             if res.is_ok() {
+                cfg.tuning.cpu_boost_mode = Some(mode);
                 if let Ok(mut st) = state.lock() {
                     st.cpu_boost = Some(mode);
+                }
+                if let Some(old_boost) = prev_boost {
+                    record_history_entry(
+                        change_history,
+                        state,
+                        ChangeDomain::CpuBoost,
+                        format!("{old_boost:?}"),
+                        format!("{mode:?}"),
+                        RevertPayload::CpuBoost(old_boost),
+                    );
                 }
             }
             record_result(state, res, format!("CPU Boost -> {mode:?}"));
         }
         WorkerCommand::SetPowerLimits { pl1, pl2 } => {
-            if !check_bios_write_allowed(*bios_writes_allowed, state, "Power Limits") {
+            if !check_hw_write_allowed(
+                *safe_mode,
+                *bios_writes_allowed,
+                true,
+                state,
+                "Power Limits",
+            ) {
                 return false;
             }
+            let prev_limits = *last_committed_power_limits;
+            record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
             let res = tuning_be.set_power_limits(pl1, pl2);
+            if res.is_ok() {
+                cfg.tuning.pl1_watts = pl1;
+                cfg.tuning.pl2_watts = pl2;
+                *last_committed_power_limits = (pl1, pl2);
+                if prev_limits.0.is_some() || prev_limits.1.is_some() {
+                    record_history_entry(
+                        change_history,
+                        state,
+                        ChangeDomain::PowerLimits,
+                        format_power_limits_summary(prev_limits.0, prev_limits.1),
+                        format_power_limits_summary(pl1, pl2),
+                        RevertPayload::PowerLimits {
+                            pl1_watts: prev_limits.0,
+                            pl2_watts: prev_limits.1,
+                        },
+                    );
+                }
+            }
             record_result(state, res, format!("Power limits PL1={pl1:?} PL2={pl2:?}"));
         }
         WorkerCommand::InstallPawnIo => {
@@ -1470,6 +2075,18 @@ fn handle_worker_command(
             }
         }
         WorkerCommand::RestoreAllDefaults => {
+            *safe_mode = None;
+            *hw_applied_recorded = false;
+            if let Ok(mut cg) = crash_guard.lock() {
+                cg.clear_history();
+                let _ = cg.save_to_path(crash_guard_path);
+            }
+            app_profile_engine.reset();
+            *active_curve_override = None;
+            change_history.clear();
+            *last_committed_battery = BatteryConfig::default();
+            *last_committed_lighting = LightingConfig::default();
+            *last_committed_power_limits = (None, None);
             thermal_guard.reset();
             sensor_loss_guard.reset();
             retry_ctrl.reset();
@@ -1477,6 +2094,9 @@ fn handle_worker_command(
                 let _ = thermal_be.set_fan_mode(FanMode::Auto, None);
                 let _ = thermal_be.set_performance_mode(PerformanceMode::Balanced);
             }
+            let _ = omvix_windows::power_mode::set_windows_power_overlay(
+                WindowsPowerOverlay::Balanced,
+            );
             if omvix_windows::battery_service::is_service_installed()
                 || omvix_windows::battery_service::has_service_leftovers()
             {
@@ -1510,13 +2130,22 @@ fn handle_worker_command(
             let refreshed_bat = battery_be.get_battery_status().ok();
             let refreshed_svc = omvix_windows::battery_service::query_service_info();
             let refreshed_copy = omvix_windows::autostart::query_installed_copy_status();
+            let refreshed_overlay = omvix_windows::power_mode::read_windows_power_overlay()
+                .or(Some(WindowsPowerOverlay::Balanced));
             if let Ok(mut st) = state.lock() {
+                st.safe_mode = None;
                 st.thermal_guard_active = false;
                 st.sensor_loss_active = false;
                 st.gpu_mux_reboot_pending = false;
                 st.bios_writes_allowed = *bios_writes_allowed;
                 st.battery_service = refreshed_svc;
                 st.installed_copy_status = refreshed_copy;
+                st.active_app_profile = None;
+                st.active_app_profile_id = None;
+                st.effective_performance_mode = PerformanceMode::Balanced;
+                st.effective_fan_mode = FanMode::Auto;
+                st.active_win_power_mode = refreshed_overlay;
+                st.change_history.clear();
                 if refreshed_disp.is_some() {
                     st.display_mode = refreshed_disp;
                 }
@@ -1591,11 +2220,419 @@ fn handle_worker_command(
                 }
             }
         },
+        WorkerCommand::ApplyAutoProfileNow => {
+            if safe_mode.is_some() {
+                if let Ok(mut st) = state.lock() {
+                    st.set_toast("Blocked ApplyAutoProfileNow: Safe Mode is active", true);
+                }
+                return false;
+            }
+            let ac = state
+                .lock()
+                .ok()
+                .and_then(|s| s.telemetry.ac_connected)
+                .or_else(|| {
+                    telemetry_be
+                        .read_telemetry_with_options(false, false)
+                        .ok()
+                        .and_then(|s| s.ac_connected)
+                })
+                .unwrap_or(true);
+            if let Some(action) = auto_profile_engine.evaluate(&cfg.auto_profile, ac, true) {
+                apply_auto_profile_action(
+                    action,
+                    ac,
+                    cfg,
+                    state,
+                    thermal_be,
+                    display_be,
+                    kbd_be,
+                    app_profile_engine,
+                    active_curve_override,
+                    sensor_loss_guard,
+                    thermal_guard,
+                    *bios_writes_allowed,
+                    *safe_mode,
+                    crash_guard,
+                    crash_guard_path,
+                    hw_applied_recorded,
+                    prev_curve_temp,
+                    prev_curve_speed,
+                );
+            }
+        }
+        WorkerCommand::RefreshRunningProcesses => {
+            let procs = omvix_windows::processes::list_user_running_exes();
+            if let Ok(mut st) = state.lock() {
+                st.running_exes_snapshot = procs;
+            }
+        }
+        WorkerCommand::UndoLastChange => {
+            if let Some(entry) = change_history.latest().cloned() {
+                if !check_hw_write_allowed(
+                    *safe_mode,
+                    *bios_writes_allowed,
+                    entry.domain.requires_bios_write(),
+                    state,
+                    "Undo",
+                ) {
+                    return false;
+                }
+                if let Some(popped) = change_history.pop_latest() {
+                    apply_undo_entry(
+                        popped,
+                        cfg,
+                        state,
+                        thermal_be,
+                        battery_be,
+                        kbd_be,
+                        display_be,
+                        tuning_be,
+                        battery_engine,
+                        sensor_loss_guard,
+                        thermal_guard,
+                        retry_ctrl,
+                        active_curve_override,
+                        *safe_mode,
+                        crash_guard,
+                        crash_guard_path,
+                        hw_applied_recorded,
+                        last_applied_bat_mode,
+                        prev_curve_temp,
+                        prev_curve_speed,
+                        last_committed_battery,
+                        last_committed_lighting,
+                        last_committed_power_limits,
+                        change_history,
+                    );
+                }
+            }
+        }
+        WorkerCommand::UndoChangeById(id) => {
+            if let Some(entry) = change_history.peek_by_id(id).cloned() {
+                if !check_hw_write_allowed(
+                    *safe_mode,
+                    *bios_writes_allowed,
+                    entry.domain.requires_bios_write(),
+                    state,
+                    "Undo",
+                ) {
+                    return false;
+                }
+                if let Some(removed) = change_history.remove_by_id(id) {
+                    apply_undo_entry(
+                        removed,
+                        cfg,
+                        state,
+                        thermal_be,
+                        battery_be,
+                        kbd_be,
+                        display_be,
+                        tuning_be,
+                        battery_engine,
+                        sensor_loss_guard,
+                        thermal_guard,
+                        retry_ctrl,
+                        active_curve_override,
+                        *safe_mode,
+                        crash_guard,
+                        crash_guard_path,
+                        hw_applied_recorded,
+                        last_applied_bat_mode,
+                        prev_curve_temp,
+                        prev_curve_speed,
+                        last_committed_battery,
+                        last_committed_lighting,
+                        last_committed_power_limits,
+                        change_history,
+                    );
+                }
+            }
+        }
+        WorkerCommand::ClearChangeHistory => {
+            change_history.clear();
+            if let Ok(mut st) = state.lock() {
+                st.change_history.clear();
+            }
+        }
+        WorkerCommand::CreateSupportBundle(out_path) => {
+            if let Ok(mut st) = state.lock() {
+                st.support_bundle_busy = true;
+                st.set_toast("Creating support bundle (.zip)...", false);
+            }
+            request_repaint_if_visible(ctx, window_visible);
+
+            let diag = diag_be.collect_diagnostics().ok();
+            let extra_text_files = vec![
+                (
+                    "logs/battery-service.log".to_string(),
+                    omvix_windows::battery_service::log_file_path(),
+                    256 * 1024,
+                ),
+                (
+                    "battery-service.toml".to_string(),
+                    omvix_windows::battery_service::config_file_path(),
+                    64 * 1024,
+                ),
+            ];
+            let inputs = SupportBundleInputs {
+                app_version: env!("CARGO_PKG_VERSION").to_string(),
+                config: cfg.clone(),
+                diagnostics: diag.clone(),
+                log_dir: cfg.logging.resolved_dir(),
+                crash_guard_path: Some(crash_guard_path.to_path_buf()),
+                extra_text_files,
+            };
+            let res = build_support_bundle_zip(&out_path, &inputs);
+            if let Ok(mut st) = state.lock() {
+                st.support_bundle_busy = false;
+                if let Some(report) = diag {
+                    st.diagnostics = Some(report);
+                }
+                match res {
+                    Ok(summary) => {
+                        let kb = (summary.total_bytes / 1024).max(1);
+                        st.last_support_bundle_path = Some(summary.output_path.clone());
+                        st.set_toast(
+                            format!(
+                                "Support bundle saved ({} files, {kb} KB)",
+                                summary.file_count
+                            ),
+                            false,
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!("Failed creating support bundle: {err}");
+                        st.set_toast(err.to_string(), true);
+                    }
+                }
+            }
+        }
+        WorkerCommand::ExportTelemetryCsv(out_path) => {
+            let rows: Vec<TelemetryCsvRow> = state
+                .lock()
+                .map(|st| st.telemetry_csv_rows.iter().cloned().collect())
+                .unwrap_or_default();
+            match write_telemetry_csv(&out_path, &rows) {
+                Ok(count) => {
+                    if let Ok(mut st) = state.lock() {
+                        st.last_csv_export_path = Some(out_path);
+                        st.set_toast(format!("Exported {count} CSV rows"), false);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("Telemetry CSV export failed: {err}");
+                    if let Ok(mut st) = state.lock() {
+                        st.set_toast(err.to_string(), true);
+                    }
+                }
+            }
+        }
+        WorkerCommand::RecordBatteryHealthNow => {
+            match battery_be.get_battery_status() {
+                Ok(bat) => {
+                    if let (Some(design), Some(full)) =
+                        (bat.design_capacity_mwh, bat.full_charge_capacity_mwh)
+                    {
+                        let date_label = chrono::Local::now().format("%Y-%m-%d").to_string();
+                        if battery_health_history.force_record_snapshot(
+                            design,
+                            full,
+                            current_unix_secs() as i64,
+                            date_label,
+                        ) {
+                            let save_res = battery_health_history.save_to_path(battery_history_path);
+                            if let Ok(mut st) = state.lock() {
+                                st.battery_status = Some(bat);
+                                st.battery_health_history = battery_health_history.records.clone();
+                                match save_res {
+                                    Ok(()) => {
+                                        st.set_toast("Logged battery health snapshot", false)
+                                    }
+                                    Err(err) => st.set_toast(err.to_string(), true),
+                                }
+                            }
+                        } else if let Ok(mut st) = state.lock() {
+                            st.set_toast(
+                                "Battery capacity values were invalid for logging",
+                                true,
+                            );
+                        }
+                    } else if let Ok(mut st) = state.lock() {
+                        st.set_toast("Battery capacity telemetry unavailable", true);
+                    }
+                }
+                Err(err) => {
+                    if let Ok(mut st) = state.lock() {
+                        st.set_toast(err.to_string(), true);
+                    }
+                }
+            }
+        }
+        WorkerCommand::CheckForUpdates { silent } => {
+            let busy = state
+                .lock()
+                .map(|mut st| {
+                    let active = matches!(
+                        st.update_status,
+                        UpdateUiStatus::Checking
+                            | UpdateUiStatus::Downloading { .. }
+                            | UpdateUiStatus::Applying { .. }
+                    );
+                    if active {
+                        true
+                    } else {
+                        if !silent {
+                            st.update_status = UpdateUiStatus::Checking;
+                        }
+                        false
+                    }
+                })
+                .unwrap_or(true);
+            if !busy {
+                request_repaint_if_visible(ctx, window_visible);
+                let state_bg = Arc::clone(state);
+                let ctx_bg = ctx.clone();
+                let vis_bg = Arc::clone(window_visible);
+                thread::spawn(move || {
+                    let res =
+                        omvix_windows::updater::check_latest_release(env!("CARGO_PKG_VERSION"));
+                    if let Ok(mut st) = state_bg.lock() {
+                        match res {
+                            Ok(
+                                omvix_windows::updater::ReleaseCheckOutcome::UpdateAvailable(rel),
+                            ) => {
+                                st.set_toast(
+                                    format!("Update available: v{}", rel.version),
+                                    false,
+                                );
+                                st.update_status = UpdateUiStatus::UpdateAvailable(rel);
+                            }
+                            Ok(omvix_windows::updater::ReleaseCheckOutcome::UpToDate {
+                                latest_tag,
+                            }) => {
+                                st.update_status = UpdateUiStatus::UpToDate {
+                                    checked_version: latest_tag,
+                                    checked_at_utc: chrono::Utc::now()
+                                        .format("%Y-%m-%d %H:%M UTC")
+                                        .to_string(),
+                                };
+                                if !silent {
+                                    st.set_toast("Omvix Hub is up to date", false);
+                                }
+                            }
+                            Ok(
+                                omvix_windows::updater::ReleaseCheckOutcome::NoReleasesPublished,
+                            ) => {
+                                if !silent {
+                                    st.update_status = UpdateUiStatus::NoReleasesPublished;
+                                    st.set_toast(
+                                        "No published releases found on GitHub yet",
+                                        false,
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!("Update check failed: {err}");
+                                if !silent {
+                                    st.update_status = UpdateUiStatus::Error(err.to_string());
+                                    st.set_toast(err.to_string(), true);
+                                }
+                            }
+                        }
+                    }
+                    request_repaint_if_visible(&ctx_bg, &vis_bg);
+                });
+            }
+        }
+        WorkerCommand::DownloadAndVerifyUpdate => {
+            let rel_opt = state.lock().ok().and_then(|mut st| match st.update_status.clone() {
+                UpdateUiStatus::UpdateAvailable(rel) => {
+                    st.update_status = UpdateUiStatus::Downloading {
+                        version: rel.version.clone(),
+                    };
+                    st.set_toast("Downloading & verifying update...", false);
+                    Some(rel)
+                }
+                _ => None,
+            });
+            if let Some(rel) = rel_opt {
+                request_repaint_if_visible(ctx, window_visible);
+                let state_bg = Arc::clone(state);
+                let ctx_bg = ctx.clone();
+                let vis_bg = Arc::clone(window_visible);
+                thread::spawn(move || {
+                    let res = omvix_windows::updater::download_and_verify_release(&rel);
+                    if let Ok(mut st) = state_bg.lock() {
+                        match res {
+                            Ok(staged) => {
+                                st.update_status = UpdateUiStatus::ReadyToInstall(staged);
+                                st.set_toast("Update downloaded & SHA-256 verified", false);
+                            }
+                            Err(err) => {
+                                tracing::warn!("Update download/verify failed: {err}");
+                                st.update_status = UpdateUiStatus::Error(err.to_string());
+                                st.set_toast(err.to_string(), true);
+                            }
+                        }
+                    }
+                    request_repaint_if_visible(&ctx_bg, &vis_bg);
+                });
+            }
+        }
+        WorkerCommand::ApplyStagedUpdate => {
+            let staged_opt = state
+                .lock()
+                .ok()
+                .and_then(|mut st| match st.update_status.clone() {
+                    UpdateUiStatus::ReadyToInstall(staged) => {
+                        st.update_status = UpdateUiStatus::Applying {
+                            version: staged.version.clone(),
+                        };
+                        Some(staged)
+                    }
+                    _ => None,
+                });
+            if let Some(staged) = staged_opt {
+                request_repaint_if_visible(ctx, window_visible);
+                match omvix_windows::updater::apply_staged_update(
+                    &staged,
+                    cfg.general.allow_unsigned_sha256_updates,
+                ) {
+                    Ok(exe_path) => {
+                        if let Ok(mut st) = state.lock() {
+                            st.pending_update_relaunch = Some(exe_path);
+                            st.set_toast("Update applied — restarting Omvix Hub...", false);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("Applying staged update failed: {err}");
+                        if let Ok(mut st) = state.lock() {
+                            st.update_status = if staged.binary_path.is_file() {
+                                UpdateUiStatus::ReadyToInstall(staged)
+                            } else {
+                                UpdateUiStatus::Error(err.to_string())
+                            };
+                            st.set_toast(err.to_string(), true);
+                        }
+                    }
+                }
+                request_repaint_if_visible(ctx, window_visible);
+            }
+        }
+        WorkerCommand::OpenReleasePage(url) => {
+            if let Err(err) = omvix_windows::updater::open_verified_release_url(&url) {
+                if let Ok(mut st) = state.lock() {
+                    st.set_toast(err.to_string(), true);
+                }
+            }
+        }
     }
     false
 }
 
 #[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
 fn run_worker_loop(
     _cfg: AppConfig,
     _state: Arc<Mutex<SharedState>>,
@@ -1603,6 +2640,9 @@ fn run_worker_loop(
     _self_tx: Sender<WorkerCommand>,
     _ctx: Option<egui::Context>,
     _window_visible: Arc<AtomicBool>,
+    _initial_safe_mode: Option<SafeModeReason>,
+    _crash_guard: Arc<Mutex<CrashGuardState>>,
+    _crash_guard_path: PathBuf,
 ) {
     while let Ok(cmd) = rx.recv() {
         if matches!(cmd, WorkerCommand::Shutdown) {
@@ -1612,8 +2652,8 @@ fn run_worker_loop(
 }
 
 #[cfg(windows)]
-fn resolve_fan_target_pct(
-    cfg: &AppConfig,
+fn resolve_fan_target_pct_with_curve(
+    curve: &FanCurve,
     snap: &TelemetrySnapshot,
     mode: FanMode,
     manual_speed_pct: Option<u8>,
@@ -1627,7 +2667,7 @@ fn resolve_fan_target_pct(
             snap.chassis_temp_c,
             snap.cpu_power_w,
         ) {
-            let pct = cfg.thermal_fan.custom_curve.evaluate(temp, temp, 0);
+            let pct = curve.evaluate(temp, temp, 0);
             *prev_curve_temp = temp;
             *prev_curve_speed = pct;
             return Some(pct);
@@ -1639,6 +2679,7 @@ fn resolve_fan_target_pct(
 #[cfg(windows)]
 fn apply_off_state_safety(
     cfg: &AppConfig,
+    effective_fan: FanMode,
     thermal_guard: &ThermalSafetyGuard,
     thermal_be: &WindowsThermalFanBackend,
     battery_be: &WindowsBatteryBackend,
@@ -1650,7 +2691,7 @@ fn apply_off_state_safety(
     let mut fan_ms = 0u128;
     let mut battery_ms = 0u128;
 
-    if bios_writes_allowed && (cfg.thermal_fan.fan_mode != FanMode::Auto || thermal_guard.is_active()) {
+    if bios_writes_allowed && (effective_fan != FanMode::Auto || thermal_guard.is_active()) {
         let t_fan = Instant::now();
         if let Err(err) = thermal_be.set_fan_mode(FanMode::Auto, None) {
             tracing::warn!(%reason, "Failed to restore BIOS Auto fan: {err}");
@@ -1702,6 +2743,389 @@ fn apply_off_state_safety(
 }
 
 #[cfg(windows)]
+fn sync_win_power_mode_if_enabled(
+    cfg: &AppConfig,
+    mode: PerformanceMode,
+    safe_mode: Option<SafeModeReason>,
+    state: &Arc<Mutex<SharedState>>,
+) {
+    if safe_mode.is_some() || !cfg.thermal_fan.sync_windows_power_mode {
+        return;
+    }
+    let overlay = WindowsPowerOverlay::for_performance_mode(mode);
+    match omvix_windows::power_mode::set_windows_power_overlay(overlay) {
+        Ok(()) => {
+            if let Ok(mut st) = state.lock() {
+                st.active_win_power_mode = Some(overlay);
+            }
+        }
+        Err(err) => {
+            tracing::warn!(?mode, ?overlay, "Windows Power Mode sync skipped: {err}");
+        }
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn apply_fan_override_if_safe(
+    fan_mode: FanMode,
+    curve: &FanCurve,
+    manual_speed_pct: u8,
+    state: &Arc<Mutex<SharedState>>,
+    thermal_be: &WindowsThermalFanBackend,
+    sensor_loss_guard: &SensorLossGuard,
+    thermal_guard: &ThermalSafetyGuard,
+    bios_writes_allowed: bool,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
+) {
+    if !bios_writes_allowed || sensor_loss_guard.is_active() || thermal_guard.is_active() {
+        return;
+    }
+    let snap = state
+        .lock()
+        .map(|st| st.telemetry.clone())
+        .unwrap_or_default();
+    let is_cool = cool_hint_from_snapshot(&snap);
+    let target_pct = resolve_fan_target_pct_with_curve(
+        curve,
+        &snap,
+        fan_mode,
+        Some(manual_speed_pct),
+        prev_curve_temp,
+        prev_curve_speed,
+    );
+    record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+    if let Err(err) = thermal_be.set_fan_mode_with_cool_hint(fan_mode, target_pct, is_cool) {
+        tracing::warn!(?fan_mode, "Profile fan mode write failed: {err}");
+    }
+}
+
+#[cfg(windows)]
+fn apply_refresh_rate_if_set(
+    refresh_hz: Option<u32>,
+    display_be: &WindowsDisplayBackend,
+    state: &Arc<Mutex<SharedState>>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+) {
+    let Some(hz) = refresh_hz else {
+        return;
+    };
+    record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+    if display_be.set_refresh_rate(hz).is_ok() {
+        if let Ok(disp) = display_be.get_display_mode() {
+            if let Ok(mut st) = state.lock() {
+                st.display_mode = Some(disp);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn apply_cpu_boost_if_set(
+    cpu_boost: Option<CpuBoostMode>,
+    tuning_be: &WindowsCpuTuningBackend,
+    state: &Arc<Mutex<SharedState>>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+) {
+    let Some(boost) = cpu_boost else {
+        return;
+    };
+    record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+    if let Err(err) = tuning_be.set_cpu_boost_mode(boost) {
+        tracing::warn!(?boost, "Profile CPU boost write failed: {err}");
+    } else if let Ok(mut st) = state.lock() {
+        st.cpu_boost = Some(boost);
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn apply_auto_profile_action(
+    action: AutoProfileAction,
+    ac: bool,
+    cfg: &mut AppConfig,
+    state: &Arc<Mutex<SharedState>>,
+    thermal_be: &WindowsThermalFanBackend,
+    display_be: &WindowsDisplayBackend,
+    kbd_be: &WindowsKeyboardBackend,
+    app_profile_engine: &mut AppProfileEngine,
+    active_curve_override: &mut Option<FanCurve>,
+    sensor_loss_guard: &SensorLossGuard,
+    thermal_guard: &ThermalSafetyGuard,
+    bios_writes_allowed: bool,
+    safe_mode: Option<SafeModeReason>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
+) {
+    if safe_mode.is_some() {
+        return;
+    }
+    if app_profile_engine.active_rule().is_some() {
+        app_profile_engine.update_baseline_for_ac_dc(&action);
+        tracing::info!(
+            ?action,
+            "Deferred AC/DC auto-profile into active app-profile restore baseline"
+        );
+        return;
+    }
+
+    cfg.thermal_fan.performance_mode = action.performance_mode;
+    let mut applied_perf = false;
+    if bios_writes_allowed {
+        record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+        match thermal_be.set_performance_mode(action.performance_mode) {
+            Ok(()) => applied_perf = true,
+            Err(err) => tracing::warn!("Auto-profile performance mode write failed: {err}"),
+        }
+    }
+    sync_win_power_mode_if_enabled(cfg, action.performance_mode, safe_mode, state);
+
+    if let Some(fan_mode) = action.fan_mode {
+        cfg.thermal_fan.fan_mode = fan_mode;
+        *active_curve_override = if fan_mode == FanMode::CustomCurve {
+            action.curve_preset.map(|p| p.to_curve())
+        } else {
+            None
+        };
+        let active_curve = active_curve_override
+            .as_ref()
+            .unwrap_or(&cfg.thermal_fan.custom_curve);
+        apply_fan_override_if_safe(
+            fan_mode,
+            active_curve,
+            cfg.thermal_fan.manual_speed_pct,
+            state,
+            thermal_be,
+            sensor_loss_guard,
+            thermal_guard,
+            bios_writes_allowed,
+            crash_guard,
+            crash_guard_path,
+            hw_applied_recorded,
+            prev_curve_temp,
+            prev_curve_speed,
+        );
+    }
+
+    apply_refresh_rate_if_set(
+        action.refresh_hz,
+        display_be,
+        state,
+        crash_guard,
+        crash_guard_path,
+        hw_applied_recorded,
+    );
+
+    if bios_writes_allowed {
+        record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+        let kbd_res = if action.dim_keyboard {
+            kbd_be.set_backlight(false, 0, &cfg.lighting.zones)
+        } else if cfg.lighting.enabled {
+            kbd_be.set_backlight(
+                true,
+                cfg.lighting.brightness_pct,
+                &cfg.lighting.zones,
+            )
+        } else {
+            Ok(())
+        };
+        if let Err(err) = kbd_res {
+            tracing::warn!("Auto-profile keyboard backlight write failed: {err}");
+        }
+    }
+
+    if let Ok(mut st) = state.lock() {
+        st.effective_performance_mode = cfg.thermal_fan.performance_mode;
+        st.effective_fan_mode = cfg.thermal_fan.fan_mode;
+        st.auto_applied_revision = st.auto_applied_revision.wrapping_add(1);
+    }
+
+    if applied_perf || !bios_writes_allowed {
+        let src = if ac { "AC" } else { "Battery" };
+        let rgb = crate::tray::performance_mode_ring_rgb(action.performance_mode).0;
+        show_mode_osd(
+            &format!("Auto-Profile ({src})"),
+            &format!("{:?}", action.performance_mode),
+            rgb,
+        );
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn apply_app_profile_transition(
+    transition: AppProfileTransition,
+    cfg: &mut AppConfig,
+    state: &Arc<Mutex<SharedState>>,
+    thermal_be: &WindowsThermalFanBackend,
+    display_be: &WindowsDisplayBackend,
+    tuning_be: &WindowsCpuTuningBackend,
+    active_curve_override: &mut Option<FanCurve>,
+    sensor_loss_guard: &SensorLossGuard,
+    thermal_guard: &ThermalSafetyGuard,
+    bios_writes_allowed: bool,
+    safe_mode: Option<SafeModeReason>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
+) {
+    if safe_mode.is_some() {
+        return;
+    }
+    match transition {
+        AppProfileTransition::None => {}
+        AppProfileTransition::Activate { rule } => {
+            tracing::info!(
+                rule_id = %rule.id,
+                exe = %rule.exe_name,
+                perf = ?rule.performance_mode,
+                "Activating app-based hardware profile"
+            );
+            if bios_writes_allowed {
+                record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+                if let Err(err) = thermal_be.set_performance_mode(rule.performance_mode) {
+                    tracing::warn!("App profile performance write failed: {err}");
+                }
+            }
+            sync_win_power_mode_if_enabled(cfg, rule.performance_mode, safe_mode, state);
+
+            let eff_fan = rule.fan_mode.unwrap_or(cfg.thermal_fan.fan_mode);
+            *active_curve_override = if rule.fan_mode == Some(FanMode::CustomCurve) {
+                rule.curve_preset.map(|p| p.to_curve())
+            } else {
+                None
+            };
+            if let Some(fan_mode) = rule.fan_mode {
+                let active_curve = active_curve_override
+                    .as_ref()
+                    .unwrap_or(&cfg.thermal_fan.custom_curve);
+                apply_fan_override_if_safe(
+                    fan_mode,
+                    active_curve,
+                    cfg.thermal_fan.manual_speed_pct,
+                    state,
+                    thermal_be,
+                    sensor_loss_guard,
+                    thermal_guard,
+                    bios_writes_allowed,
+                    crash_guard,
+                    crash_guard_path,
+                    hw_applied_recorded,
+                    prev_curve_temp,
+                    prev_curve_speed,
+                );
+            }
+
+            apply_refresh_rate_if_set(
+                rule.refresh_hz,
+                display_be,
+                state,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+            );
+            apply_cpu_boost_if_set(
+                rule.cpu_boost_mode,
+                tuning_be,
+                state,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+            );
+
+            let label = rule.display_label().to_string();
+            if let Ok(mut st) = state.lock() {
+                st.active_app_profile = Some(label.clone());
+                st.active_app_profile_id = Some(rule.id.clone());
+                st.effective_performance_mode = rule.performance_mode;
+                st.effective_fan_mode = eff_fan;
+                st.set_toast(format!("App profile active: {label}"), false);
+            }
+            let rgb = crate::tray::performance_mode_ring_rgb(rule.performance_mode).0;
+            show_mode_osd(
+                "App Profile",
+                &format!("{label} · {:?}", rule.performance_mode),
+                rgb,
+            );
+        }
+        AppProfileTransition::Restore(baseline) => {
+            tracing::info!(?baseline.performance_mode, ?baseline.fan_mode, "Restoring baseline after app exit");
+            *active_curve_override = None;
+            cfg.thermal_fan.performance_mode = baseline.performance_mode;
+            cfg.thermal_fan.fan_mode = baseline.fan_mode;
+
+            if bios_writes_allowed {
+                record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+                if let Err(err) = thermal_be.set_performance_mode(baseline.performance_mode) {
+                    tracing::warn!("App profile baseline performance restore failed: {err}");
+                }
+            }
+            sync_win_power_mode_if_enabled(cfg, baseline.performance_mode, safe_mode, state);
+
+            apply_fan_override_if_safe(
+                baseline.fan_mode,
+                &baseline.custom_curve,
+                baseline.manual_speed_pct,
+                state,
+                thermal_be,
+                sensor_loss_guard,
+                thermal_guard,
+                bios_writes_allowed,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+                prev_curve_temp,
+                prev_curve_speed,
+            );
+            apply_refresh_rate_if_set(
+                baseline.refresh_hz,
+                display_be,
+                state,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+            );
+            apply_cpu_boost_if_set(
+                baseline.cpu_boost_mode,
+                tuning_be,
+                state,
+                crash_guard,
+                crash_guard_path,
+                hw_applied_recorded,
+            );
+
+            if let Ok(mut st) = state.lock() {
+                st.active_app_profile = None;
+                st.active_app_profile_id = None;
+                st.effective_performance_mode = baseline.performance_mode;
+                st.effective_fan_mode = baseline.fan_mode;
+                st.auto_applied_revision = st.auto_applied_revision.wrapping_add(1);
+                st.set_toast("Restored baseline profile", false);
+            }
+            let rgb = crate::tray::performance_mode_ring_rgb(baseline.performance_mode).0;
+            show_mode_osd(
+                "Profile Restored",
+                &format!("{:?}", baseline.performance_mode),
+                rgb,
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
 fn spawn_battery_service_task<F>(
     state: &Arc<Mutex<SharedState>>,
     self_tx: &Sender<WorkerCommand>,
@@ -1746,6 +3170,253 @@ fn spawn_battery_service_task<F>(
     });
 }
 
+#[cfg(windows)]
+fn format_fan_summary(mode: FanMode, manual_pct: u8) -> String {
+    match mode {
+        FanMode::Manual => format!("Manual ({manual_pct}%)"),
+        other => format!("{other:?}"),
+    }
+}
+
+#[cfg(windows)]
+fn format_battery_summary(bat: &BatteryConfig) -> String {
+    if !bat.enabled || bat.mode == BatteryChargeMode::Auto {
+        "Auto (100%)".to_string()
+    } else if bat.one_time_full_charge {
+        format!("{:?} [1x 100%]", bat.mode)
+    } else {
+        format!(
+            "{:?} ({}-{}%)",
+            bat.mode, bat.start_threshold_pct, bat.stop_threshold_pct
+        )
+    }
+}
+
+#[cfg(windows)]
+fn format_lighting_summary(light: &LightingConfig) -> String {
+    if !light.enabled {
+        "Off".to_string()
+    } else {
+        let z0 = light.zones[0];
+        format!(
+            "{}% (#{:02X}{:02X}{:02X})",
+            light.brightness_pct, z0.r, z0.g, z0.b
+        )
+    }
+}
+
+#[cfg(windows)]
+fn format_power_limits_summary(pl1: Option<u16>, pl2: Option<u16>) -> String {
+    let f = |v: Option<u16>| v.map(|w| format!("{w}W")).unwrap_or_else(|| "Unchanged".into());
+    format!("PL1={} / PL2={}", f(pl1), f(pl2))
+}
+
+#[cfg(windows)]
+fn record_history_entry(
+    history: &mut ChangeHistory,
+    state: &Arc<Mutex<SharedState>>,
+    domain: ChangeDomain,
+    old_summary: String,
+    new_summary: String,
+    revert: RevertPayload,
+) {
+    if history
+        .record(domain, old_summary, new_summary, revert)
+        .is_some()
+    {
+        if let Ok(mut st) = state.lock() {
+            st.change_history = history.entries_vec();
+        }
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn apply_undo_entry(
+    entry: HardwareChangeEntry,
+    cfg: &mut AppConfig,
+    state: &Arc<Mutex<SharedState>>,
+    thermal_be: &WindowsThermalFanBackend,
+    battery_be: &WindowsBatteryBackend,
+    kbd_be: &WindowsKeyboardBackend,
+    display_be: &WindowsDisplayBackend,
+    tuning_be: &WindowsCpuTuningBackend,
+    battery_engine: &mut BatteryCareEngine,
+    sensor_loss_guard: &SensorLossGuard,
+    thermal_guard: &ThermalSafetyGuard,
+    retry_ctrl: &mut GuardMaxRetryController,
+    active_curve_override: &mut Option<FanCurve>,
+    safe_mode: Option<SafeModeReason>,
+    crash_guard: &Arc<Mutex<CrashGuardState>>,
+    crash_guard_path: &Path,
+    hw_applied_recorded: &mut bool,
+    last_applied_bat_mode: &mut Option<BatteryChargeMode>,
+    prev_curve_temp: &mut f32,
+    prev_curve_speed: &mut u8,
+    last_committed_battery: &mut BatteryConfig,
+    last_committed_lighting: &mut LightingConfig,
+    last_committed_power_limits: &mut (Option<u16>, Option<u16>),
+    change_history: &mut ChangeHistory,
+) {
+    record_hw_write_attempt(crash_guard, crash_guard_path, hw_applied_recorded);
+    let res: Result<()> = match entry.revert {
+        RevertPayload::PerformanceMode(mode) => {
+            let r = thermal_be.set_performance_mode(mode);
+            if r.is_ok() {
+                cfg.thermal_fan.performance_mode = mode;
+                sync_win_power_mode_if_enabled(cfg, mode, safe_mode, state);
+                if let Ok(mut st) = state.lock() {
+                    st.effective_performance_mode = mode;
+                }
+            }
+            r
+        }
+        RevertPayload::FanMode {
+            mode,
+            manual_speed_pct,
+            custom_curve,
+        } => {
+            cfg.thermal_fan.fan_mode = mode;
+            cfg.thermal_fan.manual_speed_pct = manual_speed_pct;
+            cfg.thermal_fan.custom_curve = custom_curve;
+            *active_curve_override = None;
+            retry_ctrl.reset();
+            if sensor_loss_guard.is_active() && mode != FanMode::Auto {
+                Err(omvix_core::OmvixError::Config(
+                    "Thermal sensors lost: Auto fallback active until sensors recover".to_string(),
+                ))
+            } else if thermal_guard.is_active() {
+                Err(omvix_core::OmvixError::Config(
+                    "Thermal Guard active: Max Fan remains engaged until temperatures drop"
+                        .to_string(),
+                ))
+            } else {
+                let snap = state
+                    .lock()
+                    .map(|st| st.telemetry.clone())
+                    .unwrap_or_default();
+                let is_cool = cool_hint_from_snapshot(&snap);
+                let target_pct = resolve_fan_target_pct_with_curve(
+                    &cfg.thermal_fan.custom_curve,
+                    &snap,
+                    mode,
+                    Some(manual_speed_pct),
+                    prev_curve_temp,
+                    prev_curve_speed,
+                );
+                let r = thermal_be.set_fan_mode_with_cool_hint(mode, target_pct, is_cool);
+                if r.is_ok() {
+                    if let Ok(mut st) = state.lock() {
+                        st.effective_fan_mode = mode;
+                    }
+                }
+                r
+            }
+        }
+        RevertPayload::BatteryLimit {
+            enabled,
+            mode,
+            stop_threshold_pct,
+            start_threshold_pct,
+            hold_when_shutdown,
+            one_time_full_charge,
+            active_profile_id,
+        } => {
+            cfg.battery.enabled = enabled;
+            cfg.battery.mode = mode;
+            cfg.battery.stop_threshold_pct = stop_threshold_pct;
+            cfg.battery.start_threshold_pct = start_threshold_pct;
+            cfg.battery.hold_when_shutdown = hold_when_shutdown;
+            cfg.battery.one_time_full_charge = one_time_full_charge;
+            cfg.battery.active_profile_id = active_profile_id;
+            let _ = omvix_windows::battery_service::sync_config_if_installed(&cfg.battery);
+            match battery_be.get_battery_status() {
+                Ok(bat) => {
+                    let target = battery_engine.evaluate(
+                        &mut cfg.battery,
+                        bat.charge_percent,
+                        bat.ac_connected,
+                    );
+                    let r = battery_be.set_charge_mode(target);
+                    if r.is_ok() {
+                        *last_applied_bat_mode = Some(target);
+                        *last_committed_battery = cfg.battery.clone();
+                        if let Ok(refreshed) = battery_be.get_battery_status() {
+                            if let Ok(mut st) = state.lock() {
+                                st.battery_status = Some(refreshed);
+                            }
+                        }
+                    }
+                    r
+                }
+                Err(e) => Err(e),
+            }
+        }
+        RevertPayload::DisplayRefreshRate(hz) => {
+            let r = display_be.set_refresh_rate(hz);
+            if r.is_ok() {
+                if let Ok(disp) = display_be.get_display_mode() {
+                    if let Ok(mut st) = state.lock() {
+                        st.display_mode = Some(disp);
+                    }
+                }
+            }
+            r
+        }
+        RevertPayload::CpuBoost(boost) => {
+            let r = tuning_be.set_cpu_boost_mode(boost);
+            if r.is_ok() {
+                cfg.tuning.cpu_boost_mode = Some(boost);
+                if let Ok(mut st) = state.lock() {
+                    st.cpu_boost = Some(boost);
+                }
+            }
+            r
+        }
+        RevertPayload::KeyboardLighting {
+            enabled,
+            brightness_pct,
+            zones,
+        } => {
+            let r = kbd_be.set_backlight(enabled, brightness_pct, &zones);
+            if r.is_ok() {
+                cfg.lighting.enabled = enabled;
+                cfg.lighting.brightness_pct = brightness_pct;
+                cfg.lighting.zones = zones;
+                *last_committed_lighting = cfg.lighting.clone();
+            }
+            r
+        }
+        RevertPayload::PowerLimits {
+            pl1_watts,
+            pl2_watts,
+        } => {
+            let r = tuning_be.set_power_limits(pl1_watts, pl2_watts);
+            if r.is_ok() {
+                cfg.tuning.pl1_watts = pl1_watts;
+                cfg.tuning.pl2_watts = pl2_watts;
+                *last_committed_power_limits = (pl1_watts, pl2_watts);
+            }
+            r
+        }
+    };
+
+    if let Ok(mut st) = state.lock() {
+        st.change_history = change_history.entries_vec();
+        match res {
+            Ok(()) => {
+                st.synced_config_rev = st.synced_config_rev.wrapping_add(1);
+                st.synced_config = Some(cfg.clone());
+                st.set_toast(format!("Undid change -> {}", entry.old_summary), false);
+            }
+            Err(err) => {
+                tracing::warn!("Undo failed: {err}");
+                st.set_toast(err.to_string(), true);
+            }
+        }
+    }
+}
+
 fn record_result(state: &Arc<Mutex<SharedState>>, res: Result<()>, ok_msg: String) {
     if let Ok(mut st) = state.lock() {
         match res {
@@ -1779,6 +3450,7 @@ fn is_barrier_command(cmd: &WorkerCommand) -> bool {
             | WorkerCommand::SystemShuttingDown(_)
             | WorkerCommand::SystemResumed
             | WorkerCommand::RestoreAllDefaults
+            | WorkerCommand::ExitSafeMode
             | WorkerCommand::InstallBatteryService
             | WorkerCommand::StartBatteryService
             | WorkerCommand::StopBatteryService
@@ -1789,6 +3461,16 @@ fn is_barrier_command(cmd: &WorkerCommand) -> bool {
             | WorkerCommand::UpdateInstalledCopy
             | WorkerCommand::RebootSystem
             | WorkerCommand::ExportDiagnostics(_)
+            | WorkerCommand::UndoLastChange
+            | WorkerCommand::UndoChangeById(_)
+            | WorkerCommand::ClearChangeHistory
+            | WorkerCommand::CreateSupportBundle(_)
+            | WorkerCommand::ExportTelemetryCsv(_)
+            | WorkerCommand::RecordBatteryHealthNow
+            | WorkerCommand::CheckForUpdates { .. }
+            | WorkerCommand::DownloadAndVerifyUpdate
+            | WorkerCommand::ApplyStagedUpdate
+            | WorkerCommand::OpenReleasePage(_)
     )
 }
 

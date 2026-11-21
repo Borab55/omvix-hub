@@ -1,7 +1,9 @@
+use crate::app_profiles::{AppProfilesConfig, normalize_exe_name};
 use crate::error::{OmvixError, Result};
 use crate::logging::LogConfig;
 use crate::models::{
-    BatteryChargeMode, CpuBoostMode, FanCurve, FanMode, GpuMode, PerformanceMode, RgbColor,
+    BatteryChargeMode, CpuBoostMode, FanCurve, FanCurvePreset, FanMode, GpuMode, PerformanceMode,
+    RgbColor,
 };
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 3;
+pub const CURRENT_CONFIG_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -105,6 +107,23 @@ impl CustomThemeConfig {
         }
     }
 
+    pub fn preset_high_contrast() -> Self {
+        Self {
+            name: "High Contrast".to_string(),
+            dark_base: true,
+            accent: [255, 224, 51],
+            canvas_bg: [0, 0, 0],
+            sidebar_bg: [0, 0, 0],
+            card_bg: [12, 12, 14],
+            card_border: [220, 220, 225],
+            text_primary: [255, 255, 255],
+        }
+    }
+
+    pub fn is_high_contrast(&self) -> bool {
+        self.canvas_bg == [0, 0, 0] && self.text_primary == [255, 255, 255]
+    }
+
     pub fn presets() -> Vec<Self> {
         vec![
             Self::preset_dark_slate(),
@@ -112,6 +131,7 @@ impl CustomThemeConfig {
             Self::preset_omen_crimson(),
             Self::preset_emerald_matrix(),
             Self::preset_midnight_violet(),
+            Self::preset_high_contrast(),
         ]
     }
 
@@ -296,8 +316,12 @@ pub struct GeneralConfig {
     pub dock_bottom_right: bool,
     pub hide_on_focus_loss: bool,
     pub experimental_board_id: Option<String>,
+    pub first_run_completed: bool,
     pub theme: String,
+    pub font_scale_pct: u8,
     pub telemetry_interval_ms: u64,
+    pub auto_check_updates: bool,
+    pub allow_unsigned_sha256_updates: bool,
     pub custom_theme: CustomThemeConfig,
 }
 
@@ -312,8 +336,12 @@ impl Default for GeneralConfig {
             dock_bottom_right: true,
             hide_on_focus_loss: false,
             experimental_board_id: None,
+            first_run_completed: false,
             theme: "dark".to_string(),
+            font_scale_pct: 100,
             telemetry_interval_ms: 1000,
+            auto_check_updates: true,
+            allow_unsigned_sha256_updates: false,
             custom_theme: CustomThemeConfig::preset_dark_slate(),
         }
     }
@@ -330,6 +358,7 @@ pub struct ThermalFanConfig {
     pub keep_alive_interval_secs: u64,
     pub guard_cpu_temp_c: u8,
     pub guard_sustain_secs: u8,
+    pub sync_windows_power_mode: bool,
 }
 
 impl Default for ThermalFanConfig {
@@ -343,6 +372,7 @@ impl Default for ThermalFanConfig {
             keep_alive_interval_secs: 45,
             guard_cpu_temp_c: DEFAULT_GUARD_CPU_TEMP_C,
             guard_sustain_secs: DEFAULT_GUARD_SUSTAIN_SECS,
+            sync_windows_power_mode: true,
         }
     }
 }
@@ -400,6 +430,10 @@ pub struct AutoProfileConfig {
     pub enabled: bool,
     pub ac_performance_mode: PerformanceMode,
     pub dc_performance_mode: PerformanceMode,
+    pub ac_fan_mode: Option<FanMode>,
+    pub dc_fan_mode: Option<FanMode>,
+    pub ac_curve_preset: Option<FanCurvePreset>,
+    pub dc_curve_preset: Option<FanCurvePreset>,
     pub ac_refresh_hz: Option<u32>,
     pub dc_refresh_hz: Option<u32>,
     pub dim_keyboard_on_battery: bool,
@@ -411,6 +445,10 @@ impl Default for AutoProfileConfig {
             enabled: false,
             ac_performance_mode: PerformanceMode::Balanced,
             dc_performance_mode: PerformanceMode::Eco,
+            ac_fan_mode: None,
+            dc_fan_mode: None,
+            ac_curve_preset: None,
+            dc_curve_preset: None,
             ac_refresh_hz: None,
             dc_refresh_hz: Some(60),
             dim_keyboard_on_battery: true,
@@ -541,6 +579,7 @@ pub struct AppConfig {
     pub battery: BatteryConfig,
     pub lighting: LightingConfig,
     pub auto_profile: AutoProfileConfig,
+    pub app_profiles: AppProfilesConfig,
     pub hotkeys: HotkeyConfig,
     pub tuning: TuningConfig,
 }
@@ -555,6 +594,7 @@ impl Default for AppConfig {
             battery: BatteryConfig::default(),
             lighting: LightingConfig::default(),
             auto_profile: AutoProfileConfig::default(),
+            app_profiles: AppProfilesConfig::default(),
             hotkeys: HotkeyConfig::default(),
             tuning: TuningConfig::default(),
         }
@@ -597,6 +637,10 @@ impl AppConfig {
             cfg.thermal_fan.guard_cpu_temp_c = DEFAULT_GUARD_CPU_TEMP_C;
             cfg.thermal_fan.guard_sustain_secs = DEFAULT_GUARD_SUSTAIN_SECS;
         }
+        if cfg.config_version < 4 {
+            // Existing pre-v0.5 users already configured Omvix Hub; keep wizard accessible from Settings.
+            cfg.general.first_run_completed = true;
+        }
         cfg.config_version = CURRENT_CONFIG_VERSION;
         let warnings = cfg.sanitize();
         Ok((cfg, warnings))
@@ -608,6 +652,7 @@ impl AppConfig {
         let mut warnings = Vec::new();
 
         self.general.telemetry_interval_ms = self.general.telemetry_interval_ms.clamp(100, 10_000);
+        self.general.font_scale_pct = self.general.font_scale_pct.clamp(85, 130);
         self.logging.max_total_mb = self.logging.max_total_mb.clamp(5, 100);
         self.logging.max_files = self.logging.max_files.clamp(1, 16);
 
@@ -689,6 +734,27 @@ impl AppConfig {
                 ));
             }
         }
+
+        self.app_profiles.poll_interval_secs = self.app_profiles.poll_interval_secs.clamp(2, 15);
+        let mut sanitized_rules = Vec::with_capacity(self.app_profiles.rules.len());
+        for (idx, mut rule) in self.app_profiles.rules.drain(..).enumerate() {
+            match normalize_exe_name(&rule.exe_name) {
+                Some(norm) => {
+                    rule.exe_name = norm;
+                    if rule.id.trim().is_empty() {
+                        rule.id = format!("rule-{}", idx + 1);
+                    }
+                    sanitized_rules.push(rule);
+                }
+                None => {
+                    warnings.push(format!(
+                        "Removed invalid app profile rule with executable '{}'",
+                        rule.exe_name
+                    ));
+                }
+            }
+        }
+        self.app_profiles.rules = sanitized_rules;
 
         warnings
     }
@@ -797,7 +863,9 @@ mod tests {
     #[test]
     fn battery_hold_default_is_true_and_legacy_config_migrates_once() {
         assert!(BatteryConfig::default().hold_when_shutdown);
-        assert_eq!(AppConfig::default().config_version, CURRENT_CONFIG_VERSION);
+        let fresh = AppConfig::default();
+        assert_eq!(fresh.config_version, CURRENT_CONFIG_VERSION);
+        assert!(!fresh.general.first_run_completed);
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -807,14 +875,15 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
 
-        // Pre-v0.4.2 config had no `config_version` and `hold_when_shutdown = false` -> migrates to true
+        // Pre-v0.4.2 config had no `config_version` and `hold_when_shutdown = false` -> migrates to true + first_run_completed = true
         let legacy_toml = "[battery]\nenabled = true\nhold_when_shutdown = false\n";
         fs::write(&path, legacy_toml).unwrap();
         let migrated = AppConfig::load_from_path(&path).expect("load legacy");
         assert_eq!(migrated.config_version, CURRENT_CONFIG_VERSION);
         assert!(migrated.battery.hold_when_shutdown);
+        assert!(migrated.general.first_run_completed);
 
-        // v2 config where user explicitly chose false -> preserves false, migrates thermal guard to v3 defaults
+        // v2 config where user explicitly chose false -> preserves false, migrates thermal guard + first_run_completed
         let v2_toml =
             "config_version = 2\n[battery]\nenabled = true\nhold_when_shutdown = false\n";
         fs::write(&path, v2_toml).unwrap();
@@ -823,15 +892,27 @@ mod tests {
         assert!(!explicit.battery.hold_when_shutdown);
         assert_eq!(explicit.thermal_fan.guard_cpu_temp_c, DEFAULT_GUARD_CPU_TEMP_C);
         assert_eq!(explicit.thermal_fan.guard_sustain_secs, DEFAULT_GUARD_SUSTAIN_SECS);
+        assert!(explicit.general.first_run_completed);
 
-        // v3 config preserves explicit guard overrides (within 90..=98°C, 10..=30s)
-        let v3_toml = format!(
-            "config_version = {CURRENT_CONFIG_VERSION}\n[thermal_fan]\nguard_cpu_temp_c = 92\nguard_sustain_secs = 15\n"
-        );
+        // v3 config preserves explicit guard overrides and marks first_run_completed for existing users
+        let v3_toml =
+            "config_version = 3\n[thermal_fan]\nguard_cpu_temp_c = 92\nguard_sustain_secs = 15\n";
         fs::write(&path, v3_toml).unwrap();
         let v3_loaded = AppConfig::load_from_path(&path).expect("load v3");
+        assert_eq!(v3_loaded.config_version, CURRENT_CONFIG_VERSION);
         assert_eq!(v3_loaded.thermal_fan.guard_cpu_temp_c, 92);
         assert_eq!(v3_loaded.thermal_fan.guard_sustain_secs, 15);
+        assert!(v3_loaded.general.first_run_completed);
+
+        // Explicit v4 config preserves first_run_completed = false and explicit guard overrides
+        let v4_toml = format!(
+            "config_version = {CURRENT_CONFIG_VERSION}\n[general]\nfirst_run_completed = false\n[thermal_fan]\nguard_cpu_temp_c = 92\nguard_sustain_secs = 15\n"
+        );
+        fs::write(&path, v4_toml).unwrap();
+        let v4_loaded = AppConfig::load_from_path(&path).expect("load v4");
+        assert!(!v4_loaded.general.first_run_completed);
+        assert_eq!(v4_loaded.thermal_fan.guard_cpu_temp_c, 92);
+        assert_eq!(v4_loaded.thermal_fan.guard_sustain_secs, 15);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -952,5 +1033,93 @@ mod tests {
         assert_eq!(cfg.thermal_fan.custom_curve.points.len(), 8);
         assert_eq!(cfg.tuning.pl1_watts, Some(15));
         assert_eq!(cfg.tuning.core_undervolt_mv, Some(-150));
+    }
+
+    #[test]
+    fn app_profiles_and_enhanced_auto_profile_roundtrip_and_sanitize() {
+        use crate::app_profiles::AppProfileRule;
+
+        let mut cfg = AppConfig::default();
+        assert!(cfg.thermal_fan.sync_windows_power_mode);
+
+        cfg.thermal_fan.sync_windows_power_mode = false;
+        cfg.auto_profile.enabled = true;
+        cfg.auto_profile.ac_fan_mode = Some(FanMode::CustomCurve);
+        cfg.auto_profile.ac_curve_preset = Some(FanCurvePreset::Aggressive);
+        cfg.auto_profile.dc_fan_mode = Some(FanMode::Auto);
+        cfg.app_profiles.enabled = true;
+        cfg.app_profiles.poll_interval_secs = 99;
+        cfg.app_profiles.rules.push(AppProfileRule {
+            id: String::new(),
+            name: "Blender".into(),
+            exe_name: r#""C:\Program Files\Blender\Blender.EXE""#.into(),
+            enabled: true,
+            performance_mode: PerformanceMode::Performance,
+            fan_mode: Some(FanMode::CustomCurve),
+            curve_preset: Some(FanCurvePreset::OghLike),
+            refresh_hz: Some(165),
+            cpu_boost_mode: Some(CpuBoostMode::Aggressive),
+        });
+        cfg.app_profiles.rules.push(AppProfileRule {
+            id: "bad".into(),
+            name: "Invalid".into(),
+            exe_name: "..".into(),
+            ..Default::default()
+        });
+
+        let warnings = cfg.sanitize();
+        assert_eq!(cfg.app_profiles.poll_interval_secs, 15);
+        assert_eq!(cfg.app_profiles.rules.len(), 1);
+        assert_eq!(cfg.app_profiles.rules[0].exe_name, "blender.exe");
+        assert_eq!(cfg.app_profiles.rules[0].id, "rule-1");
+        assert_eq!(warnings.len(), 1);
+
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let parsed: AppConfig = toml::from_str(&serialized).expect("deserialize");
+        assert!(!parsed.thermal_fan.sync_windows_power_mode);
+        assert_eq!(parsed.auto_profile.ac_fan_mode, Some(FanMode::CustomCurve));
+        assert_eq!(
+            parsed.auto_profile.ac_curve_preset,
+            Some(FanCurvePreset::Aggressive)
+        );
+        assert_eq!(parsed.app_profiles, cfg.app_profiles);
+
+        // Older TOML lacking new fields deserializes cleanly with defaults
+        let older: AppConfig = toml::from_str("[thermal_fan]\nperformance_mode = \"Eco\"\n").unwrap();
+        assert!(older.thermal_fan.sync_windows_power_mode);
+        assert!(!older.app_profiles.enabled);
+        assert_eq!(older.app_profiles.poll_interval_secs, 3);
+        assert_eq!(older.general.font_scale_pct, 100);
+    }
+
+    #[test]
+    fn accessibility_font_scale_clamps_and_high_contrast_preset_detected() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.general.font_scale_pct, 100);
+        cfg.general.font_scale_pct = 50;
+        let _ = cfg.sanitize();
+        assert_eq!(cfg.general.font_scale_pct, 85);
+        cfg.general.font_scale_pct = 220;
+        let _ = cfg.sanitize();
+        assert_eq!(cfg.general.font_scale_pct, 130);
+
+        let hc = CustomThemeConfig::preset_high_contrast();
+        assert!(hc.is_high_contrast());
+        assert!(!CustomThemeConfig::preset_dark_slate().is_high_contrast());
+        assert!(CustomThemeConfig::presets().contains(&hc));
+    }
+
+    #[test]
+    fn updater_config_defaults_fail_closed_and_roundtrip() {
+        let mut cfg = AppConfig::default();
+        assert!(cfg.general.auto_check_updates);
+        assert!(!cfg.general.allow_unsigned_sha256_updates);
+
+        cfg.general.auto_check_updates = false;
+        cfg.general.allow_unsigned_sha256_updates = true;
+        let toml_text = toml::to_string_pretty(&cfg).expect("serialize");
+        let parsed: AppConfig = toml::from_str(&toml_text).expect("deserialize");
+        assert!(!parsed.general.auto_check_updates);
+        assert!(parsed.general.allow_unsigned_sha256_updates);
     }
 }

@@ -7,10 +7,21 @@ use omvix_core::{AppConfig, I18n};
 #[cfg(windows)]
 use omvix_windows::hotkeys::parse_shortcut;
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum HotkeyBindStatus {
+    #[default]
+    Disabled,
+    Bound(String),
+    Conflict(String),
+    Invalid(String),
+    Error(String),
+}
+
 pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
     i18n: &I18n,
+    bind_status: &HotkeyBindStatus,
     config_warnings: &mut Vec<String>,
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
@@ -113,6 +124,21 @@ pub fn render(
     // Global Shortcut Card
     card_frame(t).show(ui, |ui| {
         section_title(ui, i18n.t("hotkeys.global_shortcut"), t);
+        ui.horizontal_wrapped(|ui| {
+            let (badge_text, badge_color) = match bind_status {
+                HotkeyBindStatus::Disabled => (i18n.t("common.disabled"), ui.visuals().weak_text_color()),
+                HotkeyBindStatus::Bound(_) => (i18n.t("hotkeys.status_active"), STATUS_OK),
+                HotkeyBindStatus::Conflict(_) => (i18n.t("hotkeys.status_conflict"), STATUS_WARN),
+                HotkeyBindStatus::Invalid(_) | HotkeyBindStatus::Error(_) => {
+                    (i18n.t("common.status_error"), STATUS_ERR)
+                }
+            };
+            status_badge(ui, &badge_text, badge_color);
+            if let HotkeyBindStatus::Bound(combo) = bind_status {
+                ui.weak(combo);
+            }
+        });
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             let shortcut_resp = ui.text_edit_singleline(&mut cfg.hotkeys.global_toggle_shortcut);
 
@@ -137,6 +163,31 @@ pub fn render(
                 on_rebind_hotkeys();
             }
         });
+        match bind_status {
+            HotkeyBindStatus::Conflict(combo) => {
+                ui.add_space(4.0);
+                ui.colored_label(
+                    STATUS_WARN,
+                    RichText::new(i18n.t("hotkeys.conflict_detail").replace("{shortcut}", combo))
+                        .size(12.0),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak(i18n.t("hotkeys.conflict_alternatives"));
+                    for alt in ["Ctrl+Alt+O", "Ctrl+Shift+F12", "Alt+F12"] {
+                        if ui.small_button(alt).clicked() {
+                            cfg.hotkeys.global_toggle_shortcut = alt.to_string();
+                            on_save();
+                            on_rebind_hotkeys();
+                        }
+                    }
+                });
+            }
+            HotkeyBindStatus::Invalid(msg) | HotkeyBindStatus::Error(msg) => {
+                ui.add_space(4.0);
+                ui.colored_label(STATUS_ERR, RichText::new(msg).size(12.0));
+            }
+            HotkeyBindStatus::Disabled | HotkeyBindStatus::Bound(_) => {}
+        }
         ui.weak("Example: Ctrl+Shift+O, Alt+F12, Ctrl+Alt+H");
     });
 }
