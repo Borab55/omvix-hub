@@ -17,6 +17,7 @@ pub struct SettingsActions {
     pub language_changed: bool,
     pub theme_changed: bool,
     pub dock_changed: bool,
+    pub open_wizard: bool,
     pub restore_defaults: bool,
 }
 
@@ -33,6 +34,7 @@ pub fn render(
         language_changed: false,
         theme_changed: false,
         dock_changed: false,
+        open_wizard: false,
         restore_defaults: false,
     };
     let theme_snapshot = cfg.general.custom_theme.clone();
@@ -168,6 +170,10 @@ pub fn render(
                     RichText::new(i18n.t("settings.installed_copy_outdated")).size(11.5),
                 );
             }
+        }
+        ui.add_space(6.0);
+        if ui.button(i18n.t("settings.open_wizard")).clicked() {
+            actions.open_wizard = true;
         }
     });
 

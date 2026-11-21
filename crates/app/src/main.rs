@@ -488,7 +488,9 @@ fn main() {
 
     tracing::info!(lang = %i18n.active_language(), "Launching Omvix Hub desktop GUI");
 
-    let start_visible = !cfg.general.start_minimized || safe_mode_reason.is_some();
+    let start_visible = !cfg.general.start_minimized
+        || safe_mode_reason.is_some()
+        || !cfg.general.first_run_completed;
     let (rgba, icon_w, icon_h) = build_tray_icon_rgba();
     let viewport = egui::ViewportBuilder::default()
         .with_title("Omvix Hub")
@@ -579,6 +581,8 @@ struct OmvixApp {
     cfg_path: PathBuf,
     config_warnings: Vec<String>,
     i18n: I18n,
+    show_wizard: bool,
+    wizard: ui::wizard::WizardState,
     open_drawer: Option<Drawer>,
     fans_power_tab: FansPowerSubTab,
     extra_tab: ExtraSubTab,
@@ -631,7 +635,10 @@ impl OmvixApp {
         crash_guard_path: PathBuf,
         #[cfg(windows)] single_instance: Option<SingleInstanceGuard>,
     ) -> Self {
-        let initial_visible = !cfg.general.start_minimized || initial_safe_mode.is_some();
+        let initial_visible = !cfg.general.start_minimized
+            || initial_safe_mode.is_some()
+            || !cfg.general.first_run_completed;
+        let show_wizard = !cfg.general.first_run_completed && initial_safe_mode.is_none();
         let window_visible = Arc::new(AtomicBool::new(initial_visible));
         let force_quit = Arc::new(AtomicBool::new(false));
         let clean_quit_started = Arc::new(AtomicBool::new(false));
@@ -737,6 +744,8 @@ impl OmvixApp {
             cfg_path,
             config_warnings,
             i18n,
+            show_wizard,
+            wizard: ui::wizard::WizardState::default(),
             open_drawer: None,
             fans_power_tab: FansPowerSubTab::default(),
             extra_tab: ExtraSubTab::default(),
@@ -1072,6 +1081,7 @@ impl eframe::App for OmvixApp {
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if self.cfg.general.hide_on_focus_loss
+            && !self.show_wizard
             && self.open_drawer.is_none()
             && self.window_visible.load(Ordering::Relaxed)
             && !self.quitting
@@ -1139,32 +1149,68 @@ impl eframe::App for OmvixApp {
         let mut toggle_drawer: Option<Drawer> = None;
         let mut open_extra: Option<ExtraSubTab> = None;
 
-        // Main window ALWAYS renders fixed-size compact cockpit (zero resize/flicker)
+        // Main window ALWAYS renders fixed-size compact cockpit or onboarding wizard (zero resize/flicker)
         egui::CentralPanel::default().frame(cockpit_frame).show(ctx, |ui| {
             let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
             let mut mark_save = || should_save = true;
-            let res = ui::cockpit::render(
-                ui,
-                &mut self.cfg,
-                &snapshot_state,
-                &self.i18n,
-                self.open_drawer,
-                COMPACT_SIZE[0],
-                self.worker_dead,
-                &mut self.config_warnings,
-                &mut push_cmd,
-                &mut mark_save,
-            );
-            toggle_drawer = res.toggle_drawer;
-            open_extra = res.open_extra_subtab;
-            if res.restart_admin {
-                should_restart_admin = true;
-            }
-            if res.hide_to_tray {
-                should_hide_to_tray = true;
-            }
-            if res.quit_app {
-                should_quit = true;
+            if self.show_wizard {
+                self.open_drawer = None;
+                let res = ui::wizard::render(
+                    ui,
+                    &mut self.cfg,
+                    &snapshot_state,
+                    &mut self.i18n,
+                    &mut self.wizard,
+                    COMPACT_SIZE[0],
+                    &mut push_cmd,
+                    &mut mark_save,
+                );
+                if res.language_changed {
+                    if let Some(tray) = &self.tray {
+                        tray.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
+                    }
+                }
+                if res.restart_admin {
+                    should_restart_admin = true;
+                }
+                if res.skipped {
+                    self.cfg.general.first_run_completed = true;
+                    self.show_wizard = false;
+                    should_save = true;
+                    pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
+                } else if res.finished {
+                    self.cfg.general.first_run_completed = true;
+                    self.show_wizard = false;
+                    should_save = true;
+                    pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
+                    if self.cfg.battery.enabled && snapshot_state.safe_mode.is_none() {
+                        pending_cmds.push(WorkerCommand::ApplyBatteryNow);
+                    }
+                }
+            } else {
+                let res = ui::cockpit::render(
+                    ui,
+                    &mut self.cfg,
+                    &snapshot_state,
+                    &self.i18n,
+                    self.open_drawer,
+                    COMPACT_SIZE[0],
+                    self.worker_dead,
+                    &mut self.config_warnings,
+                    &mut push_cmd,
+                    &mut mark_save,
+                );
+                toggle_drawer = res.toggle_drawer;
+                open_extra = res.open_extra_subtab;
+                if res.restart_admin {
+                    should_restart_admin = true;
+                }
+                if res.hide_to_tray {
+                    should_hide_to_tray = true;
+                }
+                if res.quit_app {
+                    should_quit = true;
+                }
             }
         });
 
@@ -1404,6 +1450,11 @@ impl eframe::App for OmvixApp {
                                                 self.pending_dock_frames = 2;
                                                 ctx.request_repaint();
                                             }
+                                            if res.open_wizard {
+                                                self.open_drawer = None;
+                                                self.wizard.step = 0;
+                                                self.show_wizard = true;
+                                            }
                                             if res.restore_defaults {
                                                 should_restore_defaults = true;
                                             }
@@ -1428,6 +1479,7 @@ impl eframe::App for OmvixApp {
             self.cfg = AppConfig::default();
             self.cfg.general.language = keep_lang;
             self.cfg.general.start_minimized = false;
+            self.cfg.general.first_run_completed = true;
             self.config_warnings.clear();
             self.battery_draft = ui::battery::BatteryDraftState::default();
             self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();

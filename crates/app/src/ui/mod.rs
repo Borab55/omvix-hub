@@ -8,6 +8,7 @@ pub mod monitor;
 pub mod performance;
 pub mod settings;
 pub mod tuning;
+pub mod wizard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drawer {

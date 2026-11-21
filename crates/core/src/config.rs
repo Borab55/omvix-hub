@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 3;
+pub const CURRENT_CONFIG_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -296,6 +296,7 @@ pub struct GeneralConfig {
     pub dock_bottom_right: bool,
     pub hide_on_focus_loss: bool,
     pub experimental_board_id: Option<String>,
+    pub first_run_completed: bool,
     pub theme: String,
     pub telemetry_interval_ms: u64,
     pub custom_theme: CustomThemeConfig,
@@ -312,6 +313,7 @@ impl Default for GeneralConfig {
             dock_bottom_right: true,
             hide_on_focus_loss: false,
             experimental_board_id: None,
+            first_run_completed: false,
             theme: "dark".to_string(),
             telemetry_interval_ms: 1000,
             custom_theme: CustomThemeConfig::preset_dark_slate(),
@@ -597,6 +599,10 @@ impl AppConfig {
             cfg.thermal_fan.guard_cpu_temp_c = DEFAULT_GUARD_CPU_TEMP_C;
             cfg.thermal_fan.guard_sustain_secs = DEFAULT_GUARD_SUSTAIN_SECS;
         }
+        if cfg.config_version < 4 {
+            // Existing pre-v0.5 users already configured Omvix Hub; keep wizard accessible from Settings.
+            cfg.general.first_run_completed = true;
+        }
         cfg.config_version = CURRENT_CONFIG_VERSION;
         let warnings = cfg.sanitize();
         Ok((cfg, warnings))
@@ -797,7 +803,9 @@ mod tests {
     #[test]
     fn battery_hold_default_is_true_and_legacy_config_migrates_once() {
         assert!(BatteryConfig::default().hold_when_shutdown);
-        assert_eq!(AppConfig::default().config_version, CURRENT_CONFIG_VERSION);
+        let fresh = AppConfig::default();
+        assert_eq!(fresh.config_version, CURRENT_CONFIG_VERSION);
+        assert!(!fresh.general.first_run_completed);
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -807,14 +815,15 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
 
-        // Pre-v0.4.2 config had no `config_version` and `hold_when_shutdown = false` -> migrates to true
+        // Pre-v0.4.2 config had no `config_version` and `hold_when_shutdown = false` -> migrates to true + first_run_completed = true
         let legacy_toml = "[battery]\nenabled = true\nhold_when_shutdown = false\n";
         fs::write(&path, legacy_toml).unwrap();
         let migrated = AppConfig::load_from_path(&path).expect("load legacy");
         assert_eq!(migrated.config_version, CURRENT_CONFIG_VERSION);
         assert!(migrated.battery.hold_when_shutdown);
+        assert!(migrated.general.first_run_completed);
 
-        // v2 config where user explicitly chose false -> preserves false, migrates thermal guard to v3 defaults
+        // v2 config where user explicitly chose false -> preserves false, migrates thermal guard + first_run_completed
         let v2_toml =
             "config_version = 2\n[battery]\nenabled = true\nhold_when_shutdown = false\n";
         fs::write(&path, v2_toml).unwrap();
@@ -823,15 +832,27 @@ mod tests {
         assert!(!explicit.battery.hold_when_shutdown);
         assert_eq!(explicit.thermal_fan.guard_cpu_temp_c, DEFAULT_GUARD_CPU_TEMP_C);
         assert_eq!(explicit.thermal_fan.guard_sustain_secs, DEFAULT_GUARD_SUSTAIN_SECS);
+        assert!(explicit.general.first_run_completed);
 
-        // v3 config preserves explicit guard overrides (within 90..=98°C, 10..=30s)
-        let v3_toml = format!(
-            "config_version = {CURRENT_CONFIG_VERSION}\n[thermal_fan]\nguard_cpu_temp_c = 92\nguard_sustain_secs = 15\n"
-        );
+        // v3 config preserves explicit guard overrides and marks first_run_completed for existing users
+        let v3_toml =
+            "config_version = 3\n[thermal_fan]\nguard_cpu_temp_c = 92\nguard_sustain_secs = 15\n";
         fs::write(&path, v3_toml).unwrap();
         let v3_loaded = AppConfig::load_from_path(&path).expect("load v3");
+        assert_eq!(v3_loaded.config_version, CURRENT_CONFIG_VERSION);
         assert_eq!(v3_loaded.thermal_fan.guard_cpu_temp_c, 92);
         assert_eq!(v3_loaded.thermal_fan.guard_sustain_secs, 15);
+        assert!(v3_loaded.general.first_run_completed);
+
+        // Explicit v4 config preserves first_run_completed = false and explicit guard overrides
+        let v4_toml = format!(
+            "config_version = {CURRENT_CONFIG_VERSION}\n[general]\nfirst_run_completed = false\n[thermal_fan]\nguard_cpu_temp_c = 92\nguard_sustain_secs = 15\n"
+        );
+        fs::write(&path, v4_toml).unwrap();
+        let v4_loaded = AppConfig::load_from_path(&path).expect("load v4");
+        assert!(!v4_loaded.general.first_run_completed);
+        assert_eq!(v4_loaded.thermal_fan.guard_cpu_temp_c, 92);
+        assert_eq!(v4_loaded.thermal_fan.guard_sustain_secs, 15);
 
         let _ = fs::remove_dir_all(&dir);
     }
