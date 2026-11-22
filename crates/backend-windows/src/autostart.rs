@@ -7,13 +7,13 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
-use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RegCloseKey, RegDeleteValueW,
-    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-};
 use windows::core::{HSTRING, PCWSTR};
+use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+};
 
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "OmvixHub";
@@ -64,22 +64,28 @@ fn xml_unescape(s: &str) -> String {
 fn decode_task_xml_bytes(raw: &[u8]) -> String {
     if raw.starts_with(&[0xFF, 0xFE]) && raw.len() >= 2 {
         let units: Vec<u16> = raw[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         return String::from_utf16_lossy(&units);
     }
     if raw.starts_with(&[0xFE, 0xFF]) && raw.len() >= 2 {
         let units: Vec<u16> = raw[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         return String::from_utf16_lossy(&units);
     }
-    if raw.len() >= 4 && raw.len() % 2 == 0 && raw[1] == 0 && raw[3] == 0 {
+    if raw.len() >= 4 && raw.len().is_multiple_of(2) && raw[1] == 0 && raw[3] == 0 {
         let units: Vec<u16> = raw
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         return String::from_utf16_lossy(&units);
     }
@@ -294,8 +300,8 @@ pub fn query_installed_copy_status() -> InstalledCopyStatus {
     };
 
     let task_exists = is_elevated_task_autostart_enabled();
-    let task_path_matches =
-        query_elevated_task_command().is_some_and(|cmd| paths_equal_ci(Path::new(&cmd), &installed));
+    let task_path_matches = query_elevated_task_command()
+        .is_some_and(|cmd| paths_equal_ci(Path::new(&cmd), &installed));
 
     InstalledCopyStatus {
         installed_path: installed.to_string_lossy().to_string(),
@@ -357,7 +363,11 @@ fn set_registry_autostart(enabled: bool, exe_path: &Path) -> Result<()> {
     } else {
         let del = unsafe { RegDeleteValueW(hkey, &val_name) };
         // ERROR_FILE_NOT_FOUND (2) is fine when disabling an already absent entry.
-        if del.0 == 2 { ERROR_SUCCESS } else { del }
+        if del.0 == 2 {
+            ERROR_SUCCESS
+        } else {
+            del
+        }
     };
 
     unsafe {
@@ -379,8 +389,11 @@ pub fn create_elevated_task(exe_path: &Path) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let tmp_path =
-        std::env::temp_dir().join(format!("omvix_autostart_{}_{}.xml", std::process::id(), nanos));
+    let tmp_path = std::env::temp_dir().join(format!(
+        "omvix_autostart_{}_{}.xml",
+        std::process::id(),
+        nanos
+    ));
     let xml_bytes = build_elevated_task_xml(exe_path);
     fs::write(&tmp_path, xml_bytes)?;
 
@@ -461,10 +474,10 @@ pub fn remove_autostart_and_installed_copy() {
             let path = entry.path();
             let name = entry.file_name();
             let lower = name.to_string_lossy().to_ascii_lowercase();
-            if lower == "omvix-hub.exe" || lower.starts_with("omvix-hub.exe.old") {
-                if fs::remove_file(&path).is_err() {
-                    schedule_delete_on_reboot(&path);
-                }
+            if (lower == "omvix-hub.exe" || lower.starts_with("omvix-hub.exe.old"))
+                && fs::remove_file(&path).is_err()
+            {
+                schedule_delete_on_reboot(&path);
             }
         }
     }
@@ -507,8 +520,10 @@ mod tests {
         assert!(bytes.len() >= 2);
         assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
         let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         String::from_utf16(&units).expect("valid UTF-16LE XML")
     }
@@ -537,8 +552,12 @@ mod tests {
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         assert!(xml.contains("<StartWhenAvailable>true</StartWhenAvailable>"));
         assert!(xml.contains("<Enabled>true</Enabled>"));
-        assert!(xml.contains("<Command>C:\\Program Files\\Omvix &amp; Hub\\omvix-hub.exe</Command>"));
-        assert!(xml.contains("<WorkingDirectory>C:\\Program Files\\Omvix &amp; Hub</WorkingDirectory>"));
+        assert!(
+            xml.contains("<Command>C:\\Program Files\\Omvix &amp; Hub\\omvix-hub.exe</Command>")
+        );
+        assert!(
+            xml.contains("<WorkingDirectory>C:\\Program Files\\Omvix &amp; Hub</WorkingDirectory>")
+        );
     }
 
     #[test]

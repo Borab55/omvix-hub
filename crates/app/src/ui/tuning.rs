@@ -1,4 +1,4 @@
-use crate::theme::{STATUS_OK, STATUS_WARN, card_frame, section_title, status_badge};
+use crate::theme::{card_frame, section_title, status_badge, STATUS_OK, STATUS_WARN};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Slider, Ui};
 use omvix_core::{AppConfig, CpuBoostMode, I18n};
@@ -54,7 +54,10 @@ pub fn render(
                 CpuBoostMode::Aggressive,
                 CpuBoostMode::EfficientAggressive,
             ] {
-                if ui.selectable_label(cur == mode, format!("{mode:?}")).clicked() {
+                if ui
+                    .selectable_label(cur == mode, format!("{mode:?}"))
+                    .clicked()
+                {
                     cfg.tuning.cpu_boost_mode = Some(mode);
                     on_save();
                     on_cmd(WorkerCommand::SetCpuBoost(mode));
@@ -67,7 +70,15 @@ pub fn render(
 
     // Custom Power Limits (PL1 / PL2) — R4 / B1
     card_frame(t).show(ui, |ui| {
-        section_title(ui, format!("{} / {}", i18n.t("tuning.power_limit_pl1"), i18n.t("tuning.power_limit_pl2")), t);
+        section_title(
+            ui,
+            format!(
+                "{} / {}",
+                i18n.t("tuning.power_limit_pl1"),
+                i18n.t("tuning.power_limit_pl2")
+            ),
+            t,
+        );
         if !st.board_known {
             ui.colored_label(STATUS_WARN, i18n.t("tuning.power_limit_unknown_board"));
         }
@@ -126,7 +137,11 @@ pub fn render(
         ui.horizontal_wrapped(|ui| {
             section_title(
                 ui,
-                format!("{} / {}", i18n.t("tuning.temp_limit"), i18n.t("tuning.undervolt")),
+                format!(
+                    "{} / {}",
+                    i18n.t("tuning.temp_limit"),
+                    i18n.t("tuning.undervolt")
+                ),
                 t,
             );
             status_badge(ui, &i18n.t("tuning.msr_bridge_pending"), STATUS_WARN);

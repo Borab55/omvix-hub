@@ -1,4 +1,4 @@
-use crate::wmi_bios::{HpWmiBios, OutputSize, describe_wmi_return_code};
+use crate::wmi_bios::{describe_wmi_return_code, HpWmiBios, OutputSize};
 use omvix_core::{GpuMode, GpuSwitchBackend, OmvixError, Result};
 
 /// Windows HP WMI GPU MUX switch controller (`0x52` / `0x53`).

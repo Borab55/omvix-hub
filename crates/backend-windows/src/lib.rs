@@ -47,9 +47,9 @@ mod wmi_com;
 
 use chrono::Utc;
 use omvix_core::boards::lookup_board;
-use omvix_core::{DiagnosticReport, DiagnosticsBackend, Result};
 #[cfg(not(windows))]
 use omvix_core::OmvixError;
+use omvix_core::{DiagnosticReport, DiagnosticsBackend, Result};
 
 #[cfg(windows)]
 pub use battery::WindowsBatteryBackend;
@@ -93,8 +93,7 @@ impl DiagnosticsBackend for WindowsDiagnosticsBackend {
                 system_info::check_hp_wmi_classes();
             let conflict_services = system_info::scan_conflict_services();
 
-            let (wmi_hpqbintm_available, wmi_error, probes) = match wmi_bios::HpWmiBios::connect()
-            {
+            let (wmi_hpqbintm_available, wmi_error, probes) = match wmi_bios::HpWmiBios::connect() {
                 Ok(bios) => (true, None, bios.probe_all_readonly()),
                 Err(err) => {
                     tracing::warn!("HP WMI BIOS probe skipped: {err}");

@@ -8,8 +8,7 @@ pub const GITHUB_OWNER: &str = "Borab55";
 pub const GITHUB_REPO: &str = "hp-omen-hub-lite";
 pub const GITHUB_RELEASES_LATEST_API: &str =
     "https://api.github.com/repos/Borab55/hp-omen-hub-lite/releases/latest";
-pub const GITHUB_RELEASES_PAGE_URL: &str =
-    "https://github.com/Borab55/hp-omen-hub-lite/releases";
+pub const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/Borab55/hp-omen-hub-lite/releases";
 
 pub const MAX_API_JSON_BYTES: usize = 1024 * 1024;
 pub const MAX_CHECKSUM_BYTES: usize = 256 * 1024;
@@ -47,10 +46,10 @@ pub fn sha256_hex(data: &[u8]) -> String {
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -183,11 +182,8 @@ impl PartialOrd for SemVer {
 
 impl Ord for SemVer {
     fn cmp(&self, other: &Self) -> Ordering {
-        let base = (self.major, self.minor, self.patch).cmp(&(
-            other.major,
-            other.minor,
-            other.patch,
-        ));
+        let base =
+            (self.major, self.minor, self.patch).cmp(&(other.major, other.minor, other.patch));
         if base != Ordering::Equal {
             return base;
         }
@@ -250,9 +246,7 @@ pub fn validate_github_release_url(url: &str) -> Result<()> {
     );
 
     let allowed = match host_lower.as_str() {
-        "api.github.com" => {
-            path_lower.starts_with(&format!("/repos{repo_prefix}"))
-        }
+        "api.github.com" => path_lower.starts_with(&format!("/repos{repo_prefix}")),
         "github.com" => {
             let releases_exact = format!("{repo_prefix}releases");
             let releases_prefix = format!("{repo_prefix}releases/");
@@ -326,10 +320,7 @@ impl StagedUpdate {
     pub fn can_install(&self, allow_unsigned_sha256: bool) -> bool {
         let valid_hash = self.verified_sha256.len() == 64
             && self.expected_sha256.len() == 64
-            && self
-                .verified_sha256
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit())
+            && self.verified_sha256.bytes().all(|b| b.is_ascii_hexdigit())
             && self
                 .verified_sha256
                 .eq_ignore_ascii_case(&self.expected_sha256);
@@ -423,10 +414,7 @@ pub fn parse_github_release_json(json: &str) -> Result<ReleaseInfo> {
     }
 
     let ver = SemVer::parse(&raw.tag_name).ok_or_else(|| {
-        OmvixError::Config(format!(
-            "Invalid SemVer release tag `{}`",
-            raw.tag_name
-        ))
+        OmvixError::Config(format!("Invalid SemVer release tag `{}`", raw.tag_name))
     })?;
     let version = ver.to_string();
 
@@ -473,8 +461,16 @@ pub fn parse_github_release_json(json: &str) -> Result<ReleaseInfo> {
         .assets
         .iter()
         .find(|a| a.name.eq_ignore_ascii_case("sha256sums.txt"))
-        .or_else(|| raw.assets.iter().find(|a| a.name.eq_ignore_ascii_case("sha256sums")))
-        .or_else(|| raw.assets.iter().find(|a| a.name.eq_ignore_ascii_case("checksums.txt")))
+        .or_else(|| {
+            raw.assets
+                .iter()
+                .find(|a| a.name.eq_ignore_ascii_case("sha256sums"))
+        })
+        .or_else(|| {
+            raw.assets
+                .iter()
+                .find(|a| a.name.eq_ignore_ascii_case("checksums.txt"))
+        })
         .or_else(|| {
             raw.assets.iter().find(|a| {
                 let lower = a.name.to_ascii_lowercase();
@@ -608,9 +604,7 @@ pub fn evaluate_authenticode_signature(
     } else if status.eq_ignore_ascii_case("NotSigned") {
         UpdateSignatureStatus::UnsignedSha256Only
     } else {
-        UpdateSignatureStatus::Rejected(format!(
-            "Authenticode signature rejected: {status}"
-        ))
+        UpdateSignatureStatus::Rejected(format!("Authenticode signature rejected: {status}"))
     }
 }
 
@@ -667,10 +661,10 @@ mod tests {
         )
         .is_ok());
 
-        assert!(validate_github_release_url(
-            "http://github.com/Borab55/hp-omen-hub-lite/releases"
-        )
-        .is_err());
+        assert!(
+            validate_github_release_url("http://github.com/Borab55/hp-omen-hub-lite/releases")
+                .is_err()
+        );
         assert!(validate_github_release_url(
             "https://github.com/OtherUser/hp-omen-hub-lite/releases"
         )

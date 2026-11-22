@@ -3,6 +3,16 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [0.5.1] - 2026-11-22
+
+### Added
+- **GitHub Actions CI (`.github/workflows/ci.yml`):** Added automated workflow with `check-and-test` (`cargo fmt --check`, `clippy -D warnings`, `test`), `release-and-dll-audit` (release build, MinGW DLL dependency audit, clean-`PATH` `--smoke-test` & `omvix-cli --version`), and `linux-core-check` (`omvix-core` and `omvix-linux`).
+- **Mock-Backend Worker Integration Tests (`crates/app/src/worker_tests.rs`):** Refactored `crates/app/src/worker.rs` with internal dependency-injection traits (`WorkerThermalBackend`, `WorkerTelemetryBackend`, `WorkerTuningBackend`, `WorkerOsHooks`, `WorkerBackends`, `WorkerEngine`) preserving production behavior, and added 8 end-to-end mock-hardware integration tests (`safe_mode`, `unknown_board`, `thermal_guard`, `sensor_loss`, `profiles`, `battery_offstate`, `undo_history`, `csv_bat_hist`).
+- **Windows Code Signing Research Report (`docs/CODE_SIGNING.md`):** Documented code signing options (SignPath Foundation OSS, Certum Open Source SimplySign, Azure Artifact Signing, Commercial OV/EV certificates, GitHub Artifact Attestations) and `PINNED_SIGNER_SUBJECT` integration path for the updater.
+
+### Changed
+- **Workspace Formatting & Lint Cleanup:** Fixed all `clippy` (`-D warnings`) and Rust 2021 lints across workspace crates and formatted all files with `cargo fmt --all`.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added & Improved (Phase 3 — UX, Profiles, Accessibility & Signed Updater)

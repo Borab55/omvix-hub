@@ -330,7 +330,10 @@ impl ThermalSafetyGuard {
         );
 
         let trigger_reason = if cpu_sustained {
-            Some(format!("CPU >= {cpu_thresh:.0}°C for {}s", sustain.round() as u32))
+            Some(format!(
+                "CPU >= {cpu_thresh:.0}°C for {}s",
+                sustain.round() as u32
+            ))
         } else if gpu_sustained {
             Some("GPU >= 86°C for 5s".to_string())
         } else if chassis_sustained {
@@ -445,9 +448,16 @@ impl GuardMaxRetryController {
         }
     }
 
-    pub fn tick(&mut self, current_rpms: &[u32], fan_max_rpms: &[u32], now_secs: f64) -> GuardMaxAction {
+    pub fn tick(
+        &mut self,
+        current_rpms: &[u32],
+        fan_max_rpms: &[u32],
+        now_secs: f64,
+    ) -> GuardMaxAction {
         match self.phase {
-            GuardRetryPhase::PendingRetry { next_attempt_at_secs } => {
+            GuardRetryPhase::PendingRetry {
+                next_attempt_at_secs,
+            } => {
                 if now_secs >= next_attempt_at_secs {
                     GuardMaxAction::RetryMax {
                         attempt: self.attempts_done + 1,
@@ -456,7 +466,9 @@ impl GuardMaxRetryController {
                     GuardMaxAction::Wait
                 }
             }
-            GuardRetryPhase::VerifyingRpm { verify_deadline_secs } => {
+            GuardRetryPhase::VerifyingRpm {
+                verify_deadline_secs,
+            } => {
                 let cur_max = current_rpms.iter().copied().max().unwrap_or(0);
                 let target_floor = fan_max_rpms
                     .iter()
@@ -488,9 +500,9 @@ impl GuardMaxRetryController {
 
                 GuardMaxAction::Wait
             }
-            GuardRetryPhase::Idle | GuardRetryPhase::Verified | GuardRetryPhase::FailedFallbackAuto => {
-                GuardMaxAction::Wait
-            }
+            GuardRetryPhase::Idle
+            | GuardRetryPhase::Verified
+            | GuardRetryPhase::FailedFallbackAuto => GuardMaxAction::Wait,
         }
     }
 }
@@ -585,12 +597,28 @@ mod tests {
 
     #[test]
     fn cool_check_and_smart_level_allow_zero_rpm_only_when_cool() {
-        assert!(is_system_cool_for_zero_rpm(Some(50.0), Some(45.0), Some(38.0)));
+        assert!(is_system_cool_for_zero_rpm(
+            Some(50.0),
+            Some(45.0),
+            Some(38.0)
+        ));
         assert!(is_system_cool_for_zero_rpm(None, Some(52.0), None));
         assert!(!is_system_cool_for_zero_rpm(None, None, None));
-        assert!(!is_system_cool_for_zero_rpm(Some(65.0), Some(45.0), Some(38.0)));
-        assert!(!is_system_cool_for_zero_rpm(Some(55.0), Some(60.0), Some(38.0)));
-        assert!(!is_system_cool_for_zero_rpm(Some(55.0), Some(45.0), Some(46.0)));
+        assert!(!is_system_cool_for_zero_rpm(
+            Some(65.0),
+            Some(45.0),
+            Some(38.0)
+        ));
+        assert!(!is_system_cool_for_zero_rpm(
+            Some(55.0),
+            Some(60.0),
+            Some(38.0)
+        ));
+        assert!(!is_system_cool_for_zero_rpm(
+            Some(55.0),
+            Some(45.0),
+            Some(46.0)
+        ));
 
         assert_eq!(smart_manual_wmi_level(0, 58, true), 0);
         assert_eq!(smart_manual_wmi_level(15, 58, true), 9);
@@ -640,15 +668,42 @@ mod tests {
 
         // Short 2s startup spike at 91-96°C resets when temp drops -> NO emergency override!
         assert_eq!(
-            g.evaluate(cfg, FanMode::Auto, Some(96.0), Some(45.0), Some(40.0), Some(60.0), &[2200, 0], 10.0),
+            g.evaluate(
+                cfg,
+                FanMode::Auto,
+                Some(96.0),
+                Some(45.0),
+                Some(40.0),
+                Some(60.0),
+                &[2200, 0],
+                10.0
+            ),
             ThermalGuardDecision::NoChange
         );
         assert_eq!(
-            g.evaluate(cfg, FanMode::Auto, Some(96.0), Some(45.0), Some(40.0), Some(60.0), &[2400, 0], 11.5),
+            g.evaluate(
+                cfg,
+                FanMode::Auto,
+                Some(96.0),
+                Some(45.0),
+                Some(40.0),
+                Some(60.0),
+                &[2400, 0],
+                11.5
+            ),
             ThermalGuardDecision::NoChange
         );
         assert_eq!(
-            g.evaluate(cfg, FanMode::Auto, Some(68.0), Some(45.0), Some(40.0), Some(25.0), &[2400, 0], 12.5),
+            g.evaluate(
+                cfg,
+                FanMode::Auto,
+                Some(68.0),
+                Some(45.0),
+                Some(40.0),
+                Some(25.0),
+                &[2400, 0],
+                12.5
+            ),
             ThermalGuardDecision::NoChange
         );
         assert!(!g.is_active());
@@ -735,15 +790,42 @@ mod tests {
 
         // Sub-1800 RPM fan under thermal load on CustomCurve engages after >= 3s
         assert_eq!(
-            g.evaluate(cfg, FanMode::CustomCurve, Some(80.0), Some(54.0), Some(46.0), Some(60.0), &[1400, 1600], 50.0),
+            g.evaluate(
+                cfg,
+                FanMode::CustomCurve,
+                Some(80.0),
+                Some(54.0),
+                Some(46.0),
+                Some(60.0),
+                &[1400, 1600],
+                50.0
+            ),
             ThermalGuardDecision::NoChange
         );
         assert_eq!(
-            g.evaluate(cfg, FanMode::CustomCurve, Some(80.0), Some(54.0), Some(46.0), Some(60.0), &[1400, 1600], 52.0),
+            g.evaluate(
+                cfg,
+                FanMode::CustomCurve,
+                Some(80.0),
+                Some(54.0),
+                Some(46.0),
+                Some(60.0),
+                &[1400, 1600],
+                52.0
+            ),
             ThermalGuardDecision::NoChange
         );
         assert_eq!(
-            g.evaluate(cfg, FanMode::CustomCurve, Some(80.0), Some(54.0), Some(46.0), Some(60.0), &[1400, 1600], 53.0),
+            g.evaluate(
+                cfg,
+                FanMode::CustomCurve,
+                Some(80.0),
+                Some(54.0),
+                Some(46.0),
+                Some(60.0),
+                &[1400, 1600],
+                53.0
+            ),
             ThermalGuardDecision::EngageEmergencyMax(
                 "Fan < 1800 RPM under thermal load".to_string()
             )
@@ -777,7 +859,10 @@ mod tests {
         assert_eq!(sl.evaluate(false, 6.9), SensorLossDecision::NoChange);
         assert!(!sl.is_active());
 
-        assert_eq!(sl.evaluate(false, 7.0), SensorLossDecision::EngageAutoFallback);
+        assert_eq!(
+            sl.evaluate(false, 7.0),
+            SensorLossDecision::EngageAutoFallback
+        );
         assert!(sl.is_active());
         assert_eq!(sl.evaluate(false, 12.0), SensorLossDecision::NoChange);
 
@@ -791,7 +876,10 @@ mod tests {
         let mut rc = GuardMaxRetryController::new();
         rc.begin_engage(&[1500, 1500], 0.0);
         assert_eq!(rc.record_attempt_result(false, 0.0), GuardMaxAction::Wait);
-        assert_eq!(rc.tick(&[1500, 1500], &[5800, 6100], 1.5), GuardMaxAction::Wait);
+        assert_eq!(
+            rc.tick(&[1500, 1500], &[5800, 6100], 1.5),
+            GuardMaxAction::Wait
+        );
         assert_eq!(
             rc.tick(&[1500, 1500], &[5800, 6100], 2.0),
             GuardMaxAction::RetryMax { attempt: 2 }
@@ -811,8 +899,14 @@ mod tests {
         let mut rc2 = GuardMaxRetryController::new();
         rc2.begin_engage(&[1800, 1800], 10.0);
         assert_eq!(rc2.record_attempt_result(true, 10.0), GuardMaxAction::Wait);
-        assert_eq!(rc2.tick(&[1900, 1900], &[5800, 6100], 11.0), GuardMaxAction::Wait);
-        assert_eq!(rc2.tick(&[3800, 4100], &[5800, 6100], 12.0), GuardMaxAction::Verified);
+        assert_eq!(
+            rc2.tick(&[1900, 1900], &[5800, 6100], 11.0),
+            GuardMaxAction::Wait
+        );
+        assert_eq!(
+            rc2.tick(&[3800, 4100], &[5800, 6100], 12.0),
+            GuardMaxAction::Verified
+        );
 
         // Path 3: Command succeeds but RPM stays stuck for 4s -> retries then falls back
         let mut rc3 = GuardMaxRetryController::new();

@@ -1,14 +1,14 @@
 use crate::system_info::{collect_security_status, collect_system_identity};
-use crate::wmi_bios::{HpWmiBios, OutputSize, describe_wmi_return_code};
+use crate::wmi_bios::{describe_wmi_return_code, HpWmiBios, OutputSize};
 use omvix_core::boards::lookup_board;
 use omvix_core::{CpuBoostMode, CpuTuningBackend, OmvixError, Result};
-use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
+use windows::core::GUID;
+use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
 use windows::Win32::System::Power::{
     PowerGetActiveScheme, PowerReadACValueIndex, PowerSetActiveScheme, PowerWriteACValueIndex,
     PowerWriteDCValueIndex,
 };
 use windows::Win32::System::Registry::HKEY;
-use windows::core::GUID;
 
 /// Builds the 4-byte HP WMI `0x20008 / 0x29` power limit payload `[PL1, PL2, PL4=0xFF, TPP=0xFF]`.
 /// `None` encodes `0xFF` ("leave unchanged") instead of overwriting firmware defaults (R4 / B1).
@@ -193,7 +193,10 @@ impl CpuTuningBackend for WindowsCpuTuningBackend {
         });
         match wmi_res {
             Ok(()) => {
-                tracing::info!(?payload, "Applied CPU/Platform power limits via HP WMI 0x29");
+                tracing::info!(
+                    ?payload,
+                    "Applied CPU/Platform power limits via HP WMI 0x29"
+                );
                 return Ok(());
             }
             Err(err) => {

@@ -1,11 +1,11 @@
 use omvix_core::{DisplayBackend, DisplayModeInfo, OmvixError, Result};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_RESTART,
-    DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
-    EnumDisplaySettingsW,
+    ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_UPDATEREGISTRY, DEVMODEW,
+    DISP_CHANGE_RESTART, DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY, ENUM_CURRENT_SETTINGS,
+    ENUM_DISPLAY_SETTINGS_MODE,
 };
-use windows::core::PCWSTR;
 
 /// Windows display refresh rate enumerator and switcher via Win32 GDI.
 #[derive(Debug, Default)]

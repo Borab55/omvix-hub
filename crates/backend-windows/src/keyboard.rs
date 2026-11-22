@@ -1,5 +1,5 @@
 use crate::system_info::collect_system_identity;
-use crate::wmi_bios::{HpWmiBios, OutputSize, describe_wmi_return_code};
+use crate::wmi_bios::{describe_wmi_return_code, HpWmiBios, OutputSize};
 use omvix_core::boards::lookup_board;
 use omvix_core::{KeyboardBackend, KeyboardType, OmvixError, Result, RgbColor};
 
@@ -55,12 +55,7 @@ impl KeyboardBackend for WindowsKeyboardBackend {
         Ok(KeyboardType::Unknown)
     }
 
-    fn set_backlight(
-        &self,
-        enabled: bool,
-        brightness_pct: u8,
-        zones: &[RgbColor],
-    ) -> Result<()> {
+    fn set_backlight(&self, enabled: bool, brightness_pct: u8, zones: &[RgbColor]) -> Result<()> {
         HpWmiBios::with_cached(|bios| {
             let power_byte = if enabled { 0xE4 } else { 0x64 };
             let toggle = bios.execute(
@@ -118,7 +113,11 @@ impl KeyboardBackend for WindowsKeyboardBackend {
                 });
             }
 
-            tracing::info!(brightness_pct, zones = zones.len(), "Applied keyboard RGB colors");
+            tracing::info!(
+                brightness_pct,
+                zones = zones.len(),
+                "Applied keyboard RGB colors"
+            );
             Ok(())
         })
     }

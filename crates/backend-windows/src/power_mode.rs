@@ -1,7 +1,7 @@
 use omvix_core::{OmvixError, Result, WindowsPowerOverlay};
+use windows::core::{s, w, GUID, PCSTR};
 use windows::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
-use windows::core::{GUID, PCSTR, s, w};
 
 type PowerSetActiveOverlaySchemeFn = unsafe extern "system" fn(*const GUID) -> u32;
 type PowerGetActualOverlaySchemeFn = unsafe extern "system" fn(*mut GUID) -> u32;
@@ -116,10 +116,7 @@ mod tests {
         assert_eq!(perf.data1, 0xded574b5);
         assert_eq!(perf.data2, 0x45a0);
         assert_eq!(perf.data3, 0x4f42);
-        assert_eq!(
-            perf.data4,
-            [0x87, 0x37, 0x46, 0x34, 0x5c, 0x09, 0xc2, 0x38]
-        );
+        assert_eq!(perf.data4, [0x87, 0x37, 0x46, 0x34, 0x5c, 0x09, 0xc2, 0x38]);
         assert_eq!(
             overlay_from_guid(perf),
             Some(WindowsPowerOverlay::BestPerformance)

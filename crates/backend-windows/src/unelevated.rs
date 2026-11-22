@@ -4,28 +4,28 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use windows::core::{Interface, BSTR, HSTRING, PCWSTR, PWSTR, VARIANT};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Security::{
-    DuplicateTokenEx, SecurityImpersonation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
-    TOKEN_ALL_ACCESS, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TokenPrimary,
+    DuplicateTokenEx, SecurityImpersonation, TokenPrimary, TOKEN_ADJUST_DEFAULT,
+    TOKEN_ADJUST_SESSIONID, TOKEN_ALL_ACCESS, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::SearchPathW;
 use windows::Win32::System::Com::{
-    CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    IDispatch, IServiceProvider,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, IDispatch, IServiceProvider,
+    CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessWithTokenW, LOGON_WITH_PROFILE, OpenProcess, OpenProcessToken,
+    CreateProcessWithTokenW, OpenProcess, OpenProcessToken, LOGON_WITH_PROFILE,
     PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
 };
 use windows::Win32::UI::Shell::{
     IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows, SID_STopLevelBrowser,
-    SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows,
+    ShellWindows, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetShellWindow, GetWindowThreadProcessId, SW_SHOWNORMAL,
 };
-use windows::core::{BSTR, HSTRING, Interface, PCWSTR, PWSTR, VARIANT};
 
 struct ComGuard(bool);
 
@@ -146,10 +146,9 @@ fn launch_via_desktop_shell(target: &Path, args: &str, is_lnk: bool) -> Result<(
             let svc_provider: IServiceProvider = desktop_disp
                 .cast()
                 .map_err(|e| format!("cast IServiceProvider: {e}"))?;
-            let shell_browser: IShellBrowser = unsafe {
-                svc_provider.QueryService(&SID_STopLevelBrowser)
-            }
-            .map_err(|e| format!("QueryService(SID_STopLevelBrowser): {e}"))?;
+            let shell_browser: IShellBrowser =
+                unsafe { svc_provider.QueryService(&SID_STopLevelBrowser) }
+                    .map_err(|e| format!("QueryService(SID_STopLevelBrowser): {e}"))?;
 
             let shell_view = unsafe { shell_browser.QueryActiveShellView() }
                 .map_err(|e| format!("QueryActiveShellView: {e}"))?;
@@ -258,15 +257,20 @@ fn launch_via_explorer_token(target: &Path, args: &str) -> Result<()> {
     } else {
         format!("\"{target_str}\" {args}")
     };
-    let mut cmdline_wide: Vec<u16> = cmdline_str.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut cmdline_wide: Vec<u16> = cmdline_str
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let app_wide = HSTRING::from(target.as_os_str());
     let workdir_wide = target.parent().map(|p| HSTRING::from(p.as_os_str()));
     let workdir_pcwstr = workdir_wide
         .as_ref()
         .map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr()));
 
-    let mut si = STARTUPINFOW::default();
-    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
     let mut pi = PROCESS_INFORMATION::default();
 
     unsafe {

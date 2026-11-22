@@ -66,8 +66,10 @@ mod tests {
     #[test]
     fn disabled_always_returns_auto() {
         let mut engine = BatteryCareEngine::new();
-        let mut cfg = BatteryConfig::default();
-        cfg.enabled = false;
+        let mut cfg = BatteryConfig {
+            enabled: false,
+            ..Default::default()
+        };
         assert_eq!(engine.evaluate(&mut cfg, 90, true), BatteryChargeMode::Auto);
     }
 

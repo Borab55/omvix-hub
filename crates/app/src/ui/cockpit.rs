@@ -1,9 +1,9 @@
 use crate::theme::{
-    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, clickable_status_badge,
-    clickable_warning_badge, compact_card, compact_status_pill, pill_button, rgb, section_title,
-    status_badge, tile_button,
+    accent_color, clickable_status_badge, clickable_warning_badge, compact_card,
+    compact_status_pill, pill_button, rgb, section_title, status_badge, tile_button, STATUS_ERR,
+    STATUS_OK, STATUS_WARN,
 };
-use crate::ui::{Drawer, ExtraSubTab, control_committed};
+use crate::ui::{control_committed, Drawer, ExtraSubTab};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, CornerRadius, RichText, Slider, Stroke, Ui};
 use omvix_core::{
@@ -66,8 +66,7 @@ pub fn render(
         });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if !st.security.is_admin
-                && clickable_status_badge(ui, "Admin ?", STATUS_WARN).clicked()
+            if !st.security.is_admin && clickable_status_badge(ui, "Admin ?", STATUS_WARN).clicked()
             {
                 actions.restart_admin = true;
             }
@@ -97,24 +96,18 @@ pub fn render(
             if st.safe_mode.is_some() {
                 status_badge(ui, &i18n.t("safe_mode.badge"), STATUS_WARN);
             }
-            match &st.update_status {
-                UpdateUiStatus::UpdateAvailable(rel) => {
-                    if clickable_status_badge(ui, &format!("v{} ↑", rel.version), STATUS_OK)
-                        .on_hover_text(i18n.t("updates.cockpit_tooltip"))
-                        .clicked()
-                    {
-                        actions.open_extra_subtab = Some(ExtraSubTab::Settings);
-                    }
+            let available_ver = match &st.update_status {
+                UpdateUiStatus::UpdateAvailable(rel) => Some(rel.version.as_str()),
+                UpdateUiStatus::ReadyToInstall(staged) => Some(staged.version.as_str()),
+                _ => None,
+            };
+            if let Some(ver) = available_ver {
+                if clickable_status_badge(ui, &format!("v{ver} ↑"), STATUS_OK)
+                    .on_hover_text(i18n.t("updates.cockpit_tooltip"))
+                    .clicked()
+                {
+                    actions.open_extra_subtab = Some(ExtraSubTab::Settings);
                 }
-                UpdateUiStatus::ReadyToInstall(staged) => {
-                    if clickable_status_badge(ui, &format!("v{} ↑", staged.version), STATUS_OK)
-                        .on_hover_text(i18n.t("updates.cockpit_tooltip"))
-                        .clicked()
-                    {
-                        actions.open_extra_subtab = Some(ExtraSubTab::Settings);
-                    }
-                }
-                _ => {}
             }
         });
     });
@@ -303,7 +296,9 @@ pub fn render(
             ui.set_max_width(card_inner_w);
             ui.colored_label(
                 STATUS_ERR,
-                RichText::new(i18n.t("app.worker_dead_warning")).size(11.5).strong(),
+                RichText::new(i18n.t("app.worker_dead_warning"))
+                    .size(11.5)
+                    .strong(),
             );
         });
     }
@@ -430,7 +425,8 @@ pub fn render(
                         if let Some(ref prof_name) = st.active_app_profile {
                             if clickable_status_badge(
                                 ui,
-                                &i18n.t_fmt("profiles.cockpit_active_badge", &[("name", prof_name)]),
+                                &i18n
+                                    .t_fmt("profiles.cockpit_active_badge", &[("name", prof_name)]),
                                 STATUS_OK,
                             )
                             .clicked()
@@ -517,8 +513,7 @@ pub fn render(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().slider_width = (card_inner_w - 72.0).max(220.0);
                         let resp = ui.add(
-                            Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100)
-                                .suffix("%"),
+                            Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100).suffix("%"),
                         );
                         if control_committed(ui, "cockpit_manual_fan", &resp) {
                             on_save();
@@ -542,8 +537,7 @@ pub fn render(
                     if let Some(disp) = &st.display_mode {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.weak(
-                                RichText::new(format!("{}x{}", disp.width, disp.height))
-                                    .size(11.0),
+                                RichText::new(format!("{}x{}", disp.width, disp.height)).size(11.0),
                             );
                         });
                     }
@@ -583,10 +577,7 @@ pub fn render(
                 let boost_items = [
                     (CpuBoostMode::Disabled, i18n.t("cockpit.boost_off")),
                     (CpuBoostMode::Enabled, i18n.t("cockpit.boost_on")),
-                    (
-                        CpuBoostMode::Aggressive,
-                        i18n.t("cockpit.boost_aggressive"),
-                    ),
+                    (CpuBoostMode::Aggressive, i18n.t("cockpit.boost_aggressive")),
                 ];
                 let bw = equal_tile_width(card_inner_w, boost_items.len(), 5.0);
                 ui.horizontal(|ui| {
@@ -638,16 +629,29 @@ pub fn render(
                         }
                         let border_color = rgb(t.card_border);
                         for rgb_preset in [
-                            RgbColor { r: 34, g: 197, b: 94 },
-                            RgbColor { r: 220, g: 38, b: 38 },
+                            RgbColor {
+                                r: 34,
+                                g: 197,
+                                b: 94,
+                            },
+                            RgbColor {
+                                r: 220,
+                                g: 38,
+                                b: 38,
+                            },
                             RgbColor {
                                 r: 245,
                                 g: 245,
                                 b: 255,
                             },
-                            RgbColor { r: 0, g: 180, b: 216 },
+                            RgbColor {
+                                r: 0,
+                                g: 180,
+                                b: 216,
+                            },
                         ] {
-                            let swatch = Color32::from_rgb(rgb_preset.r, rgb_preset.g, rgb_preset.b);
+                            let swatch =
+                                Color32::from_rgb(rgb_preset.r, rgb_preset.g, rgb_preset.b);
                             let btn = egui::Button::new("")
                                 .fill(swatch)
                                 .stroke(Stroke::new(1.0_f32, border_color))
@@ -831,8 +835,7 @@ pub fn render(
                     );
                     if ui
                         .small_button(
-                            RichText::new(format!("↶ {}", i18n.t("history.undo_short")))
-                                .size(11.5),
+                            RichText::new(format!("↶ {}", i18n.t("history.undo_short"))).size(11.5),
                         )
                         .on_hover_text(tip)
                         .clicked()

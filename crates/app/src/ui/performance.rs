@@ -1,11 +1,13 @@
-use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge};
+use crate::theme::{
+    card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK, STATUS_WARN,
+};
 use crate::ui::charts::interactive_fan_curve;
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
 use omvix_core::thermal::{
-    MAX_GUARD_CPU_TEMP_C, MAX_GUARD_SUSTAIN_SECS, MIN_GUARD_CPU_TEMP_C, MIN_GUARD_SUSTAIN_SECS,
-    effective_fan_curve_temp_c,
+    effective_fan_curve_temp_c, MAX_GUARD_CPU_TEMP_C, MAX_GUARD_SUSTAIN_SECS, MIN_GUARD_CPU_TEMP_C,
+    MIN_GUARD_SUSTAIN_SECS,
 };
 use omvix_core::{
     AppConfig, FanCurve, FanCurvePoint, FanMode, I18n, PerformanceMode, WindowsPowerOverlay,
@@ -121,9 +123,8 @@ pub fn render(
         if cfg.thermal_fan.fan_mode == FanMode::Manual {
             ui.horizontal(|ui| {
                 ui.label(i18n.t("fan.manual_speed"));
-                let resp = ui.add(
-                    Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100).suffix("%"),
-                );
+                let resp =
+                    ui.add(Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100).suffix("%"));
                 if control_committed(ui, "perf_manual_fan", &resp) {
                     on_save();
                     on_cmd(WorkerCommand::SetFanMode {
@@ -166,7 +167,10 @@ pub fn render(
                 }
             });
             ui.add_space(4.0);
-            cfg.thermal_fan.custom_curve.points.sort_by_key(|p| p.temp_c);
+            cfg.thermal_fan
+                .custom_curve
+                .points
+                .sort_by_key(|p| p.temp_c);
 
             let live_temp = effective_fan_curve_temp_c(
                 st.telemetry.cpu_temp_c,
@@ -207,7 +211,8 @@ pub fn render(
                             table_committed = true;
                         }
                         ui.label(i18n.t("fan.curve_speed"));
-                        let speed_resp = ui.add(Slider::new(&mut pt.speed_pct, 0..=100).suffix("%"));
+                        let speed_resp =
+                            ui.add(Slider::new(&mut pt.speed_pct, 0..=100).suffix("%"));
                         if control_committed(ui, ("curve_pt_speed", idx), &speed_resp) {
                             table_committed = true;
                         }
@@ -231,10 +236,10 @@ pub fn render(
             let num_pts = cfg.thermal_fan.custom_curve.points.len();
             ui.horizontal(|ui| {
                 if num_pts < 8 && ui.button(i18n.t("fan.add_point")).clicked() {
-                    cfg.thermal_fan
-                        .custom_curve
-                        .points
-                        .push(FanCurvePoint { temp_c: 75, speed_pct: 75 });
+                    cfg.thermal_fan.custom_curve.points.push(FanCurvePoint {
+                        temp_c: 75,
+                        speed_pct: 75,
+                    });
                     let _ = cfg.thermal_fan.custom_curve.normalize();
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -261,7 +266,8 @@ pub fn render(
                         draft.curve_status_msg = Some((i18n.t("fan.curve_copied"), false));
                     }
                     if ui.button(i18n.t("fan.curve_copy_json")).clicked() {
-                        if let Ok(json) = serde_json::to_string_pretty(&cfg.thermal_fan.custom_curve)
+                        if let Ok(json) =
+                            serde_json::to_string_pretty(&cfg.thermal_fan.custom_curve)
                         {
                             ui.ctx().copy_text(json);
                             draft.curve_status_msg = Some((i18n.t("fan.curve_copied"), false));
@@ -301,7 +307,10 @@ pub fn render(
         ui.add_space(6.0);
         ui.collapsing(i18n.t("fan.advanced_settings"), |ui| {
             if ui
-                .checkbox(&mut cfg.thermal_fan.keep_alive_enabled, i18n.t("fan.keep_alive"))
+                .checkbox(
+                    &mut cfg.thermal_fan.keep_alive_enabled,
+                    i18n.t("fan.keep_alive"),
+                )
                 .changed()
             {
                 on_save();
