@@ -1,5 +1,6 @@
 use crate::theme::{
-    card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK, STATUS_WARN,
+    card_frame, feature_toggle_button, pill_button, section_title, status_badge, status_ok,
+    status_warn,
 };
 use crate::ui::charts::interactive_fan_curve;
 use crate::ui::control_committed;
@@ -36,7 +37,7 @@ pub fn render(
     if !st.fan_conflict_services.is_empty() {
         card_frame(t).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                status_badge(ui, &st.fan_conflict_services.join(", "), STATUS_WARN);
+                status_badge(ui, &st.fan_conflict_services.join(", "), status_warn(t));
                 ui.label(i18n.t("fan.conflict_service_warning"));
             });
         });
@@ -64,12 +65,14 @@ pub fn render(
         });
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .checkbox(
-                    &mut cfg.thermal_fan.sync_windows_power_mode,
-                    i18n.t("thermal.sync_windows_power_mode"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("thermal.sync_windows_power_mode"),
+                &mut cfg.thermal_fan.sync_windows_power_mode,
+                &i18n.t("common.enabled"),
+                t,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -88,7 +91,7 @@ pub fn render(
                 status_badge(
                     ui,
                     &i18n.t_fmt("thermal.win_power_active", &[("mode", &i18n.t(ov_key))]),
-                    STATUS_OK,
+                    status_ok(t),
                 );
             }
         });
@@ -121,7 +124,7 @@ pub fn render(
 
         ui.add_space(6.0);
         if cfg.thermal_fan.fan_mode == FanMode::Manual {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(i18n.t("fan.manual_speed"));
                 let resp =
                     ui.add(Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100).suffix("%"));
@@ -139,7 +142,7 @@ pub fn render(
             ui.add_space(4.0);
             if st.telemetry.cpu_temp_c.is_none() {
                 ui.colored_label(
-                    STATUS_WARN,
+                    status_warn(t),
                     i18n.t_fmt(
                         "fan.no_cpu_sensor_notice",
                         &[("temp", &cfg.thermal_fan.guard_cpu_temp_c.to_string())],
@@ -199,7 +202,7 @@ pub fn render(
                 let mut table_committed = false;
                 let num_pts = cfg.thermal_fan.custom_curve.points.len();
                 for (idx, pt) in cfg.thermal_fan.custom_curve.points.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(format!("#{}", idx + 1));
                         ui.label(i18n.t("fan.curve_temp"));
                         let temp_resp = ui.add(
@@ -234,7 +237,7 @@ pub fn render(
 
             ui.add_space(6.0);
             let num_pts = cfg.thermal_fan.custom_curve.points.len();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if num_pts < 8 && ui.button(i18n.t("fan.add_point")).clicked() {
                     cfg.thermal_fan.custom_curve.points.push(FanCurvePoint {
                         temp_c: 75,
@@ -255,10 +258,11 @@ pub fn render(
             ui.add_space(6.0);
             ui.collapsing(i18n.t("fan.curve_share"), |ui| {
                 let mut code = cfg.thermal_fan.custom_curve.encode_share_code();
-                ui.horizontal(|ui| {
+                let code_w = (ui.available_width() - 190.0).clamp(160.0, 240.0);
+                ui.horizontal_wrapped(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut code)
-                            .desired_width(260.0)
+                            .desired_width(code_w)
                             .interactive(false),
                     );
                     if ui.button(i18n.t("fan.curve_copy_code")).clicked() {
@@ -275,10 +279,10 @@ pub fn render(
                     }
                 });
 
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut draft.curve_import_input)
-                            .desired_width(260.0)
+                            .desired_width(code_w)
                             .hint_text(i18n.t("fan.curve_import_placeholder")),
                     );
                     if pill_button(ui, &i18n.t("fan.curve_import_btn"), false, t).clicked() {
@@ -299,19 +303,28 @@ pub fn render(
                 });
 
                 if let Some((msg, is_err)) = &draft.curve_status_msg {
-                    ui.colored_label(if *is_err { STATUS_ERR } else { STATUS_OK }, msg);
+                    ui.colored_label(
+                        if *is_err {
+                            crate::theme::status_err(t)
+                        } else {
+                            crate::theme::status_ok(t)
+                        },
+                        msg,
+                    );
                 }
             });
         }
 
         ui.add_space(6.0);
         ui.collapsing(i18n.t("fan.advanced_settings"), |ui| {
-            if ui
-                .checkbox(
-                    &mut cfg.thermal_fan.keep_alive_enabled,
-                    i18n.t("fan.keep_alive"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("fan.keep_alive"),
+                &mut cfg.thermal_fan.keep_alive_enabled,
+                &i18n.t("common.enabled"),
+                t,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -319,7 +332,7 @@ pub fn render(
             ui.weak(RichText::new(i18n.t("fan.keep_alive_desc")).size(11.0));
             ui.add_space(6.0);
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(i18n.t("fan.hysteresis"));
                 let resp = ui.add(
                     Slider::new(&mut cfg.thermal_fan.custom_curve.hysteresis_c, 1..=10)
@@ -333,7 +346,7 @@ pub fn render(
             ui.weak(RichText::new(i18n.t("fan.hysteresis_desc")).size(11.0));
             ui.add_space(6.0);
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(i18n.t("fan.guard_cpu_temp"));
                 let temp_resp = ui.add(
                     Slider::new(
@@ -347,7 +360,7 @@ pub fn render(
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(i18n.t("fan.guard_sustain_secs"));
                 let dur_resp = ui.add(
                     Slider::new(

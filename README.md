@@ -24,7 +24,7 @@
 ## Workspace Structure
 
 ```text
-hp-omen-hub-lite/
+omvix-hub/
 ├── crates/
 │   ├── core/              # omvix-core: OS-agnostic models, traits, fan curve, battery care/history, profiles, undo, zip bundle, updater, i18n
 │   ├── backend-windows/   # omvix-windows: COM/WMI hpqBIntM & hpqBEvnt, NVML, PawnIO, EMI, SCM battery service, Win32 Power/Tray/Updater

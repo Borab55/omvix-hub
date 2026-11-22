@@ -27,7 +27,7 @@ pub enum ReleaseCheckOutcome {
 }
 
 fn hidden_powershell(script: &str, envs: &[(&str, &str)]) -> Result<Output> {
-    let mut cmd = Command::new("powershell.exe");
+    let mut cmd = Command::new(crate::paths::system_tool("powershell.exe"));
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
         .creation_flags(CREATE_NO_WINDOW);
     for &(k, v) in envs {
@@ -699,7 +699,9 @@ pub fn cleanup_stale_update_artifacts() {
 
 pub fn open_verified_release_url(url: &str) -> Result<()> {
     validate_github_release_url(url)?;
-    Command::new("explorer.exe").arg(url).spawn()?;
+    Command::new(crate::paths::system_tool("explorer.exe"))
+        .arg(url)
+        .spawn()?;
     Ok(())
 }
 

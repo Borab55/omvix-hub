@@ -1,5 +1,7 @@
 use crate::theme::{
-    card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK, STATUS_WARN,
+    accent_color, card_frame, feature_toggle_button, fixed_color_picker_button, pill_button, rgb,
+    saved_theme_chip, section_title, status_badge, status_err, status_ok, status_warn,
+    ColorButtonStyle, SavedChipAction,
 };
 use crate::ui::{control_committed, default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
@@ -42,6 +44,9 @@ pub fn render(
         restore_defaults: false,
     };
     let theme_snapshot = cfg.general.custom_theme.clone();
+    let ok_c = status_ok(&theme_snapshot);
+    let warn_c = status_warn(&theme_snapshot);
+    let err_c = status_err(&theme_snapshot);
 
     ui.heading(i18n.t("nav.settings"));
     ui.add_space(6.0);
@@ -98,57 +103,71 @@ pub fn render(
             }
         });
 
-        if ui
-            .checkbox(
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if feature_toggle_button(
+                ui,
+                &i18n.t("common.minimize_to_tray_on_close"),
                 &mut cfg.general.minimize_to_tray_on_close,
-                i18n.t("common.minimize_to_tray_on_close"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-        }
-        if ui
-            .checkbox(
+            {
+                on_save();
+            }
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.dock_bottom_right"),
                 &mut cfg.general.dock_bottom_right,
-                i18n.t("settings.dock_bottom_right"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-            actions.dock_changed = true;
-        }
-        if ui
-            .checkbox(
+            {
+                on_save();
+                actions.dock_changed = true;
+            }
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.hide_on_focus_loss"),
                 &mut cfg.general.hide_on_focus_loss,
-                i18n.t("settings.hide_on_focus_loss"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-        }
-        if ui
-            .checkbox(
+            {
+                on_save();
+            }
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.start_minimized"),
                 &mut cfg.general.start_minimized,
-                i18n.t("settings.start_minimized"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-        }
+            {
+                on_save();
+            }
+        });
+        ui.add_space(4.0);
 
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .checkbox(
-                    &mut cfg.general.start_with_windows,
-                    i18n.t("common.start_with_windows"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("common.start_with_windows"),
+                &mut cfg.general.start_with_windows,
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::SetAutostart(cfg.general.start_with_windows));
             }
             if st.installed_copy_status.task_exists {
-                status_badge(ui, &i18n.t("settings.autostart_elevated_badge"), STATUS_OK);
+                status_badge(ui, &i18n.t("settings.autostart_elevated_badge"), ok_c);
             }
         });
         ui.weak(RichText::new(i18n.t("settings.autostart_admin_note")).size(11.0));
@@ -156,7 +175,12 @@ pub fn render(
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("{}:", i18n.t("settings.installed_copy_path")));
-                ui.monospace(&st.installed_copy_status.installed_path);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&st.installed_copy_status.installed_path).monospace(),
+                    )
+                    .wrap(),
+                );
                 if pill_button(
                     ui,
                     &i18n.t("settings.update_installed_copy"),
@@ -170,7 +194,7 @@ pub fn render(
             });
             if st.installed_copy_status.installed_is_outdated {
                 ui.colored_label(
-                    STATUS_WARN,
+                    warn_c,
                     RichText::new(i18n.t("settings.installed_copy_outdated")).size(11.5),
                 );
             }
@@ -210,9 +234,14 @@ pub fn render(
         });
         ui.add_space(4.0);
         let mut high_contrast = cfg.general.custom_theme.is_high_contrast();
-        if ui
-            .checkbox(&mut high_contrast, i18n.t("settings.high_contrast_mode"))
-            .changed()
+        if feature_toggle_button(
+            ui,
+            &i18n.t("settings.high_contrast_mode"),
+            &mut high_contrast,
+            &i18n.t("common.enabled"),
+            &theme_snapshot,
+        )
+        .changed()
         {
             cfg.general.custom_theme = if high_contrast {
                 CustomThemeConfig::preset_high_contrast()
@@ -237,7 +266,7 @@ pub fn render(
             ui.label(i18n.t("settings.theme_presets"));
             for preset in CustomThemeConfig::presets() {
                 let selected = cfg.general.custom_theme == preset;
-                if ui.selectable_label(selected, &preset.name).clicked() {
+                if pill_button(ui, &preset.name, selected, &theme_snapshot).clicked() {
                     cfg.general.custom_theme = preset.clone();
                     cfg.general.theme = if preset.dark_base {
                         "dark".to_string()
@@ -259,12 +288,14 @@ pub fn render(
             {
                 on_save();
             }
-            if ui
-                .checkbox(
-                    &mut cfg.general.custom_theme.dark_base,
-                    i18n.t("settings.theme_dark_base"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.theme_dark_base"),
+                &mut cfg.general.custom_theme.dark_base,
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
+            )
+            .changed()
             {
                 cfg.general.theme = if cfg.general.custom_theme.dark_base {
                     "dark".to_string()
@@ -274,79 +305,171 @@ pub fn render(
                 on_save();
                 actions.theme_changed = true;
             }
+            if pill_button(
+                ui,
+                &i18n.t("settings.save_theme_btn"),
+                false,
+                &theme_snapshot,
+            )
+            .clicked()
+            {
+                let mut to_save = cfg.general.custom_theme.clone();
+                let clean = to_save.name.trim();
+                to_save.name = if clean.is_empty() {
+                    format!("Theme {}", cfg.general.custom_themes.len() + 1)
+                } else {
+                    clean.to_string()
+                };
+                if let Some(existing) = cfg
+                    .general
+                    .custom_themes
+                    .iter_mut()
+                    .find(|x| x.name.eq_ignore_ascii_case(&to_save.name))
+                {
+                    *existing = to_save;
+                } else {
+                    cfg.general.custom_themes.push(to_save);
+                }
+                on_save();
+                draft.status_msg = Some((i18n.t("settings.theme_saved"), false));
+            }
         });
 
         ui.add_space(4.0);
         egui::Grid::new("custom_theme_pickers_grid")
-            .num_columns(6)
-            .spacing([14.0, 6.0])
+            .num_columns(4)
+            .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label(i18n.t("settings.color_accent"));
-                let r0 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.accent);
-                if r0.changed() {
-                    actions.theme_changed = true;
+                let swatch_style = ColorButtonStyle::Swatch {
+                    size: egui::vec2(34.0, 20.0),
+                    radius: 5,
+                };
+                let color_fields: [(&str, &mut [u8; 3]); 12] = [
+                    (
+                        "settings.color_accent",
+                        &mut cfg.general.custom_theme.accent,
+                    ),
+                    (
+                        "settings.color_sidebar",
+                        &mut cfg.general.custom_theme.sidebar_bg,
+                    ),
+                    (
+                        "settings.color_canvas",
+                        &mut cfg.general.custom_theme.canvas_bg,
+                    ),
+                    ("settings.color_card", &mut cfg.general.custom_theme.card_bg),
+                    (
+                        "settings.color_border",
+                        &mut cfg.general.custom_theme.card_border,
+                    ),
+                    (
+                        "settings.color_text",
+                        &mut cfg.general.custom_theme.text_primary,
+                    ),
+                    (
+                        "settings.color_text_muted",
+                        &mut cfg.general.custom_theme.text_muted,
+                    ),
+                    (
+                        "settings.color_control_bg",
+                        &mut cfg.general.custom_theme.control_bg,
+                    ),
+                    (
+                        "settings.color_control_hover",
+                        &mut cfg.general.custom_theme.control_hover_bg,
+                    ),
+                    (
+                        "settings.color_status_ok",
+                        &mut cfg.general.custom_theme.status_ok,
+                    ),
+                    (
+                        "settings.color_status_warn",
+                        &mut cfg.general.custom_theme.status_warn,
+                    ),
+                    (
+                        "settings.color_status_err",
+                        &mut cfg.general.custom_theme.status_err,
+                    ),
+                ];
+                for (idx, (label_key, field)) in color_fields.into_iter().enumerate() {
+                    ui.label(i18n.t(label_key));
+                    let resp = fixed_color_picker_button(
+                        ui,
+                        ("settings_theme_color_picker", idx),
+                        field,
+                        swatch_style,
+                        &theme_snapshot,
+                    );
+                    if resp.changed() {
+                        actions.theme_changed = true;
+                    }
+                    if control_committed(ui, ("theme_color", idx), &resp) {
+                        on_save();
+                    }
+                    if idx % 2 == 1 {
+                        ui.end_row();
+                    }
                 }
-                if control_committed(ui, ("theme_color", 0usize), &r0) {
-                    on_save();
-                }
-
-                ui.label(i18n.t("settings.color_canvas"));
-                let r1 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.canvas_bg);
-                if r1.changed() {
-                    actions.theme_changed = true;
-                }
-                if control_committed(ui, ("theme_color", 1usize), &r1) {
-                    on_save();
-                }
-
-                ui.label(i18n.t("settings.color_sidebar"));
-                let r2 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.sidebar_bg);
-                if r2.changed() {
-                    actions.theme_changed = true;
-                }
-                if control_committed(ui, ("theme_color", 2usize), &r2) {
-                    on_save();
-                }
-                ui.end_row();
-
-                ui.label(i18n.t("settings.color_card"));
-                let r3 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.card_bg);
-                if r3.changed() {
-                    actions.theme_changed = true;
-                }
-                if control_committed(ui, ("theme_color", 3usize), &r3) {
-                    on_save();
-                }
-
-                ui.label(i18n.t("settings.color_border"));
-                let r4 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.card_border);
-                if r4.changed() {
-                    actions.theme_changed = true;
-                }
-                if control_committed(ui, ("theme_color", 4usize), &r4) {
-                    on_save();
-                }
-
-                ui.label(i18n.t("settings.color_text"));
-                let r5 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.text_primary);
-                if r5.changed() {
-                    actions.theme_changed = true;
-                }
-                if control_committed(ui, ("theme_color", 5usize), &r5) {
-                    on_save();
-                }
-                ui.end_row();
             });
+
+        ui.add_space(6.0);
+        section_title(ui, i18n.t("settings.saved_themes"), &theme_snapshot);
+        ui.add_space(4.0);
+        if cfg.general.custom_themes.is_empty() {
+            ui.weak(i18n.t("settings.no_saved_themes"));
+        } else {
+            let mut apply_saved: Option<CustomThemeConfig> = None;
+            let mut delete_saved: Option<usize> = None;
+            let del_tip = i18n.t("settings.delete_theme_tooltip");
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                for (idx, saved) in cfg.general.custom_themes.iter().enumerate() {
+                    let active = cfg.general.custom_theme == *saved;
+                    let chip_action = ui
+                        .push_id(idx, |ui| {
+                            saved_theme_chip(
+                                ui,
+                                &saved.name,
+                                rgb(saved.accent),
+                                active,
+                                &del_tip,
+                                &theme_snapshot,
+                            )
+                        })
+                        .inner;
+                    match chip_action {
+                        SavedChipAction::Apply => apply_saved = Some(saved.clone()),
+                        SavedChipAction::Delete => delete_saved = Some(idx),
+                        SavedChipAction::None => {}
+                    }
+                }
+            });
+            if let Some(chosen) = apply_saved {
+                cfg.general.custom_theme = chosen.clone();
+                cfg.general.theme = if chosen.dark_base {
+                    "dark".to_string()
+                } else {
+                    "light".to_string()
+                };
+                on_save();
+                actions.theme_changed = true;
+            }
+            if let Some(idx) = delete_saved {
+                cfg.general.custom_themes.remove(idx);
+                on_save();
+            }
+        }
 
         ui.separator();
 
+        let code_w = (ui.available_width() - 180.0).clamp(180.0, 280.0);
         let share_code = cfg.general.custom_theme.encode_share_code();
         ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("settings.share_code"));
             let mut preview = share_code.clone();
             ui.add_enabled(
                 false,
-                egui::TextEdit::singleline(&mut preview).desired_width(360.0),
+                egui::TextEdit::singleline(&mut preview).desired_width(code_w),
             );
             if ui.button(i18n.t("settings.copy_theme")).clicked() {
                 ui.ctx().copy_text(share_code);
@@ -364,7 +487,7 @@ pub fn render(
             ui.add(
                 egui::TextEdit::singleline(&mut draft.import_input)
                     .hint_text(i18n.t("settings.import_placeholder"))
-                    .desired_width(360.0),
+                    .desired_width(code_w),
             );
             if ui
                 .button(RichText::new(i18n.t("settings.import_theme")).strong())
@@ -391,7 +514,7 @@ pub fn render(
         });
 
         if let Some((msg, is_err)) = &draft.status_msg {
-            ui.colored_label(if *is_err { STATUS_ERR } else { STATUS_OK }, msg);
+            ui.colored_label(if *is_err { err_c } else { ok_c }, msg);
         }
     });
 
@@ -409,7 +532,7 @@ pub fn render(
             cfg.logging.max_total_mb
         ));
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("logs.level"));
             egui::ComboBox::from_id_salt("log_level_combo")
                 .selected_text(format!("{:?}", cfg.logging.level))
@@ -438,9 +561,11 @@ pub fn render(
             if ui.button(i18n.t("logs.open_folder")).clicked() {
                 #[cfg(windows)]
                 {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(&log_dir)
-                        .spawn();
+                    let _ = std::process::Command::new(omvix_windows::paths::system_tool(
+                        "explorer.exe",
+                    ))
+                    .arg(&log_dir)
+                    .spawn();
                 }
             }
             if ui.button(i18n.t("logs.clear_logs")).clicked() {
@@ -479,11 +604,16 @@ pub fn render(
 
         ui.collapsing(i18n.t("logs.preview"), |ui| {
             let lines = tail_logs(&log_dir, 30);
-            ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                for line in lines {
-                    ui.monospace(line);
-                }
-            });
+            ScrollArea::both()
+                .id_salt("settings_log_preview_scroll")
+                .max_width(ui.available_width())
+                .max_height(160.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for line in lines {
+                        ui.monospace(line);
+                    }
+                });
         });
     });
 
@@ -496,15 +626,15 @@ pub fn render(
             status_badge(
                 ui,
                 &format!("v{}", env!("CARGO_PKG_VERSION")),
-                crate::theme::accent_color(&theme_snapshot),
+                accent_color(&theme_snapshot),
             );
             match &st.update_status {
                 UpdateUiStatus::Idle => {}
                 UpdateUiStatus::Checking => {
-                    status_badge(ui, &i18n.t("updates.checking"), STATUS_WARN);
+                    status_badge(ui, &i18n.t("updates.checking"), warn_c);
                 }
                 UpdateUiStatus::UpToDate { .. } => {
-                    status_badge(ui, &i18n.t("updates.up_to_date"), STATUS_OK);
+                    status_badge(ui, &i18n.t("updates.up_to_date"), ok_c);
                 }
                 UpdateUiStatus::NoReleasesPublished => {
                     status_badge(
@@ -514,44 +644,50 @@ pub fn render(
                     );
                 }
                 UpdateUiStatus::UpdateAvailable(_) => {
-                    status_badge(ui, &i18n.t("updates.available_badge"), STATUS_OK);
+                    status_badge(ui, &i18n.t("updates.available_badge"), ok_c);
                 }
                 UpdateUiStatus::Downloading { .. } => {
-                    status_badge(ui, &i18n.t("updates.downloading"), STATUS_WARN);
+                    status_badge(ui, &i18n.t("updates.downloading"), warn_c);
                 }
                 UpdateUiStatus::ReadyToInstall(_) => {
-                    status_badge(ui, &i18n.t("updates.install_restart_btn"), STATUS_OK);
+                    status_badge(ui, &i18n.t("updates.install_restart_btn"), ok_c);
                 }
                 UpdateUiStatus::Applying { .. } => {
-                    status_badge(ui, &i18n.t("updates.applying"), STATUS_WARN);
+                    status_badge(ui, &i18n.t("updates.applying"), warn_c);
                 }
                 UpdateUiStatus::Error(_) => {
-                    status_badge(ui, &i18n.t("common.status_error"), STATUS_ERR);
+                    status_badge(ui, &i18n.t("common.status_error"), err_c);
                 }
             }
         });
         ui.add_space(4.0);
 
-        if ui
-            .checkbox(
+        ui.horizontal_wrapped(|ui| {
+            if feature_toggle_button(
+                ui,
+                &i18n.t("updates.auto_check"),
                 &mut cfg.general.auto_check_updates,
-                i18n.t("updates.auto_check"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-        }
-        if ui
-            .checkbox(
+            {
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            }
+            if feature_toggle_button(
+                ui,
+                &i18n.t("updates.allow_unsigned"),
                 &mut cfg.general.allow_unsigned_sha256_updates,
-                i18n.t("updates.allow_unsigned"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-        }
+            {
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            }
+        });
         ui.weak(RichText::new(i18n.t("updates.signature_policy_note")).size(11.0));
         ui.add_space(6.0);
 
@@ -604,16 +740,19 @@ pub fn render(
                     }
                     ui.weak(format!("• {} ({size_mb:.2} MB)", rel.binary_asset.name));
                     if rel.checksum_asset.is_some() {
-                        status_badge(ui, &i18n.t("updates.checksum_ok"), STATUS_OK);
+                        status_badge(ui, &i18n.t("updates.checksum_ok"), ok_c);
                     } else {
-                        status_badge(ui, &i18n.t("updates.checksum_missing"), STATUS_WARN);
+                        status_badge(ui, &i18n.t("updates.checksum_missing"), warn_c);
                     }
                 });
                 if !rel.notes.trim().is_empty() {
                     ui.collapsing(i18n.t("updates.release_notes"), |ui| {
-                        ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                            ui.label(&rel.notes);
-                        });
+                        ScrollArea::vertical()
+                            .max_width(ui.available_width())
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                ui.label(&rel.notes);
+                            });
                     });
                 }
                 ui.add_space(4.0);
@@ -639,15 +778,15 @@ pub fn render(
                         thumbprint,
                         ..
                     } => {
-                        status_badge(ui, &i18n.t("updates.sig_valid"), STATUS_OK);
+                        status_badge(ui, &i18n.t("updates.sig_valid"), ok_c);
                         ui.weak(format!("{subject} ({thumbprint})"));
                     }
                     UpdateSignatureStatus::UnsignedSha256Only => {
-                        status_badge(ui, &i18n.t("updates.sig_unsigned"), STATUS_WARN);
+                        status_badge(ui, &i18n.t("updates.sig_unsigned"), warn_c);
                     }
                     UpdateSignatureStatus::Rejected(reason) => {
-                        status_badge(ui, &i18n.t("updates.sig_rejected"), STATUS_ERR);
-                        ui.colored_label(STATUS_ERR, reason);
+                        status_badge(ui, &i18n.t("updates.sig_rejected"), err_c);
+                        ui.colored_label(err_c, reason);
                     }
                 });
                 ui.add_space(4.0);
@@ -664,14 +803,14 @@ pub fn render(
                     }
                 } else {
                     ui.colored_label(
-                        STATUS_WARN,
+                        warn_c,
                         RichText::new(i18n.t("updates.blocked_by_sig_policy")).size(11.5),
                     );
                 }
             }
             UpdateUiStatus::Error(msg) => {
                 ui.add_space(4.0);
-                ui.colored_label(STATUS_ERR, msg);
+                ui.colored_label(err_c, msg);
             }
             UpdateUiStatus::Idle
             | UpdateUiStatus::Checking
@@ -684,18 +823,18 @@ pub fn render(
 
     // PawnIO CPU Die Temperature Sensor Card
     card_frame(&theme_snapshot).show(ui, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             section_title(ui, i18n.t("settings.pawnio_section"), &theme_snapshot);
             if st.pawnio_cpu_active {
-                status_badge(ui, &i18n.t("monitor.pawnio_active"), STATUS_OK);
+                status_badge(ui, &i18n.t("monitor.pawnio_active"), ok_c);
             } else {
-                status_badge(ui, &i18n.t("common.disabled"), STATUS_WARN);
+                status_badge(ui, &i18n.t("common.disabled"), warn_c);
             }
         });
         ui.add_space(4.0);
         ui.weak(i18n.t("settings.pawnio_desc"));
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if st.pawnio_installing {
                 ui.weak(i18n.t("monitor.installing_pawnio"));
             } else if pill_button(
@@ -719,7 +858,7 @@ pub fn render(
         ui.add_space(4.0);
         ui.weak(i18n.t("settings.reset_desc"));
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if !draft.confirm_reset {
                 if ui.button(i18n.t("settings.reset_all_btn")).clicked() {
                     draft.confirm_reset = true;
@@ -729,7 +868,7 @@ pub fn render(
                     .button(
                         RichText::new(i18n.t("settings.reset_confirm_btn"))
                             .strong()
-                            .color(STATUS_ERR),
+                            .color(err_c),
                     )
                     .clicked()
                 {

@@ -1,4 +1,7 @@
-use crate::theme::{card_frame, pill_button, section_title, status_badge, STATUS_OK, STATUS_WARN};
+use crate::theme::{
+    card_frame, pill_button, pill_button_enabled, section_title, status_badge, status_ok,
+    status_warn,
+};
 use crate::ui::{default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Ui};
@@ -12,13 +15,16 @@ pub fn render(
     t: &CustomThemeConfig,
     on_cmd: &mut dyn FnMut(WorkerCommand),
 ) {
+    let ok_c = status_ok(t);
+    let warn_c = status_warn(t);
+
+    ui.heading(i18n.t("diagnostics.title"));
+    ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
-        ui.heading(i18n.t("diagnostics.title"));
-        ui.add_space(8.0);
-        if ui.button(i18n.t("diagnostics.run_probe")).clicked() {
+        if pill_button(ui, &i18n.t("diagnostics.run_probe"), false, t).clicked() {
             on_cmd(WorkerCommand::RefreshDiagnostics);
         }
-        if ui.button(i18n.t("diagnostics.export_json")).clicked() {
+        if pill_button(ui, &i18n.t("diagnostics.export_json"), false, t).clicked() {
             let out_path = default_export_path();
             on_cmd(WorkerCommand::ExportDiagnostics(out_path));
         }
@@ -27,21 +33,22 @@ pub fn render(
         } else {
             i18n.t("support_bundle.create_btn")
         };
-        ui.add_enabled_ui(!st.support_bundle_busy, |ui| {
-            if pill_button(ui, &bundle_lbl, true, t).clicked() {
-                on_cmd(WorkerCommand::CreateSupportBundle(
-                    default_support_bundle_path(),
-                ));
-            }
-        });
+        if pill_button_enabled(ui, &bundle_lbl, false, !st.support_bundle_busy, t).clicked() {
+            on_cmd(WorkerCommand::CreateSupportBundle(
+                default_support_bundle_path(),
+            ));
+        }
     });
     ui.add_space(6.0);
 
     if let Some(ref zip_path) = st.last_support_bundle_path {
         card_frame(t).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                status_badge(ui, &i18n.t("support_bundle.saved_label"), STATUS_OK);
-                ui.monospace(zip_path.display().to_string());
+                status_badge(ui, &i18n.t("support_bundle.saved_label"), ok_c);
+                ui.add(
+                    egui::Label::new(RichText::new(zip_path.display().to_string()).monospace())
+                        .wrap(),
+                );
                 if ui.button(i18n.t("support_bundle.show_in_folder")).clicked() {
                     show_file_in_folder(zip_path);
                 }
@@ -78,21 +85,26 @@ pub fn render(
             ui.weak(i18n.t("history.empty"));
         } else {
             ui.add_space(4.0);
-            egui::Grid::new("change_history_grid")
-                .striped(true)
-                .num_columns(4)
-                .spacing([10.0, 4.0])
+            ScrollArea::horizontal()
+                .id_salt("change_history_hscroll")
+                .max_width(ui.available_width())
                 .show(ui, |ui| {
-                    for entry in &st.change_history {
-                        let ts_local = entry.timestamp.with_timezone(&chrono::Local);
-                        ui.monospace(ts_local.format("%H:%M:%S").to_string());
-                        ui.label(RichText::new(i18n.t(entry.domain.i18n_key())).strong());
-                        ui.label(format!("{} -> {}", entry.old_summary, entry.new_summary));
-                        if ui.small_button(i18n.t("history.undo_btn")).clicked() {
-                            on_cmd(WorkerCommand::UndoChangeById(entry.id));
-                        }
-                        ui.end_row();
-                    }
+                    egui::Grid::new("change_history_grid")
+                        .striped(true)
+                        .num_columns(4)
+                        .spacing([10.0, 4.0])
+                        .show(ui, |ui| {
+                            for entry in &st.change_history {
+                                let ts_local = entry.timestamp.with_timezone(&chrono::Local);
+                                ui.monospace(ts_local.format("%H:%M:%S").to_string());
+                                ui.label(RichText::new(i18n.t(entry.domain.i18n_key())).strong());
+                                ui.label(format!("{} -> {}", entry.old_summary, entry.new_summary));
+                                if ui.small_button(i18n.t("history.undo_btn")).clicked() {
+                                    on_cmd(WorkerCommand::UndoChangeById(entry.id));
+                                }
+                                ui.end_row();
+                            }
+                        });
                 });
         }
     });
@@ -107,10 +119,13 @@ pub fn render(
                 .spacing([20.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("Model");
-                    ui.label(format!(
-                        "{} ({})",
-                        diag.identity.model, diag.identity.system_family
-                    ));
+                    ui.add(
+                        egui::Label::new(format!(
+                            "{} ({})",
+                            diag.identity.model, diag.identity.system_family
+                        ))
+                        .wrap(),
+                    );
                     ui.end_row();
 
                     ui.label(i18n.t("diagnostics.board_id"));
@@ -123,13 +138,16 @@ pub fn render(
 
                     ui.label("Board Profile");
                     if let Some(b) = &diag.matched_board {
-                        ui.label(format!(
-                            "{} | {:?} | MUX={} | Kbd={:?}",
-                            b.marketing_name,
-                            b.thermal_scheme,
-                            b.expected_has_mux,
-                            b.expected_keyboard
-                        ));
+                        ui.add(
+                            egui::Label::new(format!(
+                                "{} | {:?} | MUX={} | Kbd={:?}",
+                                b.marketing_name,
+                                b.thermal_scheme,
+                                b.expected_has_mux,
+                                b.expected_keyboard
+                            ))
+                            .wrap(),
+                        );
                     } else {
                         ui.label("Unknown board (using safe fallback)");
                     }
@@ -145,7 +163,7 @@ pub fn render(
 
             if let Some(err) = &diag.wmi_error {
                 ui.add_space(4.0);
-                ui.colored_label(STATUS_WARN, err);
+                ui.colored_label(warn_c, err);
             }
         });
 
@@ -155,20 +173,23 @@ pub fn render(
         card_frame(t).show(ui, |ui| {
             section_title(ui, i18n.t("conflicts.title"), t);
             if diag.conflict_services.is_empty() {
-                status_badge(ui, &i18n.t("conflicts.none_detected"), STATUS_OK);
+                status_badge(ui, &i18n.t("conflicts.none_detected"), ok_c);
             } else {
                 for svc in &diag.conflict_services {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let color = if svc.status.eq_ignore_ascii_case("Running") {
-                            STATUS_WARN
+                            warn_c
                         } else {
-                            STATUS_OK
+                            ok_c
                         };
                         status_badge(ui, &svc.status, color);
-                        ui.label(format!(
-                            "{} ({}) — {}",
-                            svc.service_name, svc.category, svc.display_name
-                        ));
+                        ui.add(
+                            egui::Label::new(format!(
+                                "{} ({}) — {}",
+                                svc.service_name, svc.category, svc.display_name
+                            ))
+                            .wrap(),
+                        );
                     });
                 }
             }
@@ -189,38 +210,43 @@ pub fn render(
             if diag.probes.is_empty() {
                 ui.weak("Run Omvix Hub as Administrator to inspect live WMI BIOS responses.");
             } else {
-                ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                    egui::Grid::new("wmi_probe_grid")
-                        .striped(true)
-                        .num_columns(5)
-                        .spacing([12.0, 4.0])
-                        .show(ui, |ui| {
-                            ui.strong("Probe");
-                            ui.strong("Cmd");
-                            ui.strong("Type");
-                            ui.strong("RC");
-                            ui.strong("Data / Note");
-                            ui.end_row();
-
-                            for p in &diag.probes {
-                                ui.label(&p.name);
-                                ui.monospace(format!("0x{:X}", p.command));
-                                ui.monospace(format!("0x{:X}", p.command_type));
-                                ui.monospace(
-                                    p.return_code
-                                        .map(|v| v.to_string())
-                                        .unwrap_or_else(|| "-".into()),
-                                );
-                                let detail = if p.success {
-                                    p.data_hex.clone()
-                                } else {
-                                    p.error.clone().unwrap_or_else(|| "Failed".into())
-                                };
-                                ui.monospace(detail);
+                ScrollArea::both()
+                    .id_salt("wmi_probe_scroll")
+                    .max_width(ui.available_width())
+                    .max_height(240.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("wmi_probe_grid")
+                            .striped(true)
+                            .num_columns(5)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("Probe");
+                                ui.strong("Cmd");
+                                ui.strong("Type");
+                                ui.strong("RC");
+                                ui.strong("Data / Note");
                                 ui.end_row();
-                            }
-                        });
-                });
+
+                                for p in &diag.probes {
+                                    ui.label(&p.name);
+                                    ui.monospace(format!("0x{:X}", p.command));
+                                    ui.monospace(format!("0x{:X}", p.command_type));
+                                    ui.monospace(
+                                        p.return_code
+                                            .map(|v| v.to_string())
+                                            .unwrap_or_else(|| "-".into()),
+                                    );
+                                    let detail = if p.success {
+                                        p.data_hex.clone()
+                                    } else {
+                                        p.error.clone().unwrap_or_else(|| "Failed".into())
+                                    };
+                                    ui.monospace(detail);
+                                    ui.end_row();
+                                }
+                            });
+                    });
             }
         });
     } else {

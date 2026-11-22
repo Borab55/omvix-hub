@@ -2,11 +2,12 @@ use omvix_core::{BatteryChargeMode, FanMode, I18n, PerformanceMode};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
-use tray_icon::{Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     ToggleWindow,
+    ShowAndFocus,
     SetPerformance(PerformanceMode),
     SetFan(FanMode),
     ApplyBatteryPreset {
@@ -286,7 +287,10 @@ impl TrayController {
         let icon_key = (perf_mode, bat_hw_mode);
         if self.last_icon_state != Some(icon_key) {
             self.last_icon_state = Some(icon_key);
-            let active = bat_hw_mode != BatteryChargeMode::Auto;
+            let active = matches!(
+                bat_hw_mode,
+                BatteryChargeMode::Hold | BatteryChargeMode::Inhibit
+            );
             let (rgba, w, h) = build_tray_icon_rgba_styled(perf_mode, active);
             if let Ok(icon) = Icon::from_rgba(rgba, w, h) {
                 let _ = self._tray.set_icon(Some(icon));
@@ -300,6 +304,7 @@ impl TrayController {
             let base_tip = match bat_hw_mode {
                 BatteryChargeMode::Hold => i18n.t("app.tray.tooltip_hold"),
                 BatteryChargeMode::Inhibit => i18n.t("app.tray.tooltip_inhibit"),
+                BatteryChargeMode::Unknown => i18n.t("app.tray.tooltip_unknown"),
                 BatteryChargeMode::Auto => "Omvix Hub".to_string(),
             };
             let tooltip = format!("{base_tip} [{mode_name}]");
@@ -410,16 +415,8 @@ impl TrayController {
         }
 
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-            match ev {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    ..
-                }
-                | TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                } => actions.push(TrayAction::ToggleWindow),
-                _ => {}
+            if let Some(act) = classify_tray_icon_event(&ev) {
+                actions.push(act);
             }
         }
 
@@ -427,9 +424,64 @@ impl TrayController {
     }
 }
 
+pub(crate) fn classify_tray_icon_event(ev: &TrayIconEvent) -> Option<TrayAction> {
+    match ev {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } => Some(TrayAction::ShowAndFocus),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tray_icon::{dpi::PhysicalPosition, Rect, TrayIconId};
+
+    #[test]
+    fn tray_icon_click_classifier_only_triggers_show_and_focus_on_left_up() {
+        let pos = PhysicalPosition::new(0.0, 0.0);
+        let rect = Rect::default();
+        let down = TrayIconEvent::Click {
+            id: TrayIconId::new("t"),
+            position: pos,
+            rect,
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Down,
+        };
+        assert_eq!(classify_tray_icon_event(&down), None);
+
+        let up = TrayIconEvent::Click {
+            id: TrayIconId::new("t"),
+            position: pos,
+            rect,
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+        };
+        assert_eq!(
+            classify_tray_icon_event(&up),
+            Some(TrayAction::ShowAndFocus)
+        );
+
+        let dbl = TrayIconEvent::DoubleClick {
+            id: TrayIconId::new("t"),
+            position: pos,
+            rect,
+            button: MouseButton::Left,
+        };
+        assert_eq!(classify_tray_icon_event(&dbl), None);
+
+        let right = TrayIconEvent::Click {
+            id: TrayIconId::new("t"),
+            position: pos,
+            rect,
+            button: MouseButton::Right,
+            button_state: MouseButtonState::Up,
+        };
+        assert_eq!(classify_tray_icon_event(&right), None);
+    }
 
     #[test]
     fn tray_rgba_has_expected_dimensions_and_mode_colors() {

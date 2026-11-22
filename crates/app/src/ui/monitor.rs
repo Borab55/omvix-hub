@@ -1,6 +1,5 @@
 use crate::theme::{
-    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK,
-    STATUS_WARN,
+    accent_color, card_frame, pill_button, section_title, status_badge, status_err,
 };
 use crate::ui::charts::{telemetry_area_chart, ChartSeries};
 use crate::ui::{default_telemetry_csv_path, show_file_in_folder};
@@ -34,7 +33,7 @@ pub fn render(
 
     if st.thermal_guard_active {
         card_frame(t).show(ui, |ui| {
-            status_badge(ui, &i18n.t("monitor.thermal_guard_active"), STATUS_ERR);
+            status_badge(ui, &i18n.t("monitor.thermal_guard_active"), status_err(t));
         });
         ui.add_space(6.0);
     }
@@ -105,10 +104,10 @@ pub fn render(
     ui.columns(2, |cols| {
         // Card 1: CPU
         card_frame(t).show(&mut cols[0], |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 section_title(ui, i18n.t("dashboard.cpu"), t);
                 if st.pawnio_cpu_active {
-                    status_badge(ui, "PawnIO", STATUS_OK);
+                    status_badge(ui, "PawnIO", crate::theme::status_ok(t));
                 }
             });
             let usage = st
@@ -146,7 +145,7 @@ pub fn render(
                 ui.add_space(4.0);
                 ui.weak(RichText::new(i18n.t("monitor.cpu_temp_pawnio_hint")).size(11.0));
                 ui.add_space(3.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if st.pawnio_installing {
                         ui.weak(i18n.t("monitor.installing_pawnio"));
                     } else if pill_button(ui, &i18n.t("monitor.install_pawnio"), true, t).clicked()
@@ -160,7 +159,7 @@ pub fn render(
         // Card 2: GPU
         card_frame(t).show(&mut cols[1], |ui| {
             let sleep_color = Color32::from_rgb(138, 162, 194);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 section_title(ui, i18n.t("dashboard.gpu"), t);
                 if st.telemetry.gpu_sleeping {
                     status_badge(ui, &i18n.t("monitor.gpu_sleeping_badge"), sleep_color)
@@ -176,7 +175,7 @@ pub fn render(
                                 ui,
                                 &i18n
                                     .t_fmt("monitor.throttle_active_prefix", &[("reason", reason)]),
-                                STATUS_WARN,
+                                crate::theme::status_warn(t),
                             )
                             .on_hover_text(
                                 i18n.t_fmt(
@@ -186,8 +185,12 @@ pub fn render(
                             );
                         }
                         None if st.telemetry.gpu_name.is_some() => {
-                            status_badge(ui, &i18n.t("monitor.no_throttle"), STATUS_OK)
-                                .on_hover_text(i18n.t("monitor.no_throttle_tooltip"));
+                            status_badge(
+                                ui,
+                                &i18n.t("monitor.no_throttle"),
+                                crate::theme::status_ok(t),
+                            )
+                            .on_hover_text(i18n.t("monitor.no_throttle_tooltip"));
                         }
                         _ => {}
                     }

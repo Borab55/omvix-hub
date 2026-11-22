@@ -51,6 +51,7 @@ pub enum RevertPayload {
         start_threshold_pct: u8,
         hold_when_shutdown: bool,
         one_time_full_charge: bool,
+        travel_charge_until_utc: Option<i64>,
         active_profile_id: Option<String>,
     },
     DisplayRefreshRate(u32),

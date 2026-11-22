@@ -1,7 +1,9 @@
 use omvix_core::{OmvixError, Result, WindowsPowerOverlay};
 use windows::core::{s, w, GUID, PCSTR};
-use windows::Win32::Foundation::{FreeLibrary, HMODULE};
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows::Win32::Foundation::{FreeLibrary, HANDLE, HMODULE};
+use windows::Win32::System::LibraryLoader::{
+    GetModuleHandleW, GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
 
 type PowerSetActiveOverlaySchemeFn = unsafe extern "system" fn(*const GUID) -> u32;
 type PowerGetActualOverlaySchemeFn = unsafe extern "system" fn(*mut GUID) -> u32;
@@ -46,8 +48,14 @@ unsafe fn acquire_powrprof() -> Result<PowrProfHandle> {
             });
         }
     }
-    let module = unsafe { LoadLibraryW(w!("powrprof.dll")) }
-        .map_err(|e| OmvixError::UnsupportedHardware(format!("LoadLibraryW(powrprof.dll): {e}")))?;
+    let module = unsafe {
+        LoadLibraryExW(
+            w!("powrprof.dll"),
+            HANDLE::default(),
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    }
+    .map_err(|e| OmvixError::UnsupportedHardware(format!("LoadLibraryExW(powrprof.dll): {e}")))?;
     Ok(PowrProfHandle {
         module,
         loaded_dynamically: true,

@@ -34,6 +34,7 @@ struct MockHardwareState {
     running_exes_lower: HashSet<String>,
     user_running_exes: Vec<String>,
     battery_service_running: bool,
+    battery_service_cfg: Option<BatteryConfig>,
     fast_battery_pct: Option<u8>,
     event_log: Vec<String>,
 }
@@ -118,6 +119,7 @@ impl Default for MockHardwareState {
             running_exes_lower: HashSet::new(),
             user_running_exes: vec!["notepad.exe".to_string()],
             battery_service_running: false,
+            battery_service_cfg: None,
             fast_battery_pct: Some(82),
             event_log: Vec::new(),
         }
@@ -369,7 +371,12 @@ impl WorkerOsHooks for MockRig {
         self.inner.lock().unwrap().battery_service_running
     }
 
-    fn sync_battery_service_config(&self, _cfg: &BatteryConfig) -> Result<()> {
+    fn read_battery_service_config(&self) -> Option<BatteryConfig> {
+        self.inner.lock().unwrap().battery_service_cfg.clone()
+    }
+
+    fn sync_battery_service_config(&self, cfg: &BatteryConfig) -> Result<()> {
+        self.inner.lock().unwrap().battery_service_cfg = Some(cfg.clone());
         Ok(())
     }
 
@@ -977,4 +984,127 @@ fn integration_telemetry_csv_export_and_battery_health_history_logging() {
     assert_eq!(st.last_csv_export_path.as_ref(), Some(&csv_path));
     assert_eq!(st.battery_health_history.len(), 1);
     assert!(dir.path().join("battery_history.json").is_file());
+}
+
+#[test]
+fn integration_service_cleared_travel_charge_syncs_and_stays_cleared() {
+    let dir = TempDirGuard::create("svc_travel_sync");
+    let mut cfg = AppConfig::default();
+    cfg.battery.enabled = true;
+    cfg.battery.mode = BatteryChargeMode::Inhibit;
+    cfg.battery.enable_travel_charge(Utc::now().timestamp());
+
+    // Simulate background service having completed 1x travel charge and persisted cleared flag
+    let mut cleared_svc_bat = cfg.battery.clone();
+    cleared_svc_bat.clear_travel_charge();
+    let mock = MockHardwareState {
+        battery_service_running: true,
+        battery_service_cfg: Some(cleared_svc_bat),
+        ..Default::default()
+    };
+
+    let rig = MockRig::new(mock);
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+
+    assert!(engine.poll_battery_step());
+    assert!(!engine.cfg.battery.one_time_full_charge);
+    assert!(engine.cfg.battery.travel_charge_until_utc.is_none());
+
+    let st = state.lock().unwrap();
+    assert_eq!(st.synced_config_rev, 1);
+    let synced = st.synced_config.as_ref().expect("synced config published");
+    assert!(!synced.battery.one_time_full_charge);
+    assert!(synced.battery.travel_charge_until_utc.is_none());
+}
+
+#[test]
+fn integration_apply_battery_now_never_skips_when_firmware_mode_unknown() {
+    let dir = TempDirGuard::create("bat_unknown_mode");
+    let mut cfg = AppConfig::default();
+    cfg.battery.enabled = true;
+    cfg.battery.mode = BatteryChargeMode::Inhibit;
+    cfg.battery.stop_threshold_pct = 80;
+    cfg.battery.start_threshold_pct = 75;
+
+    let mut mock = MockHardwareState::default();
+    mock.battery_status.charge_percent = 85;
+    mock.battery_status.ac_connected = true;
+    mock.battery_status.current_mode = BatteryChargeMode::Unknown;
+
+    let rig = MockRig::new(mock);
+    let (mut engine, _state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    engine.last_applied_bat_mode = Some(BatteryChargeMode::Inhibit);
+
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+    assert!(!engine.handle_command(WorkerCommand::ApplyBatteryNow, &tx, &None, &visible));
+
+    let g = rig.inner.lock().unwrap();
+    assert_eq!(g.battery_mode_writes, vec![BatteryChargeMode::Inhibit]);
+}
+
+#[test]
+fn integration_restore_default_power_limits_reapplies_profile_and_keeps_other_channel() {
+    let dir = TempDirGuard::create("power_limit_reset");
+    let mut cfg = AppConfig::default();
+    cfg.thermal_fan.performance_mode = PerformanceMode::Performance;
+    cfg.tuning.pl1_watts = Some(55);
+    cfg.tuning.pl2_watts = Some(115);
+
+    let rig = MockRig::new(MockHardwareState::default());
+    let (mut engine, _state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+
+    // Clear only PL1 while keeping PL2 -> must re-apply active profile first, then apply (None, Some(95))
+    engine.handle_command(
+        WorkerCommand::RestoreDefaultPowerLimits {
+            keep_pl1: None,
+            keep_pl2: Some(95),
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    assert_eq!(engine.cfg.tuning.pl1_watts, None);
+    assert_eq!(engine.cfg.tuning.pl2_watts, Some(95));
+    assert_eq!(engine.last_committed_power_limits, (None, Some(95)));
+    {
+        let g = rig.inner.lock().unwrap();
+        assert_eq!(
+            g.event_log,
+            vec![
+                "perf:Performance".to_string(),
+                "win_power:BestPerformance".to_string(),
+                "limits:None:Some(95)".to_string(),
+            ]
+        );
+    }
+
+    // Clear all power limits -> re-applies active profile ONLY without calling set_power_limits
+    rig.inner.lock().unwrap().event_log.clear();
+    rig.inner.lock().unwrap().power_limits_writes.clear();
+    engine.handle_command(
+        WorkerCommand::RestoreDefaultPowerLimits {
+            keep_pl1: None,
+            keep_pl2: None,
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    assert_eq!(engine.cfg.tuning.pl1_watts, None);
+    assert_eq!(engine.cfg.tuning.pl2_watts, None);
+    assert_eq!(engine.last_committed_power_limits, (None, None));
+    {
+        let g = rig.inner.lock().unwrap();
+        assert_eq!(
+            g.event_log,
+            vec![
+                "perf:Performance".to_string(),
+                "win_power:BestPerformance".to_string(),
+            ]
+        );
+        assert!(g.power_limits_writes.is_empty());
+    }
 }

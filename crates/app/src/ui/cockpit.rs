@@ -1,20 +1,24 @@
 use crate::theme::{
     accent_color, clickable_status_badge, clickable_warning_badge, compact_card,
-    compact_status_pill, pill_button, rgb, section_title, status_badge, tile_button, STATUS_ERR,
-    STATUS_OK, STATUS_WARN,
+    compact_status_pill, compact_toggle_pill, detail_dial_button, fixed_color_picker_button,
+    lighting_swatch_button, muted_text, pill_button, section_title, section_toggle_button,
+    status_badge, status_err, status_ok, status_warn, tile_button, undo_button, ColorButtonStyle,
 };
-use crate::ui::{control_committed, Drawer, ExtraSubTab};
+use crate::ui::lighting_display::{apply_lighting_profile, is_lighting_profile_active};
+use crate::ui::{control_committed, Drawer, ExtraSubTab, FansPowerSubTab};
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{Color32, CornerRadius, RichText, Slider, Stroke, Ui};
+use egui::{Color32, RichText, Slider, Ui};
 use omvix_core::{
-    AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, PerformanceMode,
-    RgbColor, SafeModeReason, UpdateUiStatus,
+    AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, LightingProfile,
+    PerformanceMode, RgbColor, SafeModeReason, UpdateUiStatus,
 };
 use std::time::Duration;
 
 #[derive(Default)]
 pub struct CockpitActions {
     pub toggle_drawer: Option<Drawer>,
+    pub open_drawer_exact: Option<Drawer>,
+    pub open_fans_power_subtab: Option<FansPowerSubTab>,
     pub open_extra_subtab: Option<ExtraSubTab>,
     pub open_profiles: bool,
     pub restart_admin: bool,
@@ -29,6 +33,8 @@ pub fn render(
     st: &SharedState,
     i18n: &I18n,
     open_drawer: Option<Drawer>,
+    fans_power_tab: FansPowerSubTab,
+    extra_tab: ExtraSubTab,
     pane_width: f32,
     worker_dead: bool,
     config_warnings: &mut Vec<String>,
@@ -38,6 +44,10 @@ pub fn render(
     let mut actions = CockpitActions::default();
     let t = &cfg.general.custom_theme.clone();
     let accent = accent_color(t);
+    let ok_c = status_ok(t);
+    let warn_c = status_warn(t);
+    let err_c = status_err(t);
+    let muted_pill = muted_text(t);
 
     // Explicitly pin cockpit interior width to match `cockpit_frame` (Margin 12) + `compact_card` (Margin 10 + Stroke 1)
     let content_w = (pane_width - 24.0).max(240.0);
@@ -66,8 +76,7 @@ pub fn render(
         });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if !st.security.is_admin && clickable_status_badge(ui, "Admin ?", STATUS_WARN).clicked()
-            {
+            if !st.security.is_admin && clickable_status_badge(ui, "Admin ?", warn_c).clicked() {
                 actions.restart_admin = true;
             }
 
@@ -77,7 +86,7 @@ pub fn render(
                 .filter(|s| s.status.eq_ignore_ascii_case("Running"))
                 .count();
             if running_conflicts > 0
-                && clickable_warning_badge(ui, running_conflicts, STATUS_WARN)
+                && clickable_warning_badge(ui, running_conflicts, warn_c)
                     .on_hover_text(i18n.t_fmt(
                         "conflicts.detected_summary",
                         &[("count", &running_conflicts.to_string())],
@@ -88,13 +97,13 @@ pub fn render(
             }
 
             if st.thermal_guard_active {
-                status_badge(ui, "MAX GUARD", STATUS_ERR);
+                status_badge(ui, "MAX GUARD", err_c);
             }
             if st.sensor_loss_active {
-                status_badge(ui, &i18n.t("cockpit.sensor_loss_badge"), STATUS_ERR);
+                status_badge(ui, &i18n.t("cockpit.sensor_loss_badge"), err_c);
             }
             if st.safe_mode.is_some() {
-                status_badge(ui, &i18n.t("safe_mode.badge"), STATUS_WARN);
+                status_badge(ui, &i18n.t("safe_mode.badge"), warn_c);
             }
             let available_ver = match &st.update_status {
                 UpdateUiStatus::UpdateAvailable(rel) => Some(rel.version.as_str()),
@@ -102,7 +111,7 @@ pub fn render(
                 _ => None,
             };
             if let Some(ver) = available_ver {
-                if clickable_status_badge(ui, &format!("v{ver} ↑"), STATUS_OK)
+                if clickable_status_badge(ui, &format!("v{ver} ↑"), ok_c)
                     .on_hover_text(i18n.t("updates.cockpit_tooltip"))
                     .clicked()
                 {
@@ -153,6 +162,14 @@ pub fn render(
         ui.horizontal(|ui| {
             ui.label(RichText::new(cpu_line).size(12.5).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mon_open = open_drawer == Some(Drawer::Monitor);
+                let mon_tip = i18n.t_fmt(
+                    "cockpit.open_detail_tooltip",
+                    &[("section", &i18n.t("monitor.title"))],
+                );
+                if detail_dial_button(ui, mon_open, &mon_tip, t).clicked() {
+                    actions.open_drawer_exact = Some(Drawer::Monitor);
+                }
                 if st.telemetry.gpu_sleeping {
                     ui.label(
                         RichText::new(format!("GPU — · {}", i18n.t("cockpit.gpu_sleep_short")))
@@ -221,21 +238,20 @@ pub fn render(
         });
 
         ui.add_space(2.0);
-        let muted_pill = Color32::from_rgb(138, 148, 162);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(5.0, 3.0);
 
             let (guard_lbl, guard_clr) = if st.thermal_guard_active {
-                (i18n.t("cockpit.badge_guard_active"), STATUS_ERR)
+                (i18n.t("cockpit.badge_guard_active"), err_c)
             } else if st.safe_mode.is_some() {
-                (i18n.t("cockpit.badge_guard_paused"), STATUS_WARN)
+                (i18n.t("cockpit.badge_guard_paused"), warn_c)
             } else {
                 (
                     i18n.t_fmt(
                         "cockpit.badge_guard_ready",
                         &[("temp", &cfg.thermal_fan.guard_cpu_temp_c.to_string())],
                     ),
-                    STATUS_OK,
+                    ok_c,
                 )
             };
             compact_status_pill(ui, &guard_lbl, guard_clr).on_hover_text(i18n.t_fmt(
@@ -250,10 +266,11 @@ pub fn render(
                 .battery_status
                 .as_ref()
                 .map(|b| b.current_mode)
-                .unwrap_or(BatteryChargeMode::Auto);
+                .unwrap_or(BatteryChargeMode::Unknown);
             let (hold_lbl, hold_clr) = match bat_hw_mode {
-                BatteryChargeMode::Hold => (i18n.t("cockpit.badge_hold_active"), STATUS_WARN),
-                BatteryChargeMode::Inhibit => (i18n.t("cockpit.badge_hold_inhibit"), STATUS_OK),
+                BatteryChargeMode::Hold => (i18n.t("cockpit.badge_hold_active"), warn_c),
+                BatteryChargeMode::Inhibit => (i18n.t("cockpit.badge_hold_inhibit"), ok_c),
+                BatteryChargeMode::Unknown => (i18n.t("cockpit.badge_hold_unknown"), muted_pill),
                 BatteryChargeMode::Auto
                     if cfg.battery.enabled && cfg.battery.hold_when_shutdown =>
                 {
@@ -265,14 +282,14 @@ pub fn render(
                 .on_hover_text(i18n.t("cockpit.badge_hold_tooltip"));
 
             let (ka_lbl, ka_clr) = if st.sensor_loss_active || st.safe_mode.is_some() {
-                (i18n.t("cockpit.badge_keepalive_paused"), STATUS_WARN)
+                (i18n.t("cockpit.badge_keepalive_paused"), warn_c)
             } else if cfg.thermal_fan.keep_alive_enabled
                 && matches!(
                     cfg.thermal_fan.fan_mode,
                     FanMode::Manual | FanMode::CustomCurve
                 )
             {
-                (i18n.t("cockpit.badge_keepalive_on"), STATUS_OK)
+                (i18n.t("cockpit.badge_keepalive_on"), ok_c)
             } else {
                 (i18n.t("cockpit.badge_keepalive_off"), muted_pill)
             };
@@ -280,9 +297,9 @@ pub fn render(
                 .on_hover_text(i18n.t("cockpit.badge_keepalive_tooltip"));
 
             let (pawn_lbl, pawn_clr) = if st.pawnio_cpu_active {
-                (i18n.t("cockpit.badge_pawnio_ready"), STATUS_OK)
+                (i18n.t("cockpit.badge_pawnio_ready"), ok_c)
             } else {
-                (i18n.t("cockpit.badge_pawnio_missing"), STATUS_WARN)
+                (i18n.t("cockpit.badge_pawnio_missing"), warn_c)
             };
             compact_status_pill(ui, &pawn_lbl, pawn_clr)
                 .on_hover_text(i18n.t("cockpit.badge_pawnio_tooltip"));
@@ -295,7 +312,7 @@ pub fn render(
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
             ui.colored_label(
-                STATUS_ERR,
+                err_c,
                 RichText::new(i18n.t("app.worker_dead_warning"))
                     .size(11.5)
                     .strong(),
@@ -309,7 +326,7 @@ pub fn render(
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
             ui.colored_label(
-                STATUS_WARN,
+                warn_c,
                 RichText::new(i18n.t("safe_mode.banner_title"))
                     .size(11.5)
                     .strong(),
@@ -336,10 +353,20 @@ pub fn render(
         compact_card(t).show(ui, |ui| {
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    STATUS_WARN,
-                    RichText::new(config_warnings.join(" | ")).size(11.0),
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2((card_inner_w - 28.0).max(120.0), 0.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(config_warnings.join(" | "))
+                                    .size(11.0)
+                                    .color(warn_c),
+                            )
+                            .wrap(),
+                        );
+                    },
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     if ui.small_button("×").clicked() {
@@ -356,7 +383,7 @@ pub fn render(
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
             ui.colored_label(
-                STATUS_WARN,
+                warn_c,
                 RichText::new(i18n.t_fmt("board.experimental_title", &[("board", &st.board_id)]))
                     .size(11.5)
                     .strong(),
@@ -392,7 +419,7 @@ pub fn render(
         ui.add_space(3.0);
         ui.horizontal(|ui| {
             ui.colored_label(
-                STATUS_WARN,
+                warn_c,
                 RichText::new(i18n.t("app.restart_as_admin")).size(11.5),
             );
             ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
@@ -422,26 +449,50 @@ pub fn render(
                 ui.horizontal(|ui| {
                     section_title(ui, i18n.t("thermal.mode"), t);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let perf_open = open_drawer == Some(Drawer::FansPower)
+                            && fans_power_tab == FansPowerSubTab::PerformanceFans;
+                        let perf_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_perf_fans"))],
+                        );
+                        if detail_dial_button(ui, perf_open, &perf_tip, t).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::PerformanceFans);
+                        }
+                        if compact_toggle_pill(
+                            ui,
+                            &i18n.t("profiles.cockpit_auto_badge"),
+                            cfg.auto_profile.enabled,
+                            t,
+                        )
+                        .on_hover_text(i18n.t("cockpit.auto_acdc_tooltip"))
+                        .clicked()
+                        {
+                            cfg.auto_profile.enabled = !cfg.auto_profile.enabled;
+                            on_save();
+                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                            if cfg.auto_profile.enabled {
+                                on_cmd(WorkerCommand::ApplyAutoProfileNow);
+                            }
+                        }
                         if let Some(ref prof_name) = st.active_app_profile {
+                            let short_name = if prof_name.chars().count() > 14 {
+                                format!("{}...", prof_name.chars().take(12).collect::<String>())
+                            } else {
+                                prof_name.clone()
+                            };
                             if clickable_status_badge(
                                 ui,
-                                &i18n
-                                    .t_fmt("profiles.cockpit_active_badge", &[("name", prof_name)]),
-                                STATUS_OK,
+                                &i18n.t_fmt(
+                                    "profiles.cockpit_active_badge",
+                                    &[("name", &short_name)],
+                                ),
+                                ok_c,
                             )
                             .clicked()
                             {
                                 actions.open_profiles = true;
                             }
-                        } else if cfg.auto_profile.enabled
-                            && clickable_status_badge(
-                                ui,
-                                &i18n.t("profiles.cockpit_auto_badge"),
-                                accent,
-                            )
-                            .clicked()
-                        {
-                            actions.open_profiles = true;
                         }
                     });
                 });
@@ -480,7 +531,20 @@ pub fn render(
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
-                section_title(ui, i18n.t("fan.mode"), t);
+                ui.horizontal(|ui| {
+                    section_title(ui, i18n.t("fan.mode"), t);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let fan_open = open_drawer == Some(Drawer::FansPower)
+                            && fans_power_tab == FansPowerSubTab::PerformanceFans;
+                        let fan_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_perf_fans"))],
+                        );
+                        if detail_dial_button(ui, fan_open, &fan_tip, t).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::PerformanceFans);
+                        }
+                    });
+                });
                 ui.add_space(3.0);
                 let items = [
                     (FanMode::Auto, i18n.t("cockpit.fan_auto")),
@@ -534,13 +598,22 @@ pub fn render(
                 ui.set_max_width(card_inner_w);
                 ui.horizontal(|ui| {
                     section_title(ui, i18n.t("home.quick_display"), t);
-                    if let Some(disp) = &st.display_mode {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let disp_open = open_drawer == Some(Drawer::Extra)
+                            && extra_tab == ExtraSubTab::LightingDisplay;
+                        let disp_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_lighting_display"))],
+                        );
+                        if detail_dial_button(ui, disp_open, &disp_tip, t).clicked() {
+                            actions.open_extra_subtab = Some(ExtraSubTab::LightingDisplay);
+                        }
+                        if let Some(disp) = &st.display_mode {
                             ui.weak(
                                 RichText::new(format!("{}x{}", disp.width, disp.height)).size(11.0),
                             );
-                        });
-                    }
+                        }
+                    });
                 });
                 ui.add_space(3.0);
                 if let Some(disp) = &st.display_mode {
@@ -568,7 +641,20 @@ pub fn render(
                 }
 
                 ui.add_space(5.0);
-                section_title(ui, i18n.t("home.quick_cpu_boost"), t);
+                ui.horizontal(|ui| {
+                    section_title(ui, i18n.t("home.quick_cpu_boost"), t);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let tune_open = open_drawer == Some(Drawer::FansPower)
+                            && fans_power_tab == FansPowerSubTab::Tuning;
+                        let tune_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_cpu_power"))],
+                        );
+                        if detail_dial_button(ui, tune_open, &tune_tip, t).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::Tuning);
+                        }
+                    });
+                });
                 ui.add_space(3.0);
                 let cur_boost = st
                     .cpu_boost
@@ -599,20 +685,40 @@ pub fn render(
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui.horizontal(|ui| {
-                    section_title(ui, i18n.t("home.quick_keyboard"), t);
-                    if ui
-                        .checkbox(&mut cfg.lighting.enabled, i18n.t("common.enabled"))
-                        .changed()
+                    if section_toggle_button(
+                        ui,
+                        &i18n.t("home.quick_keyboard"),
+                        &mut cfg.lighting.enabled,
+                        &i18n.t("common.enabled"),
+                        t,
+                    )
+                    .changed()
                     {
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                         on_cmd(WorkerCommand::ApplyLighting);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let light_open = open_drawer == Some(Drawer::Extra)
+                            && extra_tab == ExtraSubTab::LightingDisplay;
+                        let light_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_lighting_display"))],
+                        );
+                        if detail_dial_button(ui, light_open, &light_tip, t).clicked() {
+                            actions.open_extra_subtab = Some(ExtraSubTab::LightingDisplay);
+                        }
+
                         let c0 = &mut cfg.lighting.zones[0];
                         let mut srgb = [c0.r, c0.g, c0.b];
-                        let resp = ui.color_edit_button_srgb(&mut srgb);
+                        let resp = fixed_color_picker_button(
+                            ui,
+                            "cockpit_kbd_wheel_picker",
+                            &mut srgb,
+                            ColorButtonStyle::ColorWheel { size: 22.0 },
+                            t,
+                        );
                         if resp.changed() {
                             let picked = RgbColor {
                                 r: srgb[0],
@@ -621,58 +727,61 @@ pub fn render(
                             };
                             cfg.lighting.zones = [picked; 4];
                             cfg.lighting.enabled = true;
+                            cfg.lighting.active_profile_id = None;
                         }
                         if control_committed(ui, "cockpit_kbd_color", &resp) {
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::ApplyLighting);
                         }
-                        let border_color = rgb(t.card_border);
-                        for rgb_preset in [
-                            RgbColor {
-                                r: 34,
-                                g: 197,
-                                b: 94,
-                            },
-                            RgbColor {
-                                r: 220,
-                                g: 38,
-                                b: 38,
-                            },
-                            RgbColor {
-                                r: 245,
-                                g: 245,
-                                b: 255,
-                            },
-                            RgbColor {
-                                r: 0,
-                                g: 180,
-                                b: 216,
-                            },
-                        ] {
-                            let swatch =
-                                Color32::from_rgb(rgb_preset.r, rgb_preset.g, rgb_preset.b);
-                            let btn = egui::Button::new("")
-                                .fill(swatch)
-                                .stroke(Stroke::new(1.0_f32, border_color))
-                                .corner_radius(CornerRadius::same(4))
-                                .min_size(egui::vec2(18.0, 18.0));
-                            if ui.add(btn).clicked() {
-                                cfg.lighting.zones = [rgb_preset; 4];
-                                cfg.lighting.enabled = true;
+                    });
+                });
+
+                ui.add_space(3.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
+                    for preset in LightingProfile::builtins() {
+                        let selected = is_lighting_profile_active(cfg, &preset);
+                        if lighting_swatch_button(ui, &preset.zones, selected, &preset.name, t)
+                            .clicked()
+                        {
+                            apply_lighting_profile(cfg, &preset);
+                            on_save();
+                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                            on_cmd(WorkerCommand::ApplyLighting);
+                        }
+                    }
+                    for custom in cfg.lighting.custom_profiles.clone() {
+                        let selected = is_lighting_profile_active(cfg, &custom);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            if lighting_swatch_button(ui, &custom.zones, selected, &custom.name, t)
+                                .clicked()
+                            {
+                                apply_lighting_profile(cfg, &custom);
                                 on_save();
                                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                                 on_cmd(WorkerCommand::ApplyLighting);
                             }
-                        }
-                    });
+                            if pill_button(ui, &custom.name, selected, t).clicked() {
+                                apply_lighting_profile(cfg, &custom);
+                                on_save();
+                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                                on_cmd(WorkerCommand::ApplyLighting);
+                            }
+                        });
+                    }
                 });
+
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.label(i18n.t("lighting.brightness"));
                     ui.spacing_mut().slider_width = (card_inner_w - 135.0).max(185.0);
                     let resp =
                         ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
+                    if resp.changed() {
+                        cfg.lighting.active_profile_id = None;
+                    }
                     if control_committed(ui, "cockpit_kbd_brightness", &resp) {
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -683,15 +792,19 @@ pub fn render(
 
             ui.add_space(5.0);
 
-            // Card E: Battery Charge Limit Presets + Threshold Slider
+            // Card E: Battery Charge Limit Profiles (All builtin + custom profiles)
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui.horizontal(|ui| {
-                    section_title(ui, i18n.t("home.quick_battery"), t);
-                    if ui
-                        .checkbox(&mut cfg.battery.enabled, i18n.t("common.enabled"))
-                        .changed()
+                    if section_toggle_button(
+                        ui,
+                        &i18n.t("home.quick_battery"),
+                        &mut cfg.battery.enabled,
+                        &i18n.t("common.enabled"),
+                        t,
+                    )
+                    .changed()
                     {
                         if !cfg.battery.enabled {
                             cfg.battery.mode = BatteryChargeMode::Auto;
@@ -704,10 +817,27 @@ pub fn render(
                         on_cmd(WorkerCommand::ApplyBatteryNow);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let travel_active = cfg.battery.one_time_full_charge;
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let bat_open = open_drawer == Some(Drawer::Battery);
+                        let bat_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("nav.battery"))],
+                        );
+                        if detail_dial_button(ui, bat_open, &bat_tip, t).clicked() {
+                            actions.open_drawer_exact = Some(Drawer::Battery);
+                        }
+                        let now_utc = chrono::Utc::now().timestamp();
+                        let travel_active = cfg.battery.is_travel_charge_active(now_utc);
                         let t_label = i18n.t("cockpit.travel_short");
-                        if pill_button(ui, &t_label, travel_active, t).clicked() {
-                            cfg.battery.one_time_full_charge = !cfg.battery.one_time_full_charge;
+                        if pill_button(ui, &t_label, travel_active, t)
+                            .on_hover_text(i18n.t("cockpit.travel_short_tooltip"))
+                            .clicked()
+                        {
+                            if travel_active {
+                                cfg.battery.clear_travel_charge();
+                            } else {
+                                cfg.battery.enable_travel_charge(now_utc);
+                            }
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::ApplyBatteryNow);
@@ -756,30 +886,7 @@ pub fn render(
                     });
                 }
 
-                ui.add_space(3.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().slider_width = (card_inner_w - 72.0).max(235.0);
-                    let resp = ui.add(
-                        Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100).suffix("%"),
-                    );
-                    if resp.changed() {
-                        cfg.battery.start_threshold_pct =
-                            cfg.battery.stop_threshold_pct.saturating_sub(5).max(40);
-                        cfg.battery.active_profile_id = None;
-                    }
-                    if control_committed(ui, "cockpit_battery_stop", &resp) {
-                        if cfg.battery.stop_threshold_pct >= 100 {
-                            cfg.battery.enabled = false;
-                            cfg.battery.mode = BatteryChargeMode::Auto;
-                        } else if !cfg.battery.enabled {
-                            cfg.battery.enabled = true;
-                            cfg.battery.mode = BatteryChargeMode::Inhibit;
-                        }
-                        on_save();
-                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                        on_cmd(WorkerCommand::ApplyBatteryNow);
-                    }
-                });
+                ui.add_space(2.0);
                 let off_key = if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
                     "battery.when_off_hold_short"
                 } else {
@@ -798,7 +905,7 @@ pub fn render(
             ui.weak(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0));
             if let Some((msg, is_err, ts)) = &st.last_toast {
                 if ts.elapsed() < Duration::from_secs(6) {
-                    let color = if *is_err { STATUS_ERR } else { STATUS_OK };
+                    let color = if *is_err { err_c } else { ok_c };
                     let short = if msg.chars().count() > 28 {
                         format!("{}...", msg.chars().take(25).collect::<String>())
                     } else {
@@ -833,10 +940,7 @@ pub fn render(
                             ("new", &latest.new_summary),
                         ],
                     );
-                    if ui
-                        .small_button(
-                            RichText::new(format!("↶ {}", i18n.t("history.undo_short"))).size(11.5),
-                        )
+                    if undo_button(ui, &i18n.t("history.undo_short"), t)
                         .on_hover_text(tip)
                         .clicked()
                     {

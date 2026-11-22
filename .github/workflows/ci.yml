@@ -37,11 +37,22 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Audit for bare Command::new, LoadLibraryW, and Nvml::init
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rsFiles = Get-ChildItem -Recurse -Include *.rs -Path crates
+          $hits = Select-String -Path $rsFiles -Pattern 'Command::new\(\s*"[^"\\:]+\.exe"|\bLoadLibraryW\b|\bNvml::init\b'
+          if ($hits) {
+            $hits | ForEach-Object { Write-Host "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
+            throw 'Forbidden bare system binary invocation or unsafe LoadLibraryW/Nvml::init found.'
+          }
+
       - name: Run Clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run workspace unit and integration tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   release-and-dll-audit:
     name: Release Build, MinGW DLL Audit & Clean Smoke Test
@@ -57,7 +68,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binaries
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
 
       - name: Audit DLL imports (forbid MinGW runtime DLLs)
         shell: pwsh

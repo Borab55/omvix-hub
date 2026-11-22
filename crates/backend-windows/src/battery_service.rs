@@ -98,6 +98,7 @@ pub struct BatteryServiceConfig {
     pub hold_when_shutdown: bool,
     pub off_min_pct: u8,
     pub one_time_full_charge: bool,
+    pub travel_charge_until_utc: Option<i64>,
     pub poll_interval_secs: u64,
 }
 
@@ -111,6 +112,7 @@ impl Default for BatteryServiceConfig {
             hold_when_shutdown: true,
             off_min_pct: 40,
             one_time_full_charge: false,
+            travel_charge_until_utc: None,
             poll_interval_secs: 5,
         }
     }
@@ -126,12 +128,20 @@ impl From<&BatteryConfig> for BatteryServiceConfig {
             hold_when_shutdown: cfg.hold_when_shutdown,
             off_min_pct: 40,
             one_time_full_charge: cfg.one_time_full_charge,
+            travel_charge_until_utc: cfg.travel_charge_until_utc,
             poll_interval_secs: 5,
         }
     }
 }
 
 impl BatteryServiceConfig {
+    pub fn is_travel_charge_active(&self, now_utc: i64) -> bool {
+        match self.travel_charge_until_utc {
+            Some(until) => self.one_time_full_charge && now_utc < until,
+            None => self.one_time_full_charge,
+        }
+    }
+
     pub fn to_battery_config(&self) -> BatteryConfig {
         BatteryConfig {
             enabled: self.enabled,
@@ -140,6 +150,7 @@ impl BatteryServiceConfig {
             start_threshold_pct: self.start_threshold_pct,
             hold_when_shutdown: self.hold_when_shutdown,
             one_time_full_charge: self.one_time_full_charge,
+            travel_charge_until_utc: self.travel_charge_until_utc,
             active_profile_id: None,
             custom_profiles: Vec::new(),
         }
@@ -170,7 +181,16 @@ impl BatteryServiceConfig {
 
 /// Decides which HP BIOS `0x2B` charge mode to leave active when entering Sleep, Hibernate, or Shutdown.
 pub fn decide_off_state_mode(cfg: &BatteryServiceConfig, charge_pct: u8) -> BatteryChargeMode {
-    if !cfg.enabled || !cfg.hold_when_shutdown || cfg.one_time_full_charge {
+    decide_off_state_mode_at(cfg, charge_pct, chrono::Utc::now().timestamp())
+}
+
+/// Deterministic version of `decide_off_state_mode` using caller-supplied `now_utc` Unix seconds.
+pub fn decide_off_state_mode_at(
+    cfg: &BatteryServiceConfig,
+    charge_pct: u8,
+    now_utc: i64,
+) -> BatteryChargeMode {
+    if !cfg.enabled || !cfg.hold_when_shutdown || cfg.is_travel_charge_active(now_utc) {
         return BatteryChargeMode::Auto;
     }
     let floor = cfg.off_min_pct.max(40).max(cfg.start_threshold_pct);
@@ -179,6 +199,38 @@ pub fn decide_off_state_mode(cfg: &BatteryServiceConfig, charge_pct: u8) -> Batt
     } else {
         BatteryChargeMode::Auto
     }
+}
+
+/// Evaluates one service battery care tick and reports whether persistent travel-charge flags changed.
+pub fn evaluate_service_tick(
+    engine: &mut BatteryCareEngine,
+    svc_cfg: &mut BatteryServiceConfig,
+    bat_cfg: &mut BatteryConfig,
+    charge_pct: u8,
+    ac_connected: bool,
+    now_utc: i64,
+) -> (BatteryChargeMode, bool) {
+    let target = if bat_cfg.enabled {
+        engine.evaluate_at(bat_cfg, charge_pct, ac_connected, now_utc)
+    } else {
+        BatteryChargeMode::Auto
+    };
+    let travel_changed = svc_cfg.one_time_full_charge != bat_cfg.one_time_full_charge
+        || svc_cfg.travel_charge_until_utc != bat_cfg.travel_charge_until_utc;
+    if travel_changed {
+        svc_cfg.one_time_full_charge = bat_cfg.one_time_full_charge;
+        svc_cfg.travel_charge_until_utc = bat_cfg.travel_charge_until_utc;
+    }
+    (target, travel_changed)
+}
+
+/// Reads the persisted `battery-service.toml` if present and not a reparse point.
+pub fn read_service_config() -> Option<BatteryServiceConfig> {
+    let path = config_file_path();
+    if is_reparse_point(&path) || !path.is_file() {
+        return None;
+    }
+    BatteryServiceConfig::load_from_path(&path).ok()
 }
 
 fn map_service_state(raw: u32) -> BatteryServiceState {
@@ -834,11 +886,25 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
             last_eval = Instant::now();
             match battery_be.get_battery_status() {
                 Ok(bat) => {
-                    let target = if bat_cfg.enabled {
-                        engine.evaluate(&mut bat_cfg, bat.charge_percent, bat.ac_connected)
-                    } else {
-                        BatteryChargeMode::Auto
-                    };
+                    let (target, travel_changed) = evaluate_service_tick(
+                        &mut engine,
+                        &mut svc_cfg,
+                        &mut bat_cfg,
+                        bat.charge_percent,
+                        bat.ac_connected,
+                        chrono::Utc::now().timestamp(),
+                    );
+                    if travel_changed {
+                        if let Err(err) = svc_cfg.save_to_path(&cfg_path) {
+                            daemon_log(&format!("Failed persisting cleared travel charge: {err}"));
+                        } else {
+                            last_cfg_mtime =
+                                fs::metadata(&cfg_path).and_then(|m| m.modified()).ok();
+                            daemon_log(
+                                "Travel charge completed/expired; cleared flag persisted to battery-service.toml",
+                            );
+                        }
+                    }
                     if last_applied != Some(target) {
                         match battery_be.set_charge_mode(target) {
                             Ok(()) => {
@@ -960,12 +1026,61 @@ mod tests {
             start_threshold_pct: 55,
             hold_when_shutdown: true,
             off_min_pct: 40,
-            one_time_full_charge: false,
+            one_time_full_charge: true,
+            travel_charge_until_utc: Some(1_900_000_000),
             poll_interval_secs: 5,
         };
         cfg.save_to_path(&path).expect("save service config");
         let loaded = BatteryServiceConfig::load_from_path(&path).expect("load service config");
         assert_eq!(loaded, cfg);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn service_persists_cleared_travel_charge_so_restart_does_not_rearm() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_svc_travel_{nanos}"));
+        let path = dir.join("battery-service.toml");
+
+        let t0 = 1_800_000_000i64;
+        let mut bat_cfg = BatteryConfig {
+            enabled: true,
+            mode: BatteryChargeMode::Inhibit,
+            stop_threshold_pct: 80,
+            start_threshold_pct: 75,
+            hold_when_shutdown: true,
+            ..BatteryConfig::default()
+        };
+        bat_cfg.enable_travel_charge(t0);
+
+        let svc_cfg = BatteryServiceConfig::from(&bat_cfg);
+        svc_cfg.save_to_path(&path).unwrap();
+
+        // Simulate daemon reaching 99% on AC -> clears travel mode and saves atomically
+        let mut engine1 = BatteryCareEngine::new();
+        let mut loaded1 = BatteryServiceConfig::load_from_path(&path).unwrap();
+        let mut bat1 = loaded1.to_battery_config();
+        let (target1, changed1) =
+            evaluate_service_tick(&mut engine1, &mut loaded1, &mut bat1, 99, true, t0 + 120);
+        assert!(changed1);
+        assert_eq!(target1, BatteryChargeMode::Inhibit);
+        assert!(!loaded1.one_time_full_charge);
+        assert!(loaded1.travel_charge_until_utc.is_none());
+        loaded1.save_to_path(&path).unwrap();
+
+        // Simulate restarting the service from disk while battery sits at 85% on AC
+        let mut engine2 = BatteryCareEngine::new();
+        let mut loaded2 = BatteryServiceConfig::load_from_path(&path).unwrap();
+        let mut bat2 = loaded2.to_battery_config();
+        let (target2, changed2) =
+            evaluate_service_tick(&mut engine2, &mut loaded2, &mut bat2, 85, true, t0 + 300);
+        assert!(!changed2);
+        assert!(!loaded2.one_time_full_charge);
+        assert_eq!(target2, BatteryChargeMode::Inhibit);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -980,6 +1095,7 @@ mod tests {
             hold_when_shutdown: true,
             off_min_pct: 40,
             one_time_full_charge: false,
+            travel_charge_until_utc: None,
             poll_interval_secs: 5,
         };
         // Above start threshold & 40% floor -> Hold
@@ -989,12 +1105,21 @@ mod tests {
         assert_eq!(decide_off_state_mode(&cfg, 60), BatteryChargeMode::Auto);
         assert_eq!(decide_off_state_mode(&cfg, 25), BatteryChargeMode::Auto);
 
-        // Travel bypass active -> Auto
+        // Active travel bypass -> Auto, expired travel -> Hold
         cfg.one_time_full_charge = true;
-        assert_eq!(decide_off_state_mode(&cfg, 85), BatteryChargeMode::Auto);
+        cfg.travel_charge_until_utc = Some(2_000_000_000);
+        assert_eq!(
+            decide_off_state_mode_at(&cfg, 85, 1_900_000_000),
+            BatteryChargeMode::Auto
+        );
+        assert_eq!(
+            decide_off_state_mode_at(&cfg, 85, 2_000_000_000),
+            BatteryChargeMode::Hold
+        );
 
         // hold_when_shutdown disabled -> Auto
         cfg.one_time_full_charge = false;
+        cfg.travel_charge_until_utc = None;
         cfg.hold_when_shutdown = false;
         assert_eq!(decide_off_state_mode(&cfg, 85), BatteryChargeMode::Auto);
 

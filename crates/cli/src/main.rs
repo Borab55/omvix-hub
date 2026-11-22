@@ -168,6 +168,9 @@ impl From<CliFanMode> for FanMode {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    omvix_windows::paths::harden_dll_search_path();
+
     let cli = Cli::parse();
     let cfg_path = AppConfig::default_config_path();
     let mut cfg = AppConfig::load_from_path(&cfg_path).unwrap_or_default();
