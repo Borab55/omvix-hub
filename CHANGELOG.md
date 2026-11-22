@@ -5,7 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0-beta.1] - 2026-11-22
+
 ### Added
+- **Automated GitHub Release Workflow & Repo Rename (`.github/workflows/release.yml`, `Cargo.toml`, `core/updater.rs`):** Added tag-driven (`v*`) GitHub Actions release pipeline running format, security grep, clippy, workspace tests, release build, MinGW DLL import audit, clean-`PATH` smoke test, ZIP packaging, `SHA256SUMS.txt` generation, and automated Release / Pre-release publishing; updated repository and updater endpoints to `Borab55/omvix-hub`.
 - **Custom Theme Library & 12-Color Detailed Palette (`core/config.rs`, `ui/settings.rs`, `theme.rs`, `locales/*.json`):** Added save, apply, and hover-`×` delete management (`saved_theme_chip`) for user custom themes (`GeneralConfig::custom_themes`), expanded `CustomThemeConfig` to 12 customizable UI/status colors (`accent`, `sidebar_bg`, `canvas_bg`, `card_bg`, `card_border`, `text_primary`, `text_muted`, `control_bg`, `control_hover_bg`, `status_ok`, `status_warn`, `status_err`), introduced `OMVIX2` share codes with `OMVIX1`/v6 migration (`CURRENT_CONFIG_VERSION = 7`), and clarified panel labels (`Ana Menü` / `Main Panel`, `Yan Menü Arka Planı` / `Drawer Background`).
 - **Keyboard Lighting Profiles (`core/config.rs`, `ui/lighting_display.rs`, `ui/cockpit.rs`):** Added `LightingProfile` presets (`Cyan`, `White`, `Crimson`, `Emerald`) and user custom 4-zone + brightness lighting profiles (`LightingConfig::custom_profiles`, `active_profile_id`) with multi-zone preview swatches in both the drawer and cockpit.
 - **Cockpit Quick Controls, Dial Icon & Shortcut Auto-Capture (`theme.rs`, `ui/cockpit.rs`, `ui/hotkeys.rs`, `main.rs`):** Added vector tune/sliders header buttons (`detail_dial_button`), a permanent compact `Auto AC/DC` header toggle (`compact_toggle_pill`), a vector curved undo button (`undo_button`), and simultaneous key combination capture (`evaluate_shortcut_capture`) while suspending global hotkey execution during capture.
