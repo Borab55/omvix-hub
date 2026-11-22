@@ -3,6 +3,17 @@
 All notable changes to **Omvix Hub** will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
+## [Unreleased]
+
+### Security
+- **G1 — DLL & Executable Search Path Hardening (`paths.rs`, `power_mode.rs`, `telemetry.rs`, `main.rs`, CI):** Called `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` at startup in both `omvix-hub` and `omvix-cli`, switched `powrprof.dll` to `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)`, pinned NVML loading to `%SystemRoot%\System32\nvml.dll`, resolved all spawned Windows utilities via `GetSystemDirectoryW` / `GetWindowsDirectoryW` (`system_tool`), and added a CI grep guard against bare system invocations and unsafe loader calls.
+- **G4 — In-Memory Task Scheduler Registration (`autostart.rs`):** Replaced temporary XML creation in `%TEMP%` and `schtasks.exe` subprocesses with direct Task Scheduler COM API (`ITaskService::Connect`, `GetFolder("\\")`, `RegisterTask`, `GetTask`, `DeleteTask`) and set `<AllowHardTerminate>true</AllowHardTerminate>`.
+
+### Fixed
+- **H2 — Corrupt Config Quarantine (`config.rs`, `main.rs`, `cockpit.rs`):** Preserved unreadable `config.toml` files as `config.toml.bad-<YYYYMMDD-HHMMSS>` instead of silently discarding them, and surfaced a localized persistent UI warning banner.
+- **H1 — Travel Charge Expiration & Persistence (`config.rs`, `battery_care.rs`, `battery_service.rs`, `worker.rs`, UI):** Added `travel_charge_until_utc` with a 12-hour deadline and `CURRENT_CONFIG_VERSION = 5` migration clearing legacy unbounded flags, atomically persisted cleared travel state from `OmvixBatteryService`, and synced cleared state back to the GUI/config so restarts never re-arm 100% charging.
+- **H3 — Explicit `BatteryChargeMode::Unknown` (`models.rs`, `battery.rs`, `worker.rs`, tray/UI):** Distinguished unreadable or unrecognized `0x2B` firmware responses as `BatteryChargeMode::Unknown` instead of `Auto`, prevented `ApplyBatteryNow` from skipping firmware writes when mode is unknown, rejected writing `Unknown` in `set_charge_mode`, and localized UI/tray labels.
+
 ## [0.5.1] - 2026-11-22
 
 ### Added
