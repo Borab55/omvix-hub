@@ -6,12 +6,12 @@ use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::IO::DeviceIoControl;
-use windows::core::PCWSTR;
 
 const PAWNIO_DEVICE_PATH: &str = r"\\?\GLOBALROOT\Device\PawnIO";
 const IOCTL_PIO_LOAD_BINARY: u32 = (41394u32 << 16) | (0x821u32 << 2);
@@ -63,14 +63,10 @@ pub fn verify_signer_policy(
         ));
     }
     if subject.trim() != PAWNIO_SIGNER_SUBJECT {
-        return SignerCheckResult::Rejected(format!(
-            "Signer Subject mismatch: got `{subject}`"
-        ));
+        return SignerCheckResult::Rejected(format!("Signer Subject mismatch: got `{subject}`"));
     }
     if issuer.trim() != PAWNIO_SIGNER_ISSUER {
-        return SignerCheckResult::Rejected(format!(
-            "Signer Issuer mismatch: got `{issuer}`"
-        ));
+        return SignerCheckResult::Rejected(format!("Signer Issuer mismatch: got `{issuer}`"));
     }
     let clean_tp = thumbprint.trim();
     if !clean_tp.eq_ignore_ascii_case(PAWNIO_SIGNER_THUMBPRINT) {
@@ -337,7 +333,9 @@ fn try_migrate_legacy_module(bytes: &[u8], target: &Path) -> bool {
     let Some(parent) = target.parent() else {
         return false;
     };
-    if is_reparse_point(&paths::install_dir()) || is_reparse_point(parent) || is_reparse_point(target)
+    if is_reparse_point(&paths::install_dir())
+        || is_reparse_point(parent)
+        || is_reparse_point(target)
     {
         return false;
     }

@@ -1,4 +1,4 @@
-use crate::wmi_com::{WmiConnection, get_string, get_u32, get_u32_array};
+use crate::wmi_com::{get_string, get_u32, get_u32_array, WmiConnection};
 use omvix_core::{ConflictServiceInfo, Result, SecurityStatus, SystemIdentity};
 use std::path::Path;
 use windows::Win32::UI::Shell::IsUserAnAdmin;
@@ -128,8 +128,8 @@ pub fn collect_security_status() -> SecurityStatus {
         }
     }
 
-    let pawn_io_installed = Path::new(r"C:\Program Files\PawnIO\PawnIOUtil.exe").exists()
-        || check_pawnio_driver();
+    let pawn_io_installed =
+        Path::new(r"C:\Program Files\PawnIO\PawnIOUtil.exe").exists() || check_pawnio_driver();
 
     let undervolt_note = if hvci_running || vbs_status == Some(2) {
         "VBS / Memory Integrity (HVCI) is active: direct ring-0 MSR undervolting (0x150) is blocked by the Windows hypervisor. WMI/Win32 thermal, fan, boost, and battery limit controls remain available.".to_string()
@@ -205,10 +205,14 @@ mod tests {
     #[test]
     fn identifies_fan_and_thermal_conflict_services() {
         assert!(is_fan_thermal_conflict_service("HPOmenCap"));
-        assert!(is_fan_thermal_conflict_service("OmenCommandCenterBackground"));
+        assert!(is_fan_thermal_conflict_service(
+            "OmenCommandCenterBackground"
+        ));
         assert!(is_fan_thermal_conflict_service("OMENCapSvc"));
         assert!(is_fan_thermal_conflict_service("XTU3SERVICE"));
         assert!(!is_fan_thermal_conflict_service("hp-charge-limit-rs"));
-        assert!(!is_fan_thermal_conflict_service("HpTouchpointAnalyticsService"));
+        assert!(!is_fan_thermal_conflict_service(
+            "HpTouchpointAnalyticsService"
+        ));
     }
 }

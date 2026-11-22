@@ -74,7 +74,8 @@ pub fn format_telemetry_csv(rows: &[TelemetryCsvRow]) -> String {
         let _ = write!(
             out,
             "{},{:.2},",
-            r.timestamp_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            r.timestamp_utc
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             r.elapsed_s
         );
         push_opt_f32(&mut out, r.cpu_usage_pct, 1);
@@ -129,24 +130,28 @@ mod tests {
 
     #[test]
     fn formats_header_empty_none_cells_and_gpu_sleeping_flag() {
-        let mut s1 = TelemetrySnapshot::default();
-        s1.timestamp = Some(DateTime::from_timestamp(1_760_000_000, 0).unwrap());
-        s1.cpu_usage_pct = Some(12.34);
-        s1.cpu_temp_c = None;
-        s1.gpu_sleeping = true;
-        s1.fan_rpms = vec![2400];
-        s1.ac_connected = Some(false);
+        let s1 = TelemetrySnapshot {
+            timestamp: Some(DateTime::from_timestamp(1_760_000_000, 0).unwrap()),
+            cpu_usage_pct: Some(12.34),
+            cpu_temp_c: None,
+            gpu_sleeping: true,
+            fan_rpms: vec![2400],
+            ac_connected: Some(false),
+            ..Default::default()
+        };
 
-        let mut s2 = TelemetrySnapshot::default();
-        s2.timestamp = Some(DateTime::from_timestamp(1_760_000_001, 0).unwrap());
-        s2.cpu_temp_c = Some(64.5);
-        s2.gpu_sleeping = false;
-        s2.gpu_usage_pct = Some(88.0);
-        s2.gpu_temp_c = Some(71.0);
-        s2.gpu_power_w = Some(102.345);
-        s2.fan_rpms = vec![3800, 3900];
-        s2.battery_pct = Some(80);
-        s2.ac_connected = Some(true);
+        let s2 = TelemetrySnapshot {
+            timestamp: Some(DateTime::from_timestamp(1_760_000_001, 0).unwrap()),
+            cpu_temp_c: Some(64.5),
+            gpu_sleeping: false,
+            gpu_usage_pct: Some(88.0),
+            gpu_temp_c: Some(71.0),
+            gpu_power_w: Some(102.345),
+            fan_rpms: vec![3800, 3900],
+            battery_pct: Some(80),
+            ac_connected: Some(true),
+            ..Default::default()
+        };
 
         let rows = vec![
             TelemetryCsvRow::from_snapshot(&s1, 1.0),

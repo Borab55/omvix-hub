@@ -1,10 +1,10 @@
 use std::path::PathBuf;
+use windows::core::GUID;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{
-    FOLDERID_ProgramData, FOLDERID_ProgramFiles, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath,
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG,
 };
-use windows::core::GUID;
 
 fn known_folder_path(rfid: *const GUID) -> Option<PathBuf> {
     let pwstr =
@@ -65,10 +65,8 @@ mod tests {
         assert!(!pf.as_os_str().is_empty());
         assert!(!pd.as_os_str().is_empty());
         assert!(installed_gui_exe().ends_with(PathBuf::from("OmvixHub").join("omvix-hub.exe")));
-        assert!(
-            installed_service_exe()
-                .ends_with(PathBuf::from("OmvixHub").join("omvix-battery-svc.exe"))
-        );
+        assert!(installed_service_exe()
+            .ends_with(PathBuf::from("OmvixHub").join("omvix-battery-svc.exe")));
         assert!(pawnio_module_dir().ends_with(PathBuf::from("OmvixHub").join("pawnio")));
         assert!(omvix_program_data_dir().ends_with("OmvixHub"));
     }

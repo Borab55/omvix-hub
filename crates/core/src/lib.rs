@@ -19,16 +19,16 @@ pub mod updater;
 pub use app_profiles::{AppProfileRule, AppProfilesConfig};
 pub use battery_history::{BatteryHealthHistory, BatteryHealthRecord};
 pub use config::{AppConfig, BatteryProfile, CustomThemeConfig};
-pub use crash_guard::{CrashGuardState, SafeModeReason, crash_guard_path_for};
+pub use crash_guard::{crash_guard_path_for, CrashGuardState, SafeModeReason};
 pub use error::{OmvixError, Result};
 pub use history::{ChangeDomain, ChangeHistory, HardwareChangeEntry, RevertPayload};
-pub use telemetry_csv::TelemetryCsvRow;
 pub use i18n::I18n;
 pub use logging::{
     clear_logs, default_log_dir, init_logging, list_log_files, tail_logs, total_log_bytes,
     LogConfig, LogHandle, LogLevel, SizeRotatingWriter,
 };
 pub use models::*;
+pub use telemetry_csv::TelemetryCsvRow;
 pub use traits::*;
 pub use updater::{
     AuthenticodeInfo, ReleaseAsset, ReleaseInfo, SemVer, StagedUpdate, UpdateSignatureStatus,

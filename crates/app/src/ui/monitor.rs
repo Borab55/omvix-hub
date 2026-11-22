@@ -1,8 +1,8 @@
 use crate::theme::{
-    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, card_frame, pill_button, section_title,
-    status_badge,
+    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK,
+    STATUS_WARN,
 };
-use crate::ui::charts::{ChartSeries, telemetry_area_chart};
+use crate::ui::charts::{telemetry_area_chart, ChartSeries};
 use crate::ui::{default_telemetry_csv_path, show_file_in_folder};
 use crate::worker::{MetricStats, SharedState, WorkerCommand};
 use egui::{Color32, RichText, Ui};
@@ -75,7 +75,9 @@ pub fn render(
                 )
                 .clicked()
             {
-                on_cmd(WorkerCommand::ExportTelemetryCsv(default_telemetry_csv_path()));
+                on_cmd(WorkerCommand::ExportTelemetryCsv(
+                    default_telemetry_csv_path(),
+                ));
             }
         });
         ui.weak(i18n.t("monitor.ec_note"));
@@ -87,7 +89,10 @@ pub fn render(
                     i18n.t("monitor.csv_saved_label"),
                     csv_path.display()
                 ));
-                if ui.small_button(i18n.t("support_bundle.show_in_folder")).clicked() {
+                if ui
+                    .small_button(i18n.t("support_bundle.show_in_folder"))
+                    .clicked()
+                {
                     show_file_in_folder(csv_path);
                 }
             });
@@ -144,7 +149,8 @@ pub fn render(
                 ui.horizontal(|ui| {
                     if st.pawnio_installing {
                         ui.weak(i18n.t("monitor.installing_pawnio"));
-                    } else if pill_button(ui, &i18n.t("monitor.install_pawnio"), true, t).clicked() {
+                    } else if pill_button(ui, &i18n.t("monitor.install_pawnio"), true, t).clicked()
+                    {
                         on_cmd(WorkerCommand::InstallPawnIo);
                     }
                 });
@@ -168,16 +174,16 @@ pub fn render(
                         Some(reason) => {
                             status_badge(
                                 ui,
-                                &i18n.t_fmt(
-                                    "monitor.throttle_active_prefix",
-                                    &[("reason", reason)],
-                                ),
+                                &i18n
+                                    .t_fmt("monitor.throttle_active_prefix", &[("reason", reason)]),
                                 STATUS_WARN,
                             )
-                            .on_hover_text(i18n.t_fmt(
-                                "monitor.throttle_active_tooltip",
-                                &[("reason", reason)],
-                            ));
+                            .on_hover_text(
+                                i18n.t_fmt(
+                                    "monitor.throttle_active_tooltip",
+                                    &[("reason", reason)],
+                                ),
+                            );
                         }
                         None if st.telemetry.gpu_name.is_some() => {
                             status_badge(ui, &i18n.t("monitor.no_throttle"), STATUS_OK)
@@ -239,7 +245,11 @@ pub fn render(
         card_frame(t).show(&mut cols[0], |ui| {
             section_title(
                 ui,
-                format!("{} & {}", i18n.t("dashboard.fans"), i18n.t("dashboard.battery")),
+                format!(
+                    "{} & {}",
+                    i18n.t("dashboard.fans"),
+                    i18n.t("dashboard.battery")
+                ),
                 t,
             );
             let fans_str = if st.telemetry.fan_rpms.is_empty() {
@@ -256,7 +266,15 @@ pub fn render(
                             .get(i)
                             .copied()
                             .filter(|&m| m > 0)
-                            .map(|max_r| format!(" ({}%)", ((*rpm as f32 / max_r as f32) * 100.0).round().clamp(0.0, 100.0) as u32))
+                            .map(|max_r| {
+                                format!(
+                                    " ({}%)",
+                                    ((*rpm as f32 / max_r as f32) * 100.0)
+                                        .round()
+                                        .clamp(0.0, 100.0)
+                                        as u32
+                                )
+                            })
                             .unwrap_or_default();
                         format!("F{}: {rpm} RPM{pct}", i + 1)
                     })
@@ -298,7 +316,11 @@ pub fn render(
             } else {
                 0.0
             };
-            ui.label(RichText::new(format!("RAM: {used:.2} / {total:.2} GB")).size(15.5).strong());
+            ui.label(
+                RichText::new(format!("RAM: {used:.2} / {total:.2} GB"))
+                    .size(15.5)
+                    .strong(),
+            );
             ui.add(egui::ProgressBar::new(ratio).show_percentage());
 
             let dr = st

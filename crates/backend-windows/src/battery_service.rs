@@ -19,25 +19,25 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST;
-use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
 use windows::Win32::System::Services::{
     ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
-    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW,
-    QueryServiceConfigW, QueryServiceStatus, RegisterServiceCtrlHandlerExW, SC_HANDLE,
+    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
+    QueryServiceStatus, RegisterServiceCtrlHandlerExW, SetServiceStatus,
+    StartServiceCtrlDispatcherW, StartServiceW, QUERY_SERVICE_CONFIGW, SC_HANDLE,
     SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ACCEPT_POWEREVENT,
     SERVICE_ACCEPT_PRESHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
     SERVICE_CONFIG_DESCRIPTION, SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_POWEREVENT,
     SERVICE_CONTROL_PRESHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL,
     SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START_PENDING,
-    SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING, SERVICE_STOPPED,
-    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
-    StartServiceW,
+    SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOPPED, SERVICE_STOP_PENDING,
+    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
 };
-use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 pub const SERVICE_NAME: &str = "OmvixBatteryService";
 const DISPLAY_NAME: &str = "Omvix Hub Battery Care Service";
@@ -238,7 +238,9 @@ pub fn query_service_info() -> BatteryServiceInfo {
         data_dir_exists: d_dir.exists(),
     };
 
-    let Ok(scm_raw) = (unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }) else {
+    let Ok(scm_raw) =
+        (unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) })
+    else {
         return info;
     };
     let scm = ScHandleGuard(scm_raw);
@@ -382,8 +384,14 @@ fn wait_until_running(svc: SC_HANDLE) -> Result<()> {
 
 fn schedule_delete_on_reboot(path: &Path) -> bool {
     let wide = HSTRING::from(path.as_os_str());
-    unsafe { MoveFileExW(PCWSTR(wide.as_ptr()), PCWSTR::null(), MOVEFILE_DELAY_UNTIL_REBOOT) }
-        .is_ok()
+    unsafe {
+        MoveFileExW(
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    }
+    .is_ok()
 }
 
 pub fn install_or_update_service(cfg: &BatteryConfig) -> Result<String> {
@@ -441,9 +449,7 @@ pub fn install_or_update_service(cfg: &BatteryConfig) -> Result<String> {
                     PCWSTR(display_name.as_ptr()),
                 )
             }
-            .map_err(|e| {
-                OmvixError::WmiUnavailable(format!("ChangeServiceConfigW failed: {e}"))
-            })?;
+            .map_err(|e| OmvixError::WmiUnavailable(format!("ChangeServiceConfigW failed: {e}")))?;
             guard
         }
         Err(_) => {
@@ -472,7 +478,10 @@ pub fn install_or_update_service(cfg: &BatteryConfig) -> Result<String> {
         }
     };
 
-    let mut desc_utf16: Vec<u16> = DESCRIPTION.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut desc_utf16: Vec<u16> = DESCRIPTION
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let desc = SERVICE_DESCRIPTIONW {
         lpDescription: PWSTR(desc_utf16.as_mut_ptr()),
     };
@@ -543,7 +552,9 @@ pub fn restart_service() -> Result<String> {
 pub fn uninstall_service_zero_trace() -> Result<String> {
     require_admin("uninstall OmvixBatteryService")?;
 
-    if let Ok(scm_raw) = unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) } {
+    if let Ok(scm_raw) =
+        unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }
+    {
         let scm = ScHandleGuard(scm_raw);
         let svc_name = HSTRING::from(SERVICE_NAME);
         if let Ok(svc_raw) = unsafe {
@@ -586,10 +597,11 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
     let mut deferred_reboot = false;
     crate::autostart::remove_autostart_and_installed_copy();
     let pawnio_dir = paths::pawnio_module_dir();
-    if pawnio_dir.exists() && fs::remove_dir_all(&pawnio_dir).is_err() {
-        if schedule_delete_on_reboot(&pawnio_dir) {
-            deferred_reboot = true;
-        }
+    if pawnio_dir.exists()
+        && fs::remove_dir_all(&pawnio_dir).is_err()
+        && schedule_delete_on_reboot(&pawnio_dir)
+    {
+        deferred_reboot = true;
     }
 
     let exe_path = installed_exe();
@@ -604,10 +616,10 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
                 let _ = schedule_delete_on_reboot(&i_dir);
                 deferred_reboot = true;
             }
-        } else if while_in_use(|| fs::remove_file(&exe_path)).is_err() {
-            if schedule_delete_on_reboot(&exe_path) {
-                deferred_reboot = true;
-            }
+        } else if while_in_use(|| fs::remove_file(&exe_path)).is_err()
+            && schedule_delete_on_reboot(&exe_path)
+        {
+            deferred_reboot = true;
         }
     }
     if i_dir.exists() && fs::remove_dir_all(&i_dir).is_err() {
@@ -615,10 +627,11 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
     }
 
     let d_dir = data_dir();
-    if d_dir.exists() && while_in_use(|| fs::remove_dir_all(&d_dir)).is_err() {
-        if schedule_delete_on_reboot(&d_dir) {
-            deferred_reboot = true;
-        }
+    if d_dir.exists()
+        && while_in_use(|| fs::remove_dir_all(&d_dir)).is_err()
+        && schedule_delete_on_reboot(&d_dir)
+    {
+        deferred_reboot = true;
     }
 
     let msg = if deferred_reboot {
@@ -868,7 +881,9 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
                     }
                 };
                 let _ = battery_be.set_charge_mode(target);
-                daemon_log(&format!("System shutdown/preshutdown -> applied {target:?}"));
+                daemon_log(&format!(
+                    "System shutdown/preshutdown -> applied {target:?}"
+                ));
                 let _ = ack.send(());
                 return 0;
             }
@@ -920,7 +935,9 @@ mod tests {
 
     #[test]
     fn service_command_line_quotes_path_and_adds_flag() {
-        let cmd = service_command_line(Path::new(r"C:\Program Files\OmvixHub\omvix-battery-svc.exe"));
+        let cmd = service_command_line(Path::new(
+            r"C:\Program Files\OmvixHub\omvix-battery-svc.exe",
+        ));
         assert_eq!(
             cmd,
             r#""C:\Program Files\OmvixHub\omvix-battery-svc.exe" --battery-service"#

@@ -1,12 +1,10 @@
 use crate::theme::{
-    STATUS_ERR, STATUS_OK, accent_color, card_frame, pill_button, section_title, status_badge,
+    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK,
 };
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Ui};
-use omvix_core::app_profiles::{AppProfileRule, normalize_exe_name};
-use omvix_core::{
-    AppConfig, CpuBoostMode, FanCurvePreset, FanMode, I18n, PerformanceMode,
-};
+use omvix_core::app_profiles::{normalize_exe_name, AppProfileRule};
+use omvix_core::{AppConfig, CpuBoostMode, FanCurvePreset, FanMode, I18n, PerformanceMode};
 
 #[derive(Debug, Clone)]
 pub struct ProfilesDraftState {

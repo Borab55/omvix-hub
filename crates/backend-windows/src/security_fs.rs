@@ -4,25 +4,25 @@ use std::io;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
-use windows::Win32::Foundation::{BOOL, CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree};
+use windows::core::{HSTRING, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, BOOL, ERROR_SUCCESS, HANDLE, HLOCAL};
 use windows::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
-    SetNamedSecurityInfoW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SDDL_REVISION_1,
+    SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    ACL, AdjustTokenPrivileges, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
-    GetSecurityDescriptorOwner, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
+    AdjustTokenPrivileges, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+    LookupPrivilegeValueW, ACL, DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SE_TAKE_OWNERSHIP_NAME, SECURITY_ATTRIBUTES,
+    SECURITY_ATTRIBUTES, SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SE_TAKE_OWNERSHIP_NAME,
     TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DeleteFileW, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, GetFileAttributesW,
-    GetFileInformationByHandle, INVALID_FILE_ATTRIBUTES, RemoveDirectoryW,
+    CreateDirectoryW, DeleteFileW, GetFileAttributesW, GetFileInformationByHandle,
+    RemoveDirectoryW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, INVALID_FILE_ATTRIBUTES,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::core::{HSTRING, PCWSTR};
 
 /// Owner: `BUILTIN\Administrators` (`BA`).
 /// Protected DACL (`D:P`): `SYSTEM` full (`FA`), `Administrators` full (`FA`), `Users` read-only (`FR`) with inheritance (`OICI`).
@@ -32,9 +32,9 @@ struct LocalFreeSdGuard(PSECURITY_DESCRIPTOR);
 
 impl Drop for LocalFreeSdGuard {
     fn drop(&mut self) {
-        if !self.0.0.is_null() {
+        if !self.0 .0.is_null() {
             unsafe {
-                let _ = LocalFree(HLOCAL(self.0.0));
+                let _ = LocalFree(HLOCAL(self.0 .0));
             }
         }
     }
@@ -115,10 +115,15 @@ fn parse_program_data_sd() -> Result<(LocalFreeSdGuard, PSID, *const ACL)> {
     let mut dacl_present = BOOL::default();
     let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
     let mut dacl_defaulted = BOOL::default();
-    unsafe { GetSecurityDescriptorDacl(guard.0, &mut dacl_present, &mut dacl_ptr, &mut dacl_defaulted) }
-        .map_err(|e| {
-            OmvixError::PermissionDenied(format!("GetSecurityDescriptorDacl failed: {e}"))
-        })?;
+    unsafe {
+        GetSecurityDescriptorDacl(
+            guard.0,
+            &mut dacl_present,
+            &mut dacl_ptr,
+            &mut dacl_defaulted,
+        )
+    }
+    .map_err(|e| OmvixError::PermissionDenied(format!("GetSecurityDescriptorDacl failed: {e}")))?;
 
     if !dacl_present.as_bool() || dacl_ptr.is_null() {
         return Err(OmvixError::PermissionDenied(
@@ -325,7 +330,9 @@ mod tests {
         writeln!(f, "safe log entry").unwrap();
         drop(f);
         assert!(!is_reparse_point(&log_path));
-        assert!(fs::read_to_string(&log_path).unwrap().contains("safe log entry"));
+        assert!(fs::read_to_string(&log_path)
+            .unwrap()
+            .contains("safe log entry"));
 
         let _ = fs::remove_dir_all(&dir);
     }

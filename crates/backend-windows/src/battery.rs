@@ -1,5 +1,5 @@
-use crate::wmi_bios::{HpWmiBios, OutputSize, describe_wmi_return_code, format_hex};
-use crate::wmi_com::{WmiConnection, get_u32};
+use crate::wmi_bios::{describe_wmi_return_code, format_hex, HpWmiBios, OutputSize};
+use crate::wmi_com::{get_u32, WmiConnection};
 use omvix_core::{BatteryChargeMode, BatteryLimitBackend, BatteryStatus, OmvixError, Result};
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 
@@ -61,15 +61,15 @@ impl WindowsBatteryBackend {
                 .ok()
                 .and_then(|rows| rows.into_iter().next());
 
-            let charge_rate_w = status_row.as_ref().and_then(|o| {
+            let charge_rate_w = status_row.as_ref().map(|o| {
                 let c = get_u32(o, "ChargeRate").unwrap_or(0);
                 let d = get_u32(o, "DischargeRate").unwrap_or(0);
                 if c > 0 && c < 500_000 {
-                    Some(c as f32 / 1000.0)
+                    c as f32 / 1000.0
                 } else if d > 0 && d < 500_000 {
-                    Some(-(d as f32 / 1000.0))
+                    -(d as f32 / 1000.0)
                 } else {
-                    Some(0.0)
+                    0.0
                 }
             });
 
@@ -117,9 +117,8 @@ impl WindowsBatteryBackend {
 impl BatteryLimitBackend for WindowsBatteryBackend {
     fn get_battery_status(&self) -> Result<BatteryStatus> {
         let mut pwr = SYSTEM_POWER_STATUS::default();
-        unsafe { GetSystemPowerStatus(&mut pwr) }.map_err(|e| {
-            OmvixError::WmiUnavailable(format!("GetSystemPowerStatus failed: {e}"))
-        })?;
+        unsafe { GetSystemPowerStatus(&mut pwr) }
+            .map_err(|e| OmvixError::WmiUnavailable(format!("GetSystemPowerStatus failed: {e}")))?;
 
         let present = pwr.BatteryFlag != 255 && (pwr.BatteryFlag & 128) == 0;
         let ac_connected = pwr.ACLineStatus == 1;
@@ -206,10 +205,25 @@ mod tests {
 
     #[test]
     fn decodes_8c99_and_standard_charge_modes() {
-        assert_eq!(decode_charge_mode(&[0x04, 0xFF, 0x01, 0x00]), BatteryChargeMode::Inhibit);
-        assert_eq!(decode_charge_mode(&[0x00, 0x05, 0x00, 0x00]), BatteryChargeMode::Inhibit);
-        assert_eq!(decode_charge_mode(&[0x00, 0x03, 0x00, 0x00]), BatteryChargeMode::Hold);
-        assert_eq!(decode_charge_mode(&[0x02, 0xFF, 0x00, 0x00]), BatteryChargeMode::Hold);
-        assert_eq!(decode_charge_mode(&[0x00, 0x00, 0x00, 0x00]), BatteryChargeMode::Auto);
+        assert_eq!(
+            decode_charge_mode(&[0x04, 0xFF, 0x01, 0x00]),
+            BatteryChargeMode::Inhibit
+        );
+        assert_eq!(
+            decode_charge_mode(&[0x00, 0x05, 0x00, 0x00]),
+            BatteryChargeMode::Inhibit
+        );
+        assert_eq!(
+            decode_charge_mode(&[0x00, 0x03, 0x00, 0x00]),
+            BatteryChargeMode::Hold
+        );
+        assert_eq!(
+            decode_charge_mode(&[0x02, 0xFF, 0x00, 0x00]),
+            BatteryChargeMode::Hold
+        );
+        assert_eq!(
+            decode_charge_mode(&[0x00, 0x00, 0x00, 0x00]),
+            BatteryChargeMode::Auto
+        );
     }
 }

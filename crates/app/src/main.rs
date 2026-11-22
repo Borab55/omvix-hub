@@ -5,16 +5,16 @@ mod tray;
 mod ui;
 mod worker;
 
-use crate::tray::{TrayAction, TrayController, build_tray_icon_rgba};
+use crate::tray::{build_tray_icon_rgba, TrayAction, TrayController};
 use crate::ui::{Drawer, ExtraSubTab, FansPowerSubTab};
 use crate::worker::{BackgroundWorker, SharedState, WorkerCommand};
 use egui::Margin;
 use omvix_core::config::OmenKeyAction;
 use omvix_core::crash_guard::{
-    CrashGuardState, SafeModeReason, crash_guard_path_for, current_unix_secs,
-    resolve_startup_safe_mode,
+    crash_guard_path_for, current_unix_secs, resolve_startup_safe_mode, CrashGuardState,
+    SafeModeReason,
 };
-use omvix_core::{AppConfig, CustomThemeConfig, I18n, LogHandle, PerformanceMode, init_logging};
+use omvix_core::{init_logging, AppConfig, CustomThemeConfig, I18n, LogHandle, PerformanceMode};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
@@ -28,12 +28,10 @@ const DRAWER_SIZE: [f32; 2] = [632.0, 728.0];
 
 #[cfg(windows)]
 use omvix_windows::hotkeys::{
-    HotkeyBindError, ListenerHandle, spawn_global_hotkey_listener, spawn_omen_key_listener,
+    spawn_global_hotkey_listener, spawn_omen_key_listener, HotkeyBindError, ListenerHandle,
 };
 #[cfg(windows)]
-use omvix_windows::power_events::{
-    PowerEventHandle, SystemPowerEvent, spawn_power_event_listener,
-};
+use omvix_windows::power_events::{spawn_power_event_listener, PowerEventHandle, SystemPowerEvent};
 
 #[derive(Debug, Clone)]
 enum AppSignal {
@@ -91,9 +89,9 @@ struct SingleInstanceGuard(Option<isize>);
 #[cfg(windows)]
 impl SingleInstanceGuard {
     fn acquire() -> std::result::Result<Self, ()> {
-        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
-        use windows::Win32::System::Threading::CreateMutexW;
         use windows::core::{HSTRING, PCWSTR};
+        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
 
         let name = HSTRING::from("Local\\OmvixHubSingleInstance");
         let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }.map_err(|_| ())?;
@@ -126,10 +124,10 @@ impl Drop for SingleInstanceGuard {
 
 #[cfg(windows)]
 fn restore_existing_instance_window() {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
-    };
     use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
 
     let title = HSTRING::from("Omvix Hub");
     if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) } {
@@ -150,7 +148,7 @@ fn restore_existing_instance_window() {}
 fn win32_set_visible(hwnd_raw: isize, visible: bool) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+        SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
     };
 
     if hwnd_raw == 0 {
@@ -189,9 +187,14 @@ fn win32_post_close(hwnd_raw: isize) {
 fn win32_post_close(_hwnd_raw: isize) {}
 
 #[cfg(windows)]
-fn win32_visible_bounds(hwnd: windows::Win32::Foundation::HWND) -> Option<(windows::Win32::Foundation::RECT, windows::Win32::Foundation::RECT)> {
+fn win32_visible_bounds(
+    hwnd: windows::Win32::Foundation::HWND,
+) -> Option<(
+    windows::Win32::Foundation::RECT,
+    windows::Win32::Foundation::RECT,
+)> {
     use windows::Win32::Foundation::RECT;
-    use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
     use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
     let mut wr = RECT::default();
@@ -218,8 +221,8 @@ fn win32_visible_bounds(hwnd: windows::Win32::Foundation::HWND) -> Option<(windo
 fn win32_dock_bottom_right(hwnd_raw: isize) {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, SystemParametersInfoW,
+        SetWindowPos, SystemParametersInfoW, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE,
+        SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
     };
 
     if hwnd_raw == 0 {
@@ -280,7 +283,7 @@ fn win32_drawer_anchor_pos(
 ) -> Option<egui::Pos2> {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+        GetClientRect, SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
     };
 
     if hwnd_raw == 0 || !ppp.is_finite() || ppp <= 0.0 {
@@ -340,10 +343,10 @@ fn is_shift_held_at_startup() -> bool {
 
 #[cfg(windows)]
 fn try_shell_elevate_self(forward_safe: bool) -> std::result::Result<(), ()> {
+    use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    use windows::core::{HSTRING, PCWSTR};
 
     let Ok(exe) = std::env::current_exe() else {
         return Err(());
@@ -438,7 +441,9 @@ fn main() {
                 vec![format!("Failed reading config, restored defaults: {err}")],
             )
         });
-    if cfg.general.theme == "light" && cfg.general.custom_theme == CustomThemeConfig::preset_dark_slate() {
+    if cfg.general.theme == "light"
+        && cfg.general.custom_theme == CustomThemeConfig::preset_dark_slate()
+    {
         cfg.general.custom_theme = CustomThemeConfig::preset_clean_light();
     } else if cfg.general.custom_theme.is_legacy_bluish_dark_slate() {
         cfg.general.custom_theme = CustomThemeConfig::preset_dark_slate();
@@ -590,7 +595,11 @@ fn main() {
             }
 
             theme::configure_fonts(&cc.egui_ctx);
-            theme::apply_theme(&cc.egui_ctx, &cfg.general.custom_theme, cfg.general.font_scale_pct);
+            theme::apply_theme(
+                &cc.egui_ctx,
+                &cfg.general.custom_theme,
+                cfg.general.font_scale_pct,
+            );
             Ok(Box::new(OmvixApp::new(
                 cc.egui_ctx.clone(),
                 cfg,
@@ -724,7 +733,8 @@ impl OmvixApp {
                         wake_ctx.request_repaint();
                     }
                     TrayAction::SetPerformance(mode) => {
-                        let _ = _worker_clone_for_tray.send(WorkerCommand::SetPerformanceMode(mode));
+                        let _ =
+                            _worker_clone_for_tray.send(WorkerCommand::SetPerformanceMode(mode));
                         let _ = tray_tx.send(AppSignal::TrayPerfChanged(mode));
                         wake_ctx.request_repaint();
                     }
@@ -838,10 +848,10 @@ impl OmvixApp {
                 app.power_listener = Some(spawn_power_event_listener(move |ev| match ev {
                     SystemPowerEvent::Suspending => {
                         let (ack_tx, ack_rx) = mpsc::channel();
-                        if pwr_tx.send(WorkerCommand::SystemSuspending(ack_tx)).is_ok() {
-                            if ack_rx.recv_timeout(Duration::from_secs(3)).is_err() {
-                                tracing::warn!("SystemSuspending safety hook timed out after 3s");
-                            }
+                        if pwr_tx.send(WorkerCommand::SystemSuspending(ack_tx)).is_ok()
+                            && ack_rx.recv_timeout(Duration::from_secs(3)).is_err()
+                        {
+                            tracing::warn!("SystemSuspending safety hook timed out after 3s");
                         }
                     }
                     SystemPowerEvent::ShuttingDown => {
@@ -849,10 +859,9 @@ impl OmvixApp {
                         if pwr_tx
                             .send(WorkerCommand::SystemShuttingDown(ack_tx))
                             .is_ok()
+                            && ack_rx.recv_timeout(Duration::from_secs(3)).is_err()
                         {
-                            if ack_rx.recv_timeout(Duration::from_secs(3)).is_err() {
-                                tracing::warn!("SystemShuttingDown safety hook timed out after 3s");
-                            }
+                            tracing::warn!("SystemShuttingDown safety hook timed out after 3s");
                         }
                     }
                     SystemPowerEvent::Resumed => {
@@ -945,11 +954,7 @@ impl OmvixApp {
             );
             changed = true;
         } else if tab_prev {
-            self.open_drawer = Some(
-                self.open_drawer
-                    .map(|d| d.prev())
-                    .unwrap_or(Drawer::Extra),
-            );
+            self.open_drawer = Some(self.open_drawer.map(|d| d.prev()).unwrap_or(Drawer::Extra));
             changed = true;
         } else if alt_left || alt_right {
             match self.open_drawer {
@@ -1096,13 +1101,7 @@ impl OmvixApp {
     }
 
     fn cycle_performance_mode(&mut self) {
-        if self
-            .state
-            .lock()
-            .ok()
-            .and_then(|s| s.safe_mode)
-            .is_some()
-        {
+        if self.state.lock().ok().and_then(|s| s.safe_mode).is_some() {
             self.send_cmd(WorkerCommand::SetPerformanceMode(
                 self.cfg.thermal_fan.performance_mode,
             ));
@@ -1258,12 +1257,7 @@ impl OmvixApp {
                 guard.release();
             }
 
-            let in_safe_mode = self
-                .state
-                .lock()
-                .ok()
-                .and_then(|st| st.safe_mode)
-                .is_some();
+            let in_safe_mode = self.state.lock().ok().and_then(|st| st.safe_mode).is_some();
             if try_shell_elevate_self(in_safe_mode).is_ok() {
                 self.begin_quit(ctx);
                 return;
@@ -1358,11 +1352,7 @@ impl eframe::App for OmvixApp {
         }
         self.prev_focused = focused;
 
-        let snapshot_state = self
-            .state
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default();
+        let snapshot_state = self.state.lock().map(|s| s.clone()).unwrap_or_default();
 
         if snapshot_state.pending_update_relaunch.is_some() {
             let relaunch_path = self
@@ -1430,16 +1420,16 @@ impl eframe::App for OmvixApp {
                     "Background worker thread exited unexpectedly; attempting BIOS Auto fan restore"
                 );
                 #[cfg(windows)]
-                thread::spawn(|| {
-                    match omvix_windows::thermal_fan::restore_fan_auto_fresh_wmi() {
+                thread::spawn(
+                    || match omvix_windows::thermal_fan::restore_fan_auto_fresh_wmi() {
                         Ok(()) => {
                             tracing::warn!("Dead-worker recovery restored BIOS Auto fan control");
                         }
                         Err(err) => {
                             tracing::error!("Dead-worker Auto fan recovery failed: {err}");
                         }
-                    }
-                });
+                    },
+                );
             }
         }
 
@@ -1461,72 +1451,77 @@ impl eframe::App for OmvixApp {
         let mut open_profiles = false;
 
         // Main window ALWAYS renders fixed-size compact cockpit or onboarding wizard (zero resize/flicker)
-        egui::CentralPanel::default().frame(cockpit_frame).show(ctx, |ui| {
-            let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
-            let mut mark_save = || should_save = true;
-            if self.show_wizard {
-                self.open_drawer = None;
-                let res = ui::wizard::render(
-                    ui,
-                    &mut self.cfg,
-                    &snapshot_state,
-                    &mut self.i18n,
-                    &mut self.wizard,
-                    COMPACT_SIZE[0],
-                    &mut push_cmd,
-                    &mut mark_save,
-                );
-                if res.language_changed {
-                    if let Some(tray) = &mut self.tray {
-                        tray.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
+        egui::CentralPanel::default()
+            .frame(cockpit_frame)
+            .show(ctx, |ui| {
+                let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
+                let mut mark_save = || should_save = true;
+                if self.show_wizard {
+                    self.open_drawer = None;
+                    let res = ui::wizard::render(
+                        ui,
+                        &mut self.cfg,
+                        &snapshot_state,
+                        &mut self.i18n,
+                        &mut self.wizard,
+                        COMPACT_SIZE[0],
+                        &mut push_cmd,
+                        &mut mark_save,
+                    );
+                    if res.language_changed {
+                        if let Some(tray) = &mut self.tray {
+                            tray.update_labels(
+                                &self.i18n,
+                                self.window_visible.load(Ordering::Relaxed),
+                            );
+                        }
+                    }
+                    if res.restart_admin {
+                        should_restart_admin = true;
+                    }
+                    if res.skipped {
+                        self.cfg.general.first_run_completed = true;
+                        self.show_wizard = false;
+                        should_save = true;
+                        pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
+                    } else if res.finished {
+                        self.cfg.general.first_run_completed = true;
+                        self.show_wizard = false;
+                        should_save = true;
+                        pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
+                        if self.cfg.battery.enabled && snapshot_state.safe_mode.is_none() {
+                            pending_cmds.push(WorkerCommand::ApplyBatteryNow);
+                        }
+                    }
+                } else {
+                    let res = ui::cockpit::render(
+                        ui,
+                        &mut self.cfg,
+                        &snapshot_state,
+                        &self.i18n,
+                        self.open_drawer,
+                        COMPACT_SIZE[0],
+                        self.worker_dead,
+                        &mut self.config_warnings,
+                        &mut push_cmd,
+                        &mut mark_save,
+                    );
+                    toggle_drawer = res.toggle_drawer;
+                    open_extra = res.open_extra_subtab;
+                    if res.open_profiles {
+                        open_profiles = true;
+                    }
+                    if res.restart_admin {
+                        should_restart_admin = true;
+                    }
+                    if res.hide_to_tray {
+                        should_hide_to_tray = true;
+                    }
+                    if res.quit_app {
+                        should_quit = true;
                     }
                 }
-                if res.restart_admin {
-                    should_restart_admin = true;
-                }
-                if res.skipped {
-                    self.cfg.general.first_run_completed = true;
-                    self.show_wizard = false;
-                    should_save = true;
-                    pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
-                } else if res.finished {
-                    self.cfg.general.first_run_completed = true;
-                    self.show_wizard = false;
-                    should_save = true;
-                    pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
-                    if self.cfg.battery.enabled && snapshot_state.safe_mode.is_none() {
-                        pending_cmds.push(WorkerCommand::ApplyBatteryNow);
-                    }
-                }
-            } else {
-                let res = ui::cockpit::render(
-                    ui,
-                    &mut self.cfg,
-                    &snapshot_state,
-                    &self.i18n,
-                    self.open_drawer,
-                    COMPACT_SIZE[0],
-                    self.worker_dead,
-                    &mut self.config_warnings,
-                    &mut push_cmd,
-                    &mut mark_save,
-                );
-                toggle_drawer = res.toggle_drawer;
-                open_extra = res.open_extra_subtab;
-                if res.open_profiles {
-                    open_profiles = true;
-                }
-                if res.restart_admin {
-                    should_restart_admin = true;
-                }
-                if res.hide_to_tray {
-                    should_hide_to_tray = true;
-                }
-                if res.quit_app {
-                    should_quit = true;
-                }
-            }
-        });
+            });
 
         if open_profiles {
             self.fans_power_tab = FansPowerSubTab::Profiles;
@@ -1644,7 +1639,9 @@ impl eframe::App for OmvixApp {
                                             {
                                                 self.fans_power_tab = sub;
                                                 if sub == FansPowerSubTab::Profiles
-                                                    && snapshot_state.running_exes_snapshot.is_empty()
+                                                    && snapshot_state
+                                                        .running_exes_snapshot
+                                                        .is_empty()
                                                 {
                                                     pending_cmds.push(
                                                         WorkerCommand::RefreshRunningProcesses,
@@ -1774,7 +1771,7 @@ impl eframe::App for OmvixApp {
                                             &mut self.cfg,
                                             &self.i18n,
                                             &self.hotkey_bind_status,
-                                            &mut self.config_warnings,
+                                            &self.config_warnings,
                                             &mut push_cmd,
                                             &mut mark_save,
                                             &mut || should_rebind_hotkeys = true,
@@ -1812,7 +1809,8 @@ impl eframe::App for OmvixApp {
                                                     self.cfg.general.font_scale_pct,
                                                 );
                                             }
-                                            if res.dock_changed && self.cfg.general.dock_bottom_right
+                                            if res.dock_changed
+                                                && self.cfg.general.dock_bottom_right
                                             {
                                                 self.pending_dock_frames = 2;
                                                 ctx.request_repaint();

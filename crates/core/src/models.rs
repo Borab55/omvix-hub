@@ -98,14 +98,38 @@ impl Default for FanCurve {
     fn default() -> Self {
         Self {
             points: vec![
-                FanCurvePoint { temp_c: 35, speed_pct: 25 },
-                FanCurvePoint { temp_c: 45, speed_pct: 30 },
-                FanCurvePoint { temp_c: 55, speed_pct: 42 },
-                FanCurvePoint { temp_c: 65, speed_pct: 58 },
-                FanCurvePoint { temp_c: 72, speed_pct: 70 },
-                FanCurvePoint { temp_c: 80, speed_pct: 82 },
-                FanCurvePoint { temp_c: 88, speed_pct: 92 },
-                FanCurvePoint { temp_c: 95, speed_pct: 100 },
+                FanCurvePoint {
+                    temp_c: 35,
+                    speed_pct: 25,
+                },
+                FanCurvePoint {
+                    temp_c: 45,
+                    speed_pct: 30,
+                },
+                FanCurvePoint {
+                    temp_c: 55,
+                    speed_pct: 42,
+                },
+                FanCurvePoint {
+                    temp_c: 65,
+                    speed_pct: 58,
+                },
+                FanCurvePoint {
+                    temp_c: 72,
+                    speed_pct: 70,
+                },
+                FanCurvePoint {
+                    temp_c: 80,
+                    speed_pct: 82,
+                },
+                FanCurvePoint {
+                    temp_c: 88,
+                    speed_pct: 92,
+                },
+                FanCurvePoint {
+                    temp_c: 95,
+                    speed_pct: 100,
+                },
             ],
             hysteresis_c: 3,
         }
@@ -203,14 +227,38 @@ impl FanCurve {
     pub fn preset_quiet() -> Self {
         Self {
             points: vec![
-                FanCurvePoint { temp_c: 35, speed_pct: 18 },
-                FanCurvePoint { temp_c: 45, speed_pct: 22 },
-                FanCurvePoint { temp_c: 55, speed_pct: 30 },
-                FanCurvePoint { temp_c: 65, speed_pct: 40 },
-                FanCurvePoint { temp_c: 72, speed_pct: 48 },
-                FanCurvePoint { temp_c: 80, speed_pct: 55 },
-                FanCurvePoint { temp_c: 88, speed_pct: 74 },
-                FanCurvePoint { temp_c: 95, speed_pct: 92 },
+                FanCurvePoint {
+                    temp_c: 35,
+                    speed_pct: 18,
+                },
+                FanCurvePoint {
+                    temp_c: 45,
+                    speed_pct: 22,
+                },
+                FanCurvePoint {
+                    temp_c: 55,
+                    speed_pct: 30,
+                },
+                FanCurvePoint {
+                    temp_c: 65,
+                    speed_pct: 40,
+                },
+                FanCurvePoint {
+                    temp_c: 72,
+                    speed_pct: 48,
+                },
+                FanCurvePoint {
+                    temp_c: 80,
+                    speed_pct: 55,
+                },
+                FanCurvePoint {
+                    temp_c: 88,
+                    speed_pct: 74,
+                },
+                FanCurvePoint {
+                    temp_c: 95,
+                    speed_pct: 92,
+                },
             ],
             hysteresis_c: 4,
         }
@@ -223,14 +271,38 @@ impl FanCurve {
     pub fn preset_aggressive() -> Self {
         Self {
             points: vec![
-                FanCurvePoint { temp_c: 35, speed_pct: 35 },
-                FanCurvePoint { temp_c: 45, speed_pct: 45 },
-                FanCurvePoint { temp_c: 55, speed_pct: 60 },
-                FanCurvePoint { temp_c: 65, speed_pct: 75 },
-                FanCurvePoint { temp_c: 72, speed_pct: 86 },
-                FanCurvePoint { temp_c: 80, speed_pct: 94 },
-                FanCurvePoint { temp_c: 88, speed_pct: 100 },
-                FanCurvePoint { temp_c: 95, speed_pct: 100 },
+                FanCurvePoint {
+                    temp_c: 35,
+                    speed_pct: 35,
+                },
+                FanCurvePoint {
+                    temp_c: 45,
+                    speed_pct: 45,
+                },
+                FanCurvePoint {
+                    temp_c: 55,
+                    speed_pct: 60,
+                },
+                FanCurvePoint {
+                    temp_c: 65,
+                    speed_pct: 75,
+                },
+                FanCurvePoint {
+                    temp_c: 72,
+                    speed_pct: 86,
+                },
+                FanCurvePoint {
+                    temp_c: 80,
+                    speed_pct: 94,
+                },
+                FanCurvePoint {
+                    temp_c: 88,
+                    speed_pct: 100,
+                },
+                FanCurvePoint {
+                    temp_c: 95,
+                    speed_pct: 100,
+                },
             ],
             hysteresis_c: 2,
         }
@@ -239,14 +311,38 @@ impl FanCurve {
     pub fn preset_ogh_like() -> Self {
         Self {
             points: vec![
-                FanCurvePoint { temp_c: 35, speed_pct: 0 },
-                FanCurvePoint { temp_c: 45, speed_pct: 20 },
-                FanCurvePoint { temp_c: 55, speed_pct: 32 },
-                FanCurvePoint { temp_c: 65, speed_pct: 48 },
-                FanCurvePoint { temp_c: 72, speed_pct: 62 },
-                FanCurvePoint { temp_c: 80, speed_pct: 76 },
-                FanCurvePoint { temp_c: 88, speed_pct: 90 },
-                FanCurvePoint { temp_c: 95, speed_pct: 100 },
+                FanCurvePoint {
+                    temp_c: 35,
+                    speed_pct: 0,
+                },
+                FanCurvePoint {
+                    temp_c: 45,
+                    speed_pct: 20,
+                },
+                FanCurvePoint {
+                    temp_c: 55,
+                    speed_pct: 32,
+                },
+                FanCurvePoint {
+                    temp_c: 65,
+                    speed_pct: 48,
+                },
+                FanCurvePoint {
+                    temp_c: 72,
+                    speed_pct: 62,
+                },
+                FanCurvePoint {
+                    temp_c: 80,
+                    speed_pct: 76,
+                },
+                FanCurvePoint {
+                    temp_c: 88,
+                    speed_pct: 90,
+                },
+                FanCurvePoint {
+                    temp_c: 95,
+                    speed_pct: 100,
+                },
             ],
             hysteresis_c: 3,
         }
@@ -260,14 +356,20 @@ impl FanCurve {
             .iter()
             .map(|p| format!("{}:{}", p.temp_c, p.speed_pct))
             .collect();
-        format!("OMVIXCURVE1|{}|{}", self.hysteresis_c.clamp(1, 10), pairs.join(","))
+        format!(
+            "OMVIXCURVE1|{}|{}",
+            self.hysteresis_c.clamp(1, 10),
+            pairs.join(",")
+        )
     }
 
     /// Imports a fan curve from either an `OMVIXCURVE1|...` code or JSON, enforcing safety normalization.
     pub fn decode_share_code(raw: &str) -> crate::Result<Self> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err(crate::OmvixError::Config("Fan curve input is empty".to_string()));
+            return Err(crate::OmvixError::Config(
+                "Fan curve input is empty".to_string(),
+            ));
         }
 
         let mut curve = if trimmed.starts_with('{') {
@@ -277,7 +379,8 @@ impl FanCurve {
             let parts: Vec<&str> = trimmed.split('|').collect();
             if parts.len() != 3 || parts[0] != "OMVIXCURVE1" {
                 return Err(crate::OmvixError::Config(
-                    "Invalid curve format (expected OMVIXCURVE1|<hyst>|<t:s,...> or JSON)".to_string(),
+                    "Invalid curve format (expected OMVIXCURVE1|<hyst>|<t:s,...> or JSON)"
+                        .to_string(),
                 ));
             }
             let hysteresis_c: u8 = parts[1].trim().parse().map_err(|_| {
@@ -303,7 +406,10 @@ impl FanCurve {
                     "Imported fan curve must contain at least 2 points".to_string(),
                 ));
             }
-            Self { points, hysteresis_c }
+            Self {
+                points,
+                hysteresis_c,
+            }
         };
 
         if curve.points.len() < 2 {
@@ -327,12 +433,7 @@ pub enum FanCurvePreset {
 
 impl FanCurvePreset {
     pub fn all() -> &'static [FanCurvePreset] {
-        &[
-            Self::Quiet,
-            Self::Balanced,
-            Self::Aggressive,
-            Self::OghLike,
-        ]
+        &[Self::Quiet, Self::Balanced, Self::Aggressive, Self::OghLike]
     }
 
     pub fn to_curve(self) -> FanCurve {
@@ -414,7 +515,11 @@ pub struct RgbColor {
 
 impl Default for RgbColor {
     fn default() -> Self {
-        Self { r: 0, g: 168, b: 255 }
+        Self {
+            r: 0,
+            g: 168,
+            b: 255,
+        }
     }
 }
 
@@ -572,10 +677,22 @@ mod tests {
     fn fan_curve_normalize_enforces_monotonic_and_high_temp_floor() {
         let mut curve = FanCurve {
             points: vec![
-                FanCurvePoint { temp_c: 40, speed_pct: 40 },
-                FanCurvePoint { temp_c: 60, speed_pct: 25 },
-                FanCurvePoint { temp_c: 85, speed_pct: 10 },
-                FanCurvePoint { temp_c: 92, speed_pct: 45 },
+                FanCurvePoint {
+                    temp_c: 40,
+                    speed_pct: 40,
+                },
+                FanCurvePoint {
+                    temp_c: 60,
+                    speed_pct: 25,
+                },
+                FanCurvePoint {
+                    temp_c: 85,
+                    speed_pct: 10,
+                },
+                FanCurvePoint {
+                    temp_c: 92,
+                    speed_pct: 45,
+                },
             ],
             hysteresis_c: 20,
         };
@@ -592,12 +709,21 @@ mod tests {
         // Even if all points sit below 80°C, evaluating >= 80°C applies the 50% safety floor.
         let sub80 = FanCurve {
             points: vec![
-                FanCurvePoint { temp_c: 40, speed_pct: 10 },
-                FanCurvePoint { temp_c: 75, speed_pct: 20 },
+                FanCurvePoint {
+                    temp_c: 40,
+                    speed_pct: 10,
+                },
+                FanCurvePoint {
+                    temp_c: 75,
+                    speed_pct: 20,
+                },
             ],
             hysteresis_c: 3,
         };
-        assert_eq!(sub80.evaluate(82.0, 75.0, 20), FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+        assert_eq!(
+            sub80.evaluate(82.0, 75.0, 20),
+            FAN_CURVE_SAFETY_FLOOR_SPEED_PCT
+        );
     }
 
     #[test]
@@ -632,17 +758,30 @@ mod tests {
         assert!(FanCurve::decode_share_code("INVALID|3|40:20,80:80").is_err());
 
         // Importing an unsafe high-temp curve is normalized up to >= 50% at >= 80C
-        let unsafe_curve = FanCurve::decode_share_code("OMVIXCURVE1|3|40:30,90:10").expect("import unsafe");
-        assert_eq!(unsafe_curve.points[1].speed_pct, FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+        let unsafe_curve =
+            FanCurve::decode_share_code("OMVIXCURVE1|3|40:30,90:10").expect("import unsafe");
+        assert_eq!(
+            unsafe_curve.points[1].speed_pct,
+            FAN_CURVE_SAFETY_FLOOR_SPEED_PCT
+        );
     }
 
     #[test]
     fn fan_curve_preset_maps_to_expected_curves() {
         assert_eq!(FanCurvePreset::all().len(), 4);
         assert_eq!(FanCurvePreset::Quiet.to_curve(), FanCurve::preset_quiet());
-        assert_eq!(FanCurvePreset::Balanced.to_curve(), FanCurve::preset_balanced());
-        assert_eq!(FanCurvePreset::Aggressive.to_curve(), FanCurve::preset_aggressive());
-        assert_eq!(FanCurvePreset::OghLike.to_curve(), FanCurve::preset_ogh_like());
+        assert_eq!(
+            FanCurvePreset::Balanced.to_curve(),
+            FanCurve::preset_balanced()
+        );
+        assert_eq!(
+            FanCurvePreset::Aggressive.to_curve(),
+            FanCurve::preset_aggressive()
+        );
+        assert_eq!(
+            FanCurvePreset::OghLike.to_curve(),
+            FanCurve::preset_ogh_like()
+        );
     }
 
     #[test]

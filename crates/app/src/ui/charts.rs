@@ -1,5 +1,7 @@
-use crate::theme::{STATUS_WARN, accent_color, rgb};
-use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Shape, Stroke, StrokeKind, Ui, Vec2};
+use crate::theme::{accent_color, rgb, STATUS_WARN};
+use egui::{
+    Align2, Color32, CornerRadius, FontId, Pos2, Rect, Shape, Stroke, StrokeKind, Ui, Vec2,
+};
 use omvix_core::{BatteryHealthRecord, CustomThemeConfig, FanCurvePoint};
 
 pub struct ChartSeries<'a> {
@@ -81,10 +83,18 @@ pub fn telemetry_area_chart(
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
                 let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(9.0), egui::Sense::hover());
-                ui.painter()
-                    .circle_filled(dot_rect.center(), 4.0, s.color);
-                ui.label(egui::RichText::new(s.name).size(11.5).color(muted_text_color(t)));
-                ui.label(egui::RichText::new(latest).size(12.0).strong().color(s.color));
+                ui.painter().circle_filled(dot_rect.center(), 4.0, s.color);
+                ui.label(
+                    egui::RichText::new(s.name)
+                        .size(11.5)
+                        .color(muted_text_color(t)),
+                );
+                ui.label(
+                    egui::RichText::new(latest)
+                        .size(12.0)
+                        .strong()
+                        .color(s.color),
+                );
             });
         }
     });
@@ -156,7 +166,10 @@ pub fn telemetry_area_chart(
         let val = y_min + frac * y_span;
         let py = plot_rect.bottom() - frac * plot_rect.height();
         painter.line_segment(
-            [Pos2::new(plot_rect.left(), py), Pos2::new(plot_rect.right(), py)],
+            [
+                Pos2::new(plot_rect.left(), py),
+                Pos2::new(plot_rect.right(), py),
+            ],
             Stroke::new(1.0_f32, grid),
         );
         let label = if i == steps {
@@ -182,7 +195,10 @@ pub fn telemetry_area_chart(
     ] {
         let px = plot_rect.left() + frac * plot_rect.width();
         painter.line_segment(
-            [Pos2::new(px, plot_rect.top()), Pos2::new(px, plot_rect.bottom())],
+            [
+                Pos2::new(px, plot_rect.top()),
+                Pos2::new(px, plot_rect.bottom()),
+            ],
             Stroke::new(1.0_f32, grid),
         );
         let anchor = if frac <= 0.01 {
@@ -238,7 +254,8 @@ pub fn telemetry_area_chart(
     // Hover crosshair & multi-series tooltip
     if let Some(hover) = response.hover_pos() {
         if plot_rect.contains(hover) {
-            let norm_x = ((hover.x - plot_rect.left()) / plot_rect.width().max(1.0)).clamp(0.0, 1.0);
+            let norm_x =
+                ((hover.x - plot_rect.left()) / plot_rect.width().max(1.0)).clamp(0.0, 1.0);
             let hover_x = x_min + (norm_x as f64) * x_span;
             let cursor_x = plot_rect.left() + norm_x * plot_rect.width();
 
@@ -252,11 +269,11 @@ pub fn telemetry_area_chart(
 
             let mut lines = Vec::new();
             for s in series {
-                if let Some(&(sx, sy)) = s.points.iter().min_by(|a, b| {
-                    (a.0 - hover_x)
-                        .abs()
-                        .total_cmp(&(b.0 - hover_x).abs())
-                }) {
+                if let Some(&(sx, sy)) = s
+                    .points
+                    .iter()
+                    .min_by(|a, b| (a.0 - hover_x).abs().total_cmp(&(b.0 - hover_x).abs()))
+                {
                     let pt = map_pt(sx, sy);
                     painter.circle_filled(pt, 4.0, s.color);
                     painter.circle_stroke(pt, 4.0, Stroke::new(1.2_f32, bg));
@@ -276,15 +293,13 @@ pub fn telemetry_area_chart(
                 } else {
                     Align2::RIGHT_TOP
                 };
-                let galley = painter.layout_no_wrap(
-                    text,
-                    FontId::proportional(11.0),
-                    Color32::WHITE,
-                );
+                let galley =
+                    painter.layout_no_wrap(text, FontId::proportional(11.0), Color32::WHITE);
                 let pill_rect = match anchor {
-                    Align2::LEFT_TOP => {
-                        Rect::from_min_size(text_pos - Vec2::new(4.0, 2.0), galley.size() + Vec2::new(8.0, 4.0))
-                    }
+                    Align2::LEFT_TOP => Rect::from_min_size(
+                        text_pos - Vec2::new(4.0, 2.0),
+                        galley.size() + Vec2::new(8.0, 4.0),
+                    ),
                     _ => Rect::from_min_size(
                         Pos2::new(text_pos.x - galley.size().x - 4.0, text_pos.y - 2.0),
                         galley.size() + Vec2::new(8.0, 4.0),
@@ -374,7 +389,10 @@ pub fn interactive_fan_curve(
         Color32::from_rgba_unmultiplied(239, 68, 68, 22),
     );
     painter.line_segment(
-        [Pos2::new(safe_x, safe_y), Pos2::new(plot_rect.right(), safe_y)],
+        [
+            Pos2::new(safe_x, safe_y),
+            Pos2::new(plot_rect.right(), safe_y),
+        ],
         Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(239, 68, 68, 120)),
     );
     painter.text(
@@ -408,7 +426,10 @@ pub fn interactive_fan_curve(
     for pct in [0, 20, 40, 60, 80, 100] {
         let py = pct_to_y(pct as f32);
         painter.line_segment(
-            [Pos2::new(plot_rect.left(), py), Pos2::new(plot_rect.right(), py)],
+            [
+                Pos2::new(plot_rect.left(), py),
+                Pos2::new(plot_rect.right(), py),
+            ],
             Stroke::new(1.0_f32, grid),
         );
         painter.text(
@@ -424,7 +445,10 @@ pub fn interactive_fan_curve(
     for temp in [30, 40, 50, 60, 70, 80, 90, 100] {
         let px = temp_to_x(temp as f32);
         painter.line_segment(
-            [Pos2::new(px, plot_rect.top()), Pos2::new(px, plot_rect.bottom())],
+            [
+                Pos2::new(px, plot_rect.top()),
+                Pos2::new(px, plot_rect.bottom()),
+            ],
             Stroke::new(1.0_f32, grid),
         );
         painter.text(
@@ -444,7 +468,8 @@ pub fn interactive_fan_curve(
         if let Some(pos) = response.interact_pointer_pos() {
             let mut best: Option<(usize, f32)> = None;
             for (i, pt) in points.iter().enumerate() {
-                let p_screen = Pos2::new(temp_to_x(pt.temp_c as f32), pct_to_y(pt.speed_pct as f32));
+                let p_screen =
+                    Pos2::new(temp_to_x(pt.temp_c as f32), pct_to_y(pt.speed_pct as f32));
                 let dist = pos.distance(p_screen);
                 if best.is_none_or(|(_, bd)| dist < bd) {
                     best = Some((i, dist));
@@ -541,7 +566,10 @@ pub fn interactive_fan_curve(
             poly.push(Pos2::new(temp_to_x(30.0), pct_to_y(first.speed_pct as f32)));
         }
         for pt in points.iter() {
-            poly.push(Pos2::new(temp_to_x(pt.temp_c as f32), pct_to_y(pt.speed_pct as f32)));
+            poly.push(Pos2::new(
+                temp_to_x(pt.temp_c as f32),
+                pct_to_y(pt.speed_pct as f32),
+            ));
         }
         if last.temp_c < 100 {
             poly.push(Pos2::new(temp_to_x(100.0), pct_to_y(last.speed_pct as f32)));
@@ -575,7 +603,12 @@ pub fn interactive_fan_curve(
             ],
             Stroke::new(
                 1.5_f32,
-                Color32::from_rgba_unmultiplied(STATUS_WARN.r(), STATUS_WARN.g(), STATUS_WARN.b(), 140),
+                Color32::from_rgba_unmultiplied(
+                    STATUS_WARN.r(),
+                    STATUS_WARN.g(),
+                    STATUS_WARN.b(),
+                    140,
+                ),
             ),
         );
         let interp_pct = eval_linear_pct(points, clamped_t);
@@ -705,12 +738,17 @@ pub fn battery_health_chart(
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             for (lbl, val, color) in [
-                (health_label, format!("{:.1}%", latest.health_pct), health_color),
+                (
+                    health_label,
+                    format!("{:.1}%", latest.health_pct),
+                    health_color,
+                ),
                 (wear_label, format!("{:.1}%", latest.wear_pct), wear_color),
             ] {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
-                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(9.0), egui::Sense::hover());
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(Vec2::splat(9.0), egui::Sense::hover());
                     ui.painter().circle_filled(dot_rect.center(), 4.0, color);
                     ui.label(egui::RichText::new(lbl).size(11.5).color(axis_text));
                     ui.label(egui::RichText::new(val).size(12.0).strong().color(color));
@@ -745,7 +783,10 @@ pub fn battery_health_chart(
         let frac = pct as f32 / 100.0;
         let py = plot_rect.bottom() - frac * plot_rect.height();
         painter.line_segment(
-            [Pos2::new(plot_rect.left(), py), Pos2::new(plot_rect.right(), py)],
+            [
+                Pos2::new(plot_rect.left(), py),
+                Pos2::new(plot_rect.right(), py),
+            ],
             Stroke::new(1.0_f32, grid),
         );
         painter.text(
@@ -781,8 +822,14 @@ pub fn battery_health_chart(
         .collect();
 
     if health_pts.len() >= 2 {
-        painter.add(Shape::line(health_pts.clone(), Stroke::new(2.2_f32, health_color)));
-        painter.add(Shape::line(wear_pts.clone(), Stroke::new(2.0_f32, wear_color)));
+        painter.add(Shape::line(
+            health_pts.clone(),
+            Stroke::new(2.2_f32, health_color),
+        ));
+        painter.add(Shape::line(
+            wear_pts.clone(),
+            Stroke::new(2.0_f32, wear_color),
+        ));
     }
     for (p_h, p_w) in health_pts.iter().zip(wear_pts.iter()) {
         painter.circle_filled(*p_h, 3.5, health_color);
@@ -826,14 +873,17 @@ pub fn battery_health_chart(
             let nearest_idx = if count <= 1 {
                 0
             } else {
-                let norm = ((hover.x - plot_rect.left()) / plot_rect.width().max(1.0))
-                    .clamp(0.0, 1.0);
+                let norm =
+                    ((hover.x - plot_rect.left()) / plot_rect.width().max(1.0)).clamp(0.0, 1.0);
                 ((norm * (count - 1) as f32).round() as usize).min(count - 1)
             };
             let rec = &records[nearest_idx];
             let px = map_x(nearest_idx);
             painter.line_segment(
-                [Pos2::new(px, plot_rect.top()), Pos2::new(px, plot_rect.bottom())],
+                [
+                    Pos2::new(px, plot_rect.top()),
+                    Pos2::new(px, plot_rect.bottom()),
+                ],
                 Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(220, 225, 235, 110)),
             );
             painter.circle_filled(Pos2::new(px, map_y(rec.health_pct)), 5.0, health_color);
@@ -851,8 +901,10 @@ pub fn battery_health_chart(
                 painter.layout_no_wrap(tip_txt, FontId::proportional(10.8), Color32::WHITE);
             let pad = Vec2::new(7.0, 3.0);
             let pill_w = galley.size().x + pad.x * 2.0;
-            let pill_x = (px - pill_w * 0.5)
-                .clamp(plot_rect.left() + 2.0, (plot_rect.right() - pill_w - 2.0).max(plot_rect.left() + 2.0));
+            let pill_x = (px - pill_w * 0.5).clamp(
+                plot_rect.left() + 2.0,
+                (plot_rect.right() - pill_w - 2.0).max(plot_rect.left() + 2.0),
+            );
             let pill = Rect::from_min_size(
                 Pos2::new(pill_x, plot_rect.top() + 4.0),
                 galley.size() + pad * 2.0,

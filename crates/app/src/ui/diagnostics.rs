@@ -1,6 +1,4 @@
-use crate::theme::{
-    STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge,
-};
+use crate::theme::{card_frame, pill_button, section_title, status_badge, STATUS_OK, STATUS_WARN};
 use crate::ui::{default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Ui};
@@ -31,7 +29,9 @@ pub fn render(
         };
         ui.add_enabled_ui(!st.support_bundle_busy, |ui| {
             if pill_button(ui, &bundle_lbl, true, t).clicked() {
-                on_cmd(WorkerCommand::CreateSupportBundle(default_support_bundle_path()));
+                on_cmd(WorkerCommand::CreateSupportBundle(
+                    default_support_bundle_path(),
+                ));
             }
         });
     });
@@ -63,7 +63,10 @@ pub fn render(
                     on_cmd(WorkerCommand::ClearChangeHistory);
                 }
                 if ui
-                    .add_enabled(has_entries, egui::Button::new(i18n.t("history.undo_latest")))
+                    .add_enabled(
+                        has_entries,
+                        egui::Button::new(i18n.t("history.undo_latest")),
+                    )
                     .clicked()
                 {
                     on_cmd(WorkerCommand::UndoLastChange);
@@ -104,7 +107,10 @@ pub fn render(
                 .spacing([20.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("Model");
-                    ui.label(format!("{} ({})", diag.identity.model, diag.identity.system_family));
+                    ui.label(format!(
+                        "{} ({})",
+                        diag.identity.model, diag.identity.system_family
+                    ));
                     ui.end_row();
 
                     ui.label(i18n.t("diagnostics.board_id"));
@@ -119,7 +125,10 @@ pub fn render(
                     if let Some(b) = &diag.matched_board {
                         ui.label(format!(
                             "{} | {:?} | MUX={} | Kbd={:?}",
-                            b.marketing_name, b.thermal_scheme, b.expected_has_mux, b.expected_keyboard
+                            b.marketing_name,
+                            b.thermal_scheme,
+                            b.expected_has_mux,
+                            b.expected_keyboard
                         ));
                     } else {
                         ui.label("Unknown board (using safe fallback)");
@@ -156,7 +165,10 @@ pub fn render(
                             STATUS_OK
                         };
                         status_badge(ui, &svc.status, color);
-                        ui.label(format!("{} ({}) — {}", svc.service_name, svc.category, svc.display_name));
+                        ui.label(format!(
+                            "{} ({}) — {}",
+                            svc.service_name, svc.category, svc.display_name
+                        ));
                     });
                 }
             }

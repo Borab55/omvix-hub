@@ -1,15 +1,13 @@
 use crate::theme::{
-    STATUS_ERR, STATUS_OK, STATUS_WARN, accent_color, card_frame, pill_button, section_title,
-    status_badge,
+    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK,
+    STATUS_WARN,
 };
 use crate::ui::charts::battery_health_chart;
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
-use omvix_core::{
-    AppConfig, BatteryChargeMode, BatteryProfile, BatteryServiceState, I18n,
-};
+use omvix_core::{AppConfig, BatteryChargeMode, BatteryProfile, BatteryServiceState, I18n};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -170,11 +168,7 @@ pub fn render(
     card_frame(t).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             section_title(ui, i18n.t("battery.health_history_title"), t);
-            status_badge(
-                ui,
-                &st.battery_health_history.len().to_string(),
-                accent,
-            );
+            status_badge(ui, &st.battery_health_history.len().to_string(), accent);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(i18n.t("battery.log_snapshot_now")).clicked() {
                     on_cmd(WorkerCommand::RecordBatteryHealthNow);
@@ -348,7 +342,11 @@ pub fn render(
             };
             let mut candidate = base.clone();
             let mut n = 2usize;
-            while cfg.battery.custom_profiles.iter().any(|p| p.id == candidate)
+            while cfg
+                .battery
+                .custom_profiles
+                .iter()
+                .any(|p| p.id == candidate)
                 || BatteryProfile::builtins().iter().any(|p| p.id == candidate)
             {
                 candidate = format!("{base}-{n}");
@@ -432,9 +430,8 @@ pub fn render(
         }
         ui.horizontal(|ui| {
             ui.label(i18n.t("battery.start_threshold"));
-            let start_resp = ui.add(
-                Slider::new(&mut cfg.battery.start_threshold_pct, 40..=max_start).suffix("%"),
-            );
+            let start_resp = ui
+                .add(Slider::new(&mut cfg.battery.start_threshold_pct, 40..=max_start).suffix("%"));
             if start_resp.changed() {
                 cfg.battery.active_profile_id = None;
             }
@@ -485,7 +482,10 @@ pub fn render(
 
         if st.battery_service.state == BatteryServiceState::Running {
             ui.add_space(4.0);
-            ui.colored_label(STATUS_OK, RichText::new(i18n.t("battery.service_active_sync_note")).size(11.5));
+            ui.colored_label(
+                STATUS_OK,
+                RichText::new(i18n.t("battery.service_active_sync_note")).size(11.5),
+            );
         }
     });
 
@@ -530,12 +530,14 @@ pub fn render(
                 ui.label(i18n.t("battery.service_exe_path"));
                 ui.horizontal_wrapped(|ui| {
                     ui.monospace(exe_display);
-                    if svc.exe_exists {
-                        if ui.small_button(i18n.t("battery.service_open_folder")).clicked() {
-                            #[cfg(windows)]
-                            if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
-                                let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
-                            }
+                    if svc.exe_exists
+                        && ui
+                            .small_button(i18n.t("battery.service_open_folder"))
+                            .clicked()
+                    {
+                        #[cfg(windows)]
+                        if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
+                            let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
                         }
                     }
                 });
@@ -544,14 +546,16 @@ pub fn render(
                 ui.label(i18n.t("battery.service_data_path"));
                 ui.horizontal_wrapped(|ui| {
                     ui.monospace(&svc.data_dir_path);
-                    if svc.data_dir_exists {
-                        if ui.small_button(i18n.t("battery.service_open_folder")).clicked() {
-                            #[cfg(windows)]
-                            {
-                                let _ = std::process::Command::new("explorer.exe")
-                                    .arg(&svc.data_dir_path)
-                                    .spawn();
-                            }
+                    if svc.data_dir_exists
+                        && ui
+                            .small_button(i18n.t("battery.service_open_folder"))
+                            .clicked()
+                    {
+                        #[cfg(windows)]
+                        {
+                            let _ = std::process::Command::new("explorer.exe")
+                                .arg(&svc.data_dir_path)
+                                .spawn();
                         }
                     }
                 });
@@ -583,19 +587,20 @@ pub fn render(
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                         on_cmd(WorkerCommand::InstallBatteryService);
                     }
-                    if svc.exe_exists || svc.data_dir_exists {
-                        if ui
-                            .button(RichText::new(i18n.t("battery.service_clean_leftovers")).color(STATUS_ERR))
+                    if (svc.exe_exists || svc.data_dir_exists)
+                        && ui
+                            .button(
+                                RichText::new(i18n.t("battery.service_clean_leftovers"))
+                                    .color(STATUS_ERR),
+                            )
                             .clicked()
-                        {
-                            on_cmd(WorkerCommand::UninstallBatteryServiceZeroTrace);
-                        }
+                    {
+                        on_cmd(WorkerCommand::UninstallBatteryServiceZeroTrace);
                     }
                 });
             } else {
                 ui.horizontal_wrapped(|ui| {
-                    if pill_button(ui, &i18n.t("battery.service_update_sync"), false, t).clicked()
-                    {
+                    if pill_button(ui, &i18n.t("battery.service_update_sync"), false, t).clicked() {
                         draft.confirm_uninstall_service = false;
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -628,7 +633,9 @@ pub fn render(
                         draft.confirm_uninstall_service = true;
                     }
                 } else {
-                    ui.weak(RichText::new(i18n.t("battery.service_uninstall_confirm_desc")).size(11.0));
+                    ui.weak(
+                        RichText::new(i18n.t("battery.service_uninstall_confirm_desc")).size(11.0),
+                    );
                     ui.horizontal_wrapped(|ui| {
                         if ui
                             .button(

@@ -131,7 +131,8 @@ impl ZipArchiveBuilder {
             self.buf.extend_from_slice(&0u16.to_le_bytes()); // disk start
             self.buf.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
             self.buf.extend_from_slice(&0u32.to_le_bytes()); // external attrs
-            self.buf.extend_from_slice(&entry.local_offset.to_le_bytes());
+            self.buf
+                .extend_from_slice(&entry.local_offset.to_le_bytes());
             self.buf.extend_from_slice(name_bytes);
         }
 
@@ -191,7 +192,17 @@ pub fn redact_user_paths(input: &str) -> String {
                 .find(|&(_, ch)| {
                     matches!(
                         ch,
-                        '\\' | '/' | '"' | '\'' | ',' | ';' | ')' | ']' | '>' | '\r' | '\n' | '\t'
+                        '\\' | '/'
+                            | '"'
+                            | '\''
+                            | ','
+                            | ';'
+                            | ')'
+                            | ']'
+                            | '>'
+                            | '\r'
+                            | '\n'
+                            | '\t'
                             | ' '
                     )
                 })
@@ -233,7 +244,11 @@ pub fn read_tail_utf8(path: &Path, max_bytes: usize) -> Option<String> {
     let mut text = String::from_utf8_lossy(&raw[start..]).into_owned();
     if truncated {
         if let Some(nl) = text.find('\n') {
-            text = format!("...[truncated to last {} KiB]...\n{}", max_bytes / 1024, &text[nl + 1..]);
+            text = format!(
+                "...[truncated to last {} KiB]...\n{}",
+                max_bytes / 1024,
+                &text[nl + 1..]
+            );
         }
     }
     Some(text)
@@ -380,7 +395,10 @@ mod tests {
 
         // Ends with 22-byte End of Central Directory PK\x05\x06
         let eocd_start = bytes.len() - 22;
-        assert_eq!(&bytes[eocd_start..eocd_start + 4], &0x0605_4b50u32.to_le_bytes());
+        assert_eq!(
+            &bytes[eocd_start..eocd_start + 4],
+            &0x0605_4b50u32.to_le_bytes()
+        );
         let entry_count = u16::from_le_bytes([bytes[eocd_start + 10], bytes[eocd_start + 11]]);
         assert_eq!(entry_count, 2);
 
@@ -397,7 +415,10 @@ mod tests {
             bytes[eocd_start + 19],
         ]) as usize;
         assert_eq!(cd_offset + cd_size, eocd_start);
-        assert_eq!(&bytes[cd_offset..cd_offset + 4], &0x0201_4b50u32.to_le_bytes());
+        assert_eq!(
+            &bytes[cd_offset..cd_offset + 4],
+            &0x0201_4b50u32.to_le_bytes()
+        );
 
         // Check stored filename & payload for first entry
         let name_len = u16::from_le_bytes([bytes[26], bytes[27]]) as usize;

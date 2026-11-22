@@ -46,7 +46,9 @@ const KNOWN_BOARDS: &[BoardProfile] = &[
         expected_has_mux: false,
         expected_keyboard: KeyboardType::WhiteBacklight,
         expected_charge_limit: true,
-        notes: Cow::Borrowed("2022 Victus 16 series (uses 0x00/0x01/0x02 or Victus thermal profile)."),
+        notes: Cow::Borrowed(
+            "2022 Victus 16 series (uses 0x00/0x01/0x02 or Victus thermal profile).",
+        ),
     },
     BoardProfile {
         board_id: Cow::Borrowed("8A4F"),

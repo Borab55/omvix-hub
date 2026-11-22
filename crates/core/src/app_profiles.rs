@@ -330,7 +330,9 @@ mod tests {
         let mut alt_baseline = sample_baseline();
         alt_baseline.performance_mode = PerformanceMode::Quiet;
         assert_eq!(
-            engine.evaluate(&cfg, &set_of(&["browser.exe", "heavy.exe"]), || alt_baseline),
+            engine.evaluate(&cfg, &set_of(&["browser.exe", "heavy.exe"]), || {
+                alt_baseline
+            }),
             AppProfileTransition::Activate { rule: high }
         );
 

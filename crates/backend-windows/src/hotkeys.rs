@@ -1,15 +1,17 @@
-use crate::wmi_com::{WmiConnection, get_u32};
+use crate::wmi_com::{get_u32, WmiConnection};
 use omvix_core::{OmvixError, Result};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::System::Wmi::{IWbemClassObject, WBEM_E_ACCESS_DENIED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, PostThreadMessageW, WM_HOTKEY, WM_QUIT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetMessageW, PostThreadMessageW, MSG, WM_HOTKEY, WM_QUIT,
+};
 
 const OMEN_KEY_EVENT_DATA: u32 = 8613; // 0x21A5
 pub const WIN32_ERR_HOTKEY_ALREADY_REGISTERED: u32 = 1409;
@@ -201,8 +203,7 @@ where
         parse_shortcut(spec).map_err(|e| HotkeyBindError::InvalidSyntax(e.to_string()))?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
-    let (tid_tx, tid_rx) =
-        std::sync::mpsc::channel::<std::result::Result<u32, HotkeyBindError>>();
+    let (tid_tx, tid_rx) = std::sync::mpsc::channel::<std::result::Result<u32, HotkeyBindError>>();
     let spec_owned = spec.to_string();
 
     let join = thread::spawn(move || {
@@ -233,12 +234,10 @@ where
         }
     });
 
-    let tid = tid_rx
-        .recv()
-        .map_err(|e| HotkeyBindError::OsError {
-            shortcut: spec.to_string(),
-            message: format!("Hotkey thread failed to start: {e}"),
-        })??;
+    let tid = tid_rx.recv().map_err(|e| HotkeyBindError::OsError {
+        shortcut: spec.to_string(),
+        message: format!("Hotkey thread failed to start: {e}"),
+    })??;
 
     Ok(ListenerHandle {
         stop,

@@ -1,20 +1,22 @@
 use crate::emi::CpuEmiReader;
 use crate::pawnio::PawnIoCpuTempReader;
 use crate::wmi_bios::{HpWmiBios, OutputSize};
-use crate::wmi_com::{WmiConnection, get_u32};
+use crate::wmi_com::{get_u32, WmiConnection};
 use chrono::Utc;
-use nvml_wrapper::Nvml;
 use nvml_wrapper::bitmasks::device::ThrottleReasons;
 use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState, TemperatureSensor};
+use nvml_wrapper::Nvml;
 use omvix_core::thermal::DEFAULT_MAX_FAN_LEVEL;
 use omvix_core::{Result, TelemetryBackend, TelemetrySnapshot};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use sysinfo::{CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
+use sysinfo::{
+    CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System,
+};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    DIGCF_PRESENT, GUID_DEVCLASS_DISPLAY, SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList,
-    SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
-    SetupDiGetDevicePropertyW,
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+    SetupDiGetDeviceInstanceIdW, SetupDiGetDevicePropertyW, DIGCF_PRESENT, GUID_DEVCLASS_DISPLAY,
+    SP_DEVINFO_DATA,
 };
 use windows::Win32::Devices::Properties::{DEVPKEY_Device_PowerData, DEVPROPTYPE};
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
@@ -107,9 +109,9 @@ pub fn parse_cm_power_data_state(buf: &[u8]) -> GpuPowerState {
 /// Queries the NVIDIA display adapter's PnP D-state via SetupAPI (`DEVPKEY_Device_PowerData`).
 /// Reading PnP metadata from Windows device manager state never wakes a GPU in RTD3/D3cold sleep.
 pub fn query_nvidia_pnp_power_state() -> GpuPowerState {
-    let Ok(hdev) = (unsafe {
-        SetupDiGetClassDevsW(Some(&GUID_DEVCLASS_DISPLAY), None, None, DIGCF_PRESENT)
-    }) else {
+    let Ok(hdev) =
+        (unsafe { SetupDiGetClassDevsW(Some(&GUID_DEVCLASS_DISPLAY), None, None, DIGCF_PRESENT) })
+    else {
         return GpuPowerState::Unknown;
     };
 
@@ -123,8 +125,7 @@ pub fn query_nvidia_pnp_power_state() -> GpuPowerState {
             break;
         }
         let mut id_buf = [0u16; 256];
-        if unsafe { SetupDiGetDeviceInstanceIdW(hdev, &dev_info, Some(&mut id_buf), None) }
-            .is_err()
+        if unsafe { SetupDiGetDeviceInstanceIdW(hdev, &dev_info, Some(&mut id_buf), None) }.is_err()
         {
             continue;
         }
@@ -449,12 +450,16 @@ impl GpuSampleSmoother {
             gpu_name: self.cached_name.clone(),
             gpu_sleeping: false,
             gpu_temp_c: self.temp_c.update(raw.temp_c, Self::MAX_TRANSIENT_MISSES),
-            gpu_usage_pct: self.usage_pct.update(raw.usage_pct, Self::MAX_TRANSIENT_MISSES),
+            gpu_usage_pct: self
+                .usage_pct
+                .update(raw.usage_pct, Self::MAX_TRANSIENT_MISSES),
             gpu_power_w: self.power_w.update(raw.power_w, Self::MAX_TRANSIENT_MISSES),
             gpu_power_limit_w: self
                 .power_limit_w
                 .update(raw.power_limit_w, Self::MAX_TRANSIENT_MISSES),
-            gpu_clock_mhz: self.clock_mhz.update(raw.clock_mhz, Self::MAX_TRANSIENT_MISSES),
+            gpu_clock_mhz: self
+                .clock_mhz
+                .update(raw.clock_mhz, Self::MAX_TRANSIENT_MISSES),
             gpu_mem_clock_mhz: self
                 .mem_clock_mhz
                 .update(raw.mem_clock_mhz, Self::MAX_TRANSIENT_MISSES),
@@ -490,6 +495,16 @@ impl Default for WindowsTelemetryBackend {
     }
 }
 
+type EcWmiPollResult = (
+    Option<usize>,
+    Vec<u32>,
+    Vec<u32>,
+    Option<f32>,
+    Option<f32>,
+    Option<f32>,
+    Option<u32>,
+);
+
 impl WindowsTelemetryBackend {
     pub fn new() -> Self {
         let refresh = RefreshKind::nothing()
@@ -500,9 +515,8 @@ impl WindowsTelemetryBackend {
         sys.refresh_memory();
 
         let networks = Networks::new_with_refreshed_list();
-        let disks = Disks::new_with_refreshed_list_specifics(
-            DiskRefreshKind::nothing().with_io_usage(),
-        );
+        let disks =
+            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_io_usage());
         let emi = CpuEmiReader::open();
         let pawnio = PawnIoCpuTempReader::open();
 
@@ -579,15 +593,7 @@ impl WindowsTelemetryBackend {
     fn poll_ec_and_wmi_tier(
         cached_fan_count: Option<usize>,
         cached_fan_max_rpms: &[u32],
-    ) -> (
-        Option<usize>,
-        Vec<u32>,
-        Vec<u32>,
-        Option<f32>,
-        Option<f32>,
-        Option<f32>,
-        Option<u32>,
-    ) {
+    ) -> EcWmiPollResult {
         let mut fan_count = cached_fan_count;
         let mut fan_max_rpms = cached_fan_max_rpms.to_vec();
         let mut fan_rpms = Vec::new();
@@ -797,8 +803,7 @@ impl WindowsTelemetryBackend {
 
             let cpu_usage_pct = Some(guard.sys.global_cpu_usage());
             let cpu_clock_mhz = guard.sys.cpus().first().map(|c| c.frequency() as u32);
-            let ram_total_gb =
-                Some(guard.sys.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0));
+            let ram_total_gb = Some(guard.sys.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0));
             let ram_used_gb = Some(guard.sys.used_memory() as f32 / (1024.0 * 1024.0 * 1024.0));
 
             let cpu_power_w = guard.emi.as_mut().and_then(|e| e.sample_cpu_power_w());
@@ -1078,6 +1083,28 @@ impl TelemetryBackend for WindowsTelemetryBackend {
     }
 }
 
+fn format_pstate(p: PerformanceState) -> String {
+    match p {
+        PerformanceState::Zero => "P0".to_string(),
+        PerformanceState::One => "P1".to_string(),
+        PerformanceState::Two => "P2".to_string(),
+        PerformanceState::Three => "P3".to_string(),
+        PerformanceState::Four => "P4".to_string(),
+        PerformanceState::Five => "P5".to_string(),
+        PerformanceState::Six => "P6".to_string(),
+        PerformanceState::Seven => "P7".to_string(),
+        PerformanceState::Eight => "P8".to_string(),
+        PerformanceState::Nine => "P9".to_string(),
+        PerformanceState::Ten => "P10".to_string(),
+        PerformanceState::Eleven => "P11".to_string(),
+        PerformanceState::Twelve => "P12".to_string(),
+        PerformanceState::Thirteen => "P13".to_string(),
+        PerformanceState::Fourteen => "P14".to_string(),
+        PerformanceState::Fifteen => "P15".to_string(),
+        PerformanceState::Unknown => "Unknown".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1243,8 +1270,14 @@ mod tests {
         // 1-2 transient missing power readings hold previous 42.5W; 3rd miss clears to None
         let mut miss_power = base_sample.clone();
         miss_power.power_w = None;
-        assert_eq!(smoother.on_awake_sample(miss_power.clone()).gpu_power_w, Some(42.5));
-        assert_eq!(smoother.on_awake_sample(miss_power.clone()).gpu_power_w, Some(42.5));
+        assert_eq!(
+            smoother.on_awake_sample(miss_power.clone()).gpu_power_w,
+            Some(42.5)
+        );
+        assert_eq!(
+            smoother.on_awake_sample(miss_power.clone()).gpu_power_w,
+            Some(42.5)
+        );
         assert_eq!(smoother.on_awake_sample(miss_power).gpu_power_w, None);
 
         // Thermal throttle engages immediately on the first hit
@@ -1291,10 +1324,16 @@ mod tests {
             clock_mhz: Some(210),
             ..Default::default()
         };
-        assert_eq!(smoother.recommended_nvml_poll_interval(true), Duration::ZERO);
+        assert_eq!(
+            smoother.recommended_nvml_poll_interval(true),
+            Duration::ZERO
+        );
         for _ in 0..2 {
             smoother.on_awake_sample(idle.clone());
-            assert_eq!(smoother.recommended_nvml_poll_interval(true), Duration::ZERO);
+            assert_eq!(
+                smoother.recommended_nvml_poll_interval(true),
+                Duration::ZERO
+            );
         }
         smoother.on_awake_sample(idle);
         assert_eq!(
@@ -1315,29 +1354,13 @@ mod tests {
             ..Default::default()
         };
         smoother.on_awake_sample(active);
-        assert_eq!(smoother.recommended_nvml_poll_interval(true), Duration::ZERO);
-        assert_eq!(smoother.recommended_nvml_poll_interval(false), Duration::ZERO);
-    }
-}
-
-fn format_pstate(p: PerformanceState) -> String {
-    match p {
-        PerformanceState::Zero => "P0".to_string(),
-        PerformanceState::One => "P1".to_string(),
-        PerformanceState::Two => "P2".to_string(),
-        PerformanceState::Three => "P3".to_string(),
-        PerformanceState::Four => "P4".to_string(),
-        PerformanceState::Five => "P5".to_string(),
-        PerformanceState::Six => "P6".to_string(),
-        PerformanceState::Seven => "P7".to_string(),
-        PerformanceState::Eight => "P8".to_string(),
-        PerformanceState::Nine => "P9".to_string(),
-        PerformanceState::Ten => "P10".to_string(),
-        PerformanceState::Eleven => "P11".to_string(),
-        PerformanceState::Twelve => "P12".to_string(),
-        PerformanceState::Thirteen => "P13".to_string(),
-        PerformanceState::Fourteen => "P14".to_string(),
-        PerformanceState::Fifteen => "P15".to_string(),
-        PerformanceState::Unknown => "Unknown".to_string(),
+        assert_eq!(
+            smoother.recommended_nvml_poll_interval(true),
+            Duration::ZERO
+        );
+        assert_eq!(
+            smoother.recommended_nvml_poll_interval(false),
+            Duration::ZERO
+        );
     }
 }

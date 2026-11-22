@@ -1,5 +1,5 @@
 use crate::theme::{
-    STATUS_OK, STATUS_WARN, accent_color, compact_card, pill_button, section_title, status_badge,
+    accent_color, compact_card, pill_button, section_title, status_badge, STATUS_OK, STATUS_WARN,
 };
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Ui};
@@ -245,7 +245,10 @@ fn render_step_autostart(
     ui.add_space(6.0);
 
     if ui
-        .checkbox(&mut cfg.general.start_with_windows, i18n.t("wizard.autostart_toggle"))
+        .checkbox(
+            &mut cfg.general.start_with_windows,
+            i18n.t("wizard.autostart_toggle"),
+        )
         .changed()
     {
         on_save();
@@ -253,7 +256,10 @@ fn render_step_autostart(
     }
 
     if ui
-        .checkbox(&mut cfg.general.start_minimized, i18n.t("settings.start_minimized"))
+        .checkbox(
+            &mut cfg.general.start_minimized,
+            i18n.t("settings.start_minimized"),
+        )
         .changed()
     {
         on_save();
@@ -332,8 +338,8 @@ fn render_step_battery(
     ];
     ui.horizontal_wrapped(|ui| {
         for (id, key, stop, start, en) in presets {
-            let selected = cfg.battery.enabled == en
-                && (!en || cfg.battery.stop_threshold_pct == stop);
+            let selected =
+                cfg.battery.enabled == en && (!en || cfg.battery.stop_threshold_pct == stop);
             if pill_button(ui, &i18n.t(key), selected, t).clicked() {
                 cfg.battery.enabled = en;
                 cfg.battery.stop_threshold_pct = stop;
@@ -428,7 +434,10 @@ fn render_step_summary(ui: &mut Ui, cfg: &AppConfig, st: &SharedState, i18n: &I1
     } else {
         i18n.t("common.disabled")
     };
-    ui.label(format!("• {}: {auto_val}", i18n.t("wizard.summary_autostart")));
+    ui.label(format!(
+        "• {}: {auto_val}",
+        i18n.t("wizard.summary_autostart")
+    ));
 
     let pawn_val = if st.pawnio_cpu_active {
         i18n.t("monitor.pawnio_active")

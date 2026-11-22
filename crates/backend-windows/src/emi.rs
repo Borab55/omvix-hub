@@ -1,9 +1,10 @@
 use std::mem::{offset_of, size_of};
 use std::slice;
+use windows::core::{GUID, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
-    SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
-    SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+    SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+    SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
@@ -11,11 +12,14 @@ use windows::Win32::Storage::FileSystem::{
     OPEN_EXISTING,
 };
 use windows::Win32::System::IO::DeviceIoControl;
-use windows::core::{GUID, PCWSTR};
 
 /// `{45BD8344-7ED6-49CF-A440-C276C933B053}` (`GUID_DEVICE_ENERGY_METER` from `emi.h`)
-const GUID_DEVICE_ENERGY_METER: GUID =
-    GUID::from_values(0x45bd8344, 0x7ed6, 0x49cf, [0xa4, 0x40, 0xc2, 0x76, 0xc9, 0x33, 0xb0, 0x53]);
+const GUID_DEVICE_ENERGY_METER: GUID = GUID::from_values(
+    0x45bd8344,
+    0x7ed6,
+    0x49cf,
+    [0xa4, 0x40, 0xc2, 0x76, 0xc9, 0x33, 0xb0, 0x53],
+);
 
 const IOCTL_EMI_GET_VERSION: u32 = 0x0022_4000;
 const IOCTL_EMI_GET_METADATA_SIZE: u32 = 0x0022_4004;
@@ -89,7 +93,11 @@ pub fn parse_emi_v2_channels(buf: &[u8]) -> Vec<EmiChannelInfo> {
 /// `1 pWh = 3.6e-9 J` and `1 tick = 1e-7 s` => `(delta_energy / delta_time) * 0.036`.
 pub fn emi_delta_to_watts(delta_energy_pwh: u64, delta_time_100ns: u64) -> Option<f32> {
     if delta_time_100ns == 0 || delta_energy_pwh == 0 {
-        return if delta_time_100ns > 0 { Some(0.0) } else { None };
+        return if delta_time_100ns > 0 {
+            Some(0.0)
+        } else {
+            None
+        };
     }
     let watts = (delta_energy_pwh as f64 / delta_time_100ns as f64) * 0.036;
     if (0.0..=500.0).contains(&watts) && watts.is_finite() {
@@ -133,8 +141,10 @@ fn select_cpu_package_channel(channels: &[EmiChannelInfo]) -> Option<usize> {
 
 fn decode_utf16le(bytes: &[u8]) -> String {
     let u16s: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .take_while(|&w| w != 0)
         .collect();
     String::from_utf16_lossy(&u16s).trim().to_string()
@@ -206,7 +216,9 @@ impl CpuEmiReader {
         let version = match ioctl_get_version(handle) {
             Some(v) => v,
             None => {
-                unsafe { let _ = CloseHandle(handle); }
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
                 return None;
             }
         };
@@ -214,21 +226,29 @@ impl CpuEmiReader {
         let (channel_count, target_channel, channels_summary) = if version == EMI_VERSION_V2 {
             let meta_size = ioctl_get_metadata_size(handle).unwrap_or(0) as usize;
             if !(68..=65536).contains(&meta_size) {
-                unsafe { let _ = CloseHandle(handle); }
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
                 return None;
             }
             let mut meta_buf = vec![0u8; meta_size];
             if !ioctl_get_metadata(handle, &mut meta_buf) {
-                unsafe { let _ = CloseHandle(handle); }
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
                 return None;
             }
             let channels = parse_emi_v2_channels(&meta_buf);
             if channels.is_empty() {
-                unsafe { let _ = CloseHandle(handle); }
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
                 return None;
             }
             let Some(target) = select_cpu_package_channel(&channels) else {
-                unsafe { let _ = CloseHandle(handle); }
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
                 return None;
             };
             let summary = channels
@@ -240,7 +260,9 @@ impl CpuEmiReader {
         } else if version == EMI_VERSION_V1 {
             (1usize, 0usize, "[0:V1]".to_string())
         } else {
-            unsafe { let _ = CloseHandle(handle); }
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
             return None;
         };
 
@@ -463,10 +485,7 @@ mod tests {
 
         for name in ["IA_CORE0\0", "RAPL_Package0\0"] {
             buf.extend_from_slice(&0u32.to_le_bytes()); // unit = pWh
-            let utf16: Vec<u8> = name
-                .encode_utf16()
-                .flat_map(|c| c.to_le_bytes())
-                .collect();
+            let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
             buf.extend_from_slice(&(utf16.len() as u16).to_le_bytes());
             buf.extend_from_slice(&utf16);
         }

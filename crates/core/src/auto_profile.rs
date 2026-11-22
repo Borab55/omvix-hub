@@ -88,7 +88,9 @@ mod tests {
         };
 
         // Initial AC observation triggers action
-        let ac_action = engine.evaluate(&cfg, true, false).expect("initial AC action");
+        let ac_action = engine
+            .evaluate(&cfg, true, false)
+            .expect("initial AC action");
         assert_eq!(ac_action.performance_mode, PerformanceMode::Performance);
         assert_eq!(ac_action.fan_mode, Some(FanMode::CustomCurve));
         assert_eq!(ac_action.curve_preset, Some(FanCurvePreset::Aggressive));
