@@ -787,6 +787,16 @@ impl AppConfig {
         self.battery.stop_threshold_pct = self.battery.stop_threshold_pct.clamp(50, 100);
         let max_start = self.battery.stop_threshold_pct.saturating_sub(2).max(40);
         self.battery.start_threshold_pct = self.battery.start_threshold_pct.clamp(40, max_start);
+        if self.battery.mode == BatteryChargeMode::Unknown {
+            self.battery.mode = if self.battery.enabled {
+                BatteryChargeMode::Inhibit
+            } else {
+                BatteryChargeMode::Auto
+            };
+            warnings.push(
+                "Reset invalid battery.mode = Unknown in config to safe charge mode.".to_string(),
+            );
+        }
         if !self.battery.one_time_full_charge
             || self
                 .battery
@@ -1373,5 +1383,22 @@ mod tests {
             parsed.battery.travel_charge_until_utc,
             Some(now + DEFAULT_TRAVEL_CHARGE_DURATION_SECS)
         );
+    }
+
+    #[test]
+    fn sanitize_resets_unknown_battery_mode_with_warning() {
+        let mut cfg = AppConfig::default();
+        cfg.battery.enabled = true;
+        cfg.battery.mode = BatteryChargeMode::Unknown;
+        let warnings = cfg.sanitize();
+        assert_eq!(cfg.battery.mode, BatteryChargeMode::Inhibit);
+        assert!(warnings.iter().any(|w| w.contains("battery.mode")));
+
+        let mut cfg_off = AppConfig::default();
+        cfg_off.battery.enabled = false;
+        cfg_off.battery.mode = BatteryChargeMode::Unknown;
+        let warnings_off = cfg_off.sanitize();
+        assert_eq!(cfg_off.battery.mode, BatteryChargeMode::Auto);
+        assert!(!warnings_off.is_empty());
     }
 }

@@ -2047,7 +2047,11 @@ impl WorkerEngine {
                             st.synced_config = Some(self.cfg.clone());
                         }
                     }
-                    if bat.current_mode == target && self.last_applied_bat_mode == Some(target) {
+                    if should_skip_battery_apply(
+                        bat.current_mode,
+                        self.last_applied_bat_mode,
+                        target,
+                    ) {
                         record_history_entry(
                             &mut self.change_history,
                             &self.state,
@@ -3640,6 +3644,17 @@ fn format_fan_summary(mode: FanMode, manual_pct: u8) -> String {
     }
 }
 
+fn should_skip_battery_apply(
+    current_mode: BatteryChargeMode,
+    last_applied: Option<BatteryChargeMode>,
+    target: BatteryChargeMode,
+) -> bool {
+    current_mode != BatteryChargeMode::Unknown
+        && target != BatteryChargeMode::Unknown
+        && current_mode == target
+        && last_applied == Some(target)
+}
+
 #[cfg(windows)]
 fn format_battery_summary(bat: &BatteryConfig) -> String {
     if !bat.enabled || bat.mode == BatteryChargeMode::Auto {
@@ -3951,6 +3966,30 @@ mod tests {
                 (8.0, FanMode::CustomCurve, Some(64))
             ]
         );
+    }
+
+    #[test]
+    fn should_skip_battery_apply_never_matches_unknown() {
+        assert!(!should_skip_battery_apply(
+            BatteryChargeMode::Unknown,
+            Some(BatteryChargeMode::Inhibit),
+            BatteryChargeMode::Inhibit
+        ));
+        assert!(!should_skip_battery_apply(
+            BatteryChargeMode::Unknown,
+            Some(BatteryChargeMode::Unknown),
+            BatteryChargeMode::Unknown
+        ));
+        assert!(!should_skip_battery_apply(
+            BatteryChargeMode::Auto,
+            Some(BatteryChargeMode::Auto),
+            BatteryChargeMode::Inhibit
+        ));
+        assert!(should_skip_battery_apply(
+            BatteryChargeMode::Inhibit,
+            Some(BatteryChargeMode::Inhibit),
+            BatteryChargeMode::Inhibit
+        ));
     }
 }
 

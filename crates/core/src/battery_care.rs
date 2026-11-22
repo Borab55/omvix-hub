@@ -65,7 +65,9 @@ impl BatteryCareEngine {
         let target = if charge_pct >= stop {
             match cfg.mode {
                 BatteryChargeMode::Hold => BatteryChargeMode::Hold,
-                BatteryChargeMode::Inhibit | BatteryChargeMode::Auto => BatteryChargeMode::Inhibit,
+                BatteryChargeMode::Inhibit
+                | BatteryChargeMode::Auto
+                | BatteryChargeMode::Unknown => BatteryChargeMode::Inhibit,
             }
         } else if charge_pct <= start {
             BatteryChargeMode::Auto

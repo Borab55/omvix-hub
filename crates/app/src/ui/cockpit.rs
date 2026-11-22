@@ -250,10 +250,11 @@ pub fn render(
                 .battery_status
                 .as_ref()
                 .map(|b| b.current_mode)
-                .unwrap_or(BatteryChargeMode::Auto);
+                .unwrap_or(BatteryChargeMode::Unknown);
             let (hold_lbl, hold_clr) = match bat_hw_mode {
                 BatteryChargeMode::Hold => (i18n.t("cockpit.badge_hold_active"), STATUS_WARN),
                 BatteryChargeMode::Inhibit => (i18n.t("cockpit.badge_hold_inhibit"), STATUS_OK),
+                BatteryChargeMode::Unknown => (i18n.t("cockpit.badge_hold_unknown"), muted_pill),
                 BatteryChargeMode::Auto
                     if cfg.battery.enabled && cfg.battery.hold_when_shutdown =>
                 {

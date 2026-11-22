@@ -1404,7 +1404,7 @@ impl eframe::App for OmvixApp {
                 .battery_status
                 .as_ref()
                 .map(|b| b.current_mode)
-                .unwrap_or(omvix_core::BatteryChargeMode::Auto);
+                .unwrap_or(omvix_core::BatteryChargeMode::Unknown);
             let (tray_perf, tray_fan) = if snapshot_state.active_app_profile.is_some() {
                 (
                     snapshot_state.effective_performance_mode,

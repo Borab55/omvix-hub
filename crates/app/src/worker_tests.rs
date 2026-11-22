@@ -1016,3 +1016,29 @@ fn integration_service_cleared_travel_charge_syncs_and_stays_cleared() {
     assert!(!synced.battery.one_time_full_charge);
     assert!(synced.battery.travel_charge_until_utc.is_none());
 }
+
+#[test]
+fn integration_apply_battery_now_never_skips_when_firmware_mode_unknown() {
+    let dir = TempDirGuard::create("bat_unknown_mode");
+    let mut cfg = AppConfig::default();
+    cfg.battery.enabled = true;
+    cfg.battery.mode = BatteryChargeMode::Inhibit;
+    cfg.battery.stop_threshold_pct = 80;
+    cfg.battery.start_threshold_pct = 75;
+
+    let mut mock = MockHardwareState::default();
+    mock.battery_status.charge_percent = 85;
+    mock.battery_status.ac_connected = true;
+    mock.battery_status.current_mode = BatteryChargeMode::Unknown;
+
+    let rig = MockRig::new(mock);
+    let (mut engine, _state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    engine.last_applied_bat_mode = Some(BatteryChargeMode::Inhibit);
+
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+    assert!(!engine.handle_command(WorkerCommand::ApplyBatteryNow, &tx, &None, &visible));
+
+    let g = rig.inner.lock().unwrap();
+    assert_eq!(g.battery_mode_writes, vec![BatteryChargeMode::Inhibit]);
+}

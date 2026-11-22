@@ -77,10 +77,18 @@ pub fn render(
                     .as_deref()
                     .map(|h| format!(" [{h}]"))
                     .unwrap_or_default();
+                let mode_text = match b.current_mode {
+                    BatteryChargeMode::Unknown => i18n.t("battery.mode_unknown"),
+                    other => format!("{other:?}"),
+                };
                 status_badge(
                     ui,
-                    &format!("{src} | {:?}{hex_suffix}", b.current_mode),
-                    if b.charging { STATUS_WARN } else { STATUS_OK },
+                    &format!("{src} | {mode_text}{hex_suffix}"),
+                    if b.charging || b.current_mode == BatteryChargeMode::Unknown {
+                        STATUS_WARN
+                    } else {
+                        STATUS_OK
+                    },
                 );
                 let off_badge_key = if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
                     "battery.when_off_hold_short"

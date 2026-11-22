@@ -286,7 +286,10 @@ impl TrayController {
         let icon_key = (perf_mode, bat_hw_mode);
         if self.last_icon_state != Some(icon_key) {
             self.last_icon_state = Some(icon_key);
-            let active = bat_hw_mode != BatteryChargeMode::Auto;
+            let active = matches!(
+                bat_hw_mode,
+                BatteryChargeMode::Hold | BatteryChargeMode::Inhibit
+            );
             let (rgba, w, h) = build_tray_icon_rgba_styled(perf_mode, active);
             if let Ok(icon) = Icon::from_rgba(rgba, w, h) {
                 let _ = self._tray.set_icon(Some(icon));
@@ -300,6 +303,7 @@ impl TrayController {
             let base_tip = match bat_hw_mode {
                 BatteryChargeMode::Hold => i18n.t("app.tray.tooltip_hold"),
                 BatteryChargeMode::Inhibit => i18n.t("app.tray.tooltip_inhibit"),
+                BatteryChargeMode::Unknown => i18n.t("app.tray.tooltip_unknown"),
                 BatteryChargeMode::Auto => "Omvix Hub".to_string(),
             };
             let tooltip = format!("{base_tip} [{mode_name}]");
