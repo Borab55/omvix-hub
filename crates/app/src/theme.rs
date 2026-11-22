@@ -321,11 +321,43 @@ pub fn pill_button_enabled(
         .stroke(stroke)
         .corner_radius(CornerRadius::same(8))
         .wrap_mode(TextWrapMode::Extend);
-    ui.scope(|ui| {
-        ui.spacing_mut().button_padding = vec2(10.0, 4.0);
-        ui.add_enabled(enabled, btn)
-    })
-    .inner
+    let prev_pad = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding = vec2(10.0, 4.0);
+    let resp = ui.add_enabled(enabled, btn);
+    ui.spacing_mut().button_padding = prev_pad;
+    resp
+}
+
+fn compute_toggle_layout(
+    btn_text_size: Vec2,
+    tag_text_size: Vec2,
+    active: bool,
+) -> (Vec2, Vec2, Vec2) {
+    const BTN_PAD_X: f32 = 9.0;
+    const BTN_PAD_Y: f32 = 4.0;
+    const TAG_PAD_X: f32 = 6.0;
+    const TAG_PAD_Y: f32 = 2.0;
+    const TAG_GAP: f32 = 5.0;
+
+    let btn_size = vec2(
+        (btn_text_size.x + BTN_PAD_X * 2.0).ceil(),
+        (btn_text_size.y + BTN_PAD_Y * 2.0).ceil().max(24.0),
+    );
+    let tag_size = vec2(
+        (tag_text_size.x + TAG_PAD_X * 2.0).ceil(),
+        (tag_text_size.y + TAG_PAD_Y * 2.0).ceil().max(18.0),
+    );
+    let total_w = if active {
+        btn_size.x + TAG_GAP + tag_size.x
+    } else {
+        btn_size.x
+    };
+    let total_h = if active {
+        btn_size.y.max(tag_size.y)
+    } else {
+        btn_size.y
+    };
+    (btn_size, tag_size, vec2(total_w, total_h))
 }
 
 fn render_toggle_button(
@@ -336,6 +368,7 @@ fn render_toggle_button(
     header_emphasis: bool,
     t: &CustomThemeConfig,
 ) -> Response {
+    let was_active = *active;
     let accent = accent_color(t);
     let muted = muted_text(t);
     let ok = status_ok(t);
@@ -352,18 +385,8 @@ fn render_toggle_button(
         })
         .unwrap_or(12.5);
 
-    let (fill, stroke, label_color) = if *active {
-        let bg = if t.is_high_contrast() {
-            accent
-        } else {
-            Color32::from_rgba_unmultiplied(
-                accent.r(),
-                accent.g(),
-                accent.b(),
-                if t.dark_base { 52 } else { 36 },
-            )
-        };
-        let fg = if t.is_high_contrast() {
+    let label_color = if was_active {
+        if t.is_high_contrast() {
             if is_bright_color(accent) {
                 Color32::BLACK
             } else {
@@ -373,65 +396,120 @@ fn render_toggle_button(
             Color32::WHITE
         } else {
             accent
-        };
-        (bg, Stroke::new(1.3_f32, accent), fg)
+        }
     } else {
-        (
-            rgb(t.control_bg),
-            Stroke::new(1.0_f32, rgb(t.card_border)),
-            muted,
-        )
+        muted
     };
 
-    // Keep text and font weight identical across ON/OFF so the button never resizes when toggled;
-    // render the active status tag immediately outside the button.
+    // Keep text and button width invariant across ON/OFF and allocate one atomic rect
+    // directly on `ui` so `ui.horizontal_wrapped` wraps to the next line cleanly.
     let mut rt = egui::RichText::new(label)
         .size(text_size)
         .color(label_color);
     if header_emphasis {
         rt = rt.strong();
     }
+    let btn_widget = egui::WidgetText::from(rt);
+    let mut btn_galley = btn_widget.clone().into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let tag_galley = egui::WidgetText::from(
+        egui::RichText::new(active_tag)
+            .size(10.5)
+            .color(ok)
+            .strong(),
+    )
+    .into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
 
-    let btn = egui::Button::new(rt)
-        .fill(fill)
-        .stroke(stroke)
-        .corner_radius(CornerRadius::same(8))
-        .wrap_mode(TextWrapMode::Extend);
+    let tag_reserve = (tag_galley.size().x + 12.0).ceil() + 5.0;
+    let max_btn_text_w = (ui.max_rect().width() - tag_reserve - 18.0).max(80.0);
+    if btn_galley.size().x > max_btn_text_w {
+        btn_galley = btn_widget.into_galley(
+            ui,
+            Some(TextWrapMode::Wrap),
+            max_btn_text_w,
+            egui::TextStyle::Button,
+        );
+    }
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 5.0;
-        let mut inner_resp = ui
-            .scope(|ui| {
-                ui.spacing_mut().button_padding = vec2(9.0, 4.0);
-                ui.add(btn)
-            })
-            .inner;
-        if inner_resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if inner_resp.clicked() {
-            *active = !*active;
-            inner_resp.mark_changed();
-        }
-        if *active {
+    let (btn_size, tag_size, total_size) =
+        compute_toggle_layout(btn_galley.size(), tag_galley.size(), was_active);
+    let (outer_rect, alloc_resp) = ui.allocate_exact_size(total_size, Sense::hover());
+    let btn_rect = egui::Rect::from_min_size(
+        pos2(outer_rect.left(), outer_rect.center().y - btn_size.y * 0.5),
+        btn_size,
+    );
+    let mut resp = ui.interact(btn_rect, alloc_resp.id.with("toggle_btn"), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.clicked() {
+        *active = !*active;
+        resp.mark_changed();
+    }
+
+    if ui.is_rect_visible(outer_rect) {
+        let (fill, stroke) = if was_active {
+            let bg = if t.is_high_contrast() {
+                accent
+            } else {
+                Color32::from_rgba_unmultiplied(
+                    accent.r(),
+                    accent.g(),
+                    accent.b(),
+                    if t.dark_base { 52 } else { 36 },
+                )
+            };
+            (bg, Stroke::new(1.3_f32, accent))
+        } else if resp.hovered() {
+            (rgb(t.control_hover_bg), Stroke::new(1.1_f32, accent))
+        } else {
+            (rgb(t.control_bg), Stroke::new(1.0_f32, rgb(t.card_border)))
+        };
+
+        let p = ui.painter_at(outer_rect);
+        p.rect_filled(btn_rect, CornerRadius::same(8), fill);
+        p.rect_stroke(btn_rect, CornerRadius::same(8), stroke, StrokeKind::Inside);
+
+        let btn_text_pos = pos2(
+            btn_rect.left() + (btn_rect.width() - btn_galley.size().x) * 0.5,
+            btn_rect.center().y - btn_galley.size().y * 0.5,
+        );
+        p.galley(btn_text_pos, btn_galley, label_color);
+
+        if was_active {
+            let tag_rect = egui::Rect::from_min_size(
+                pos2(
+                    btn_rect.right() + 5.0,
+                    outer_rect.center().y - tag_size.y * 0.5,
+                ),
+                tag_size,
+            );
             let tag_bg = Color32::from_rgba_unmultiplied(ok.r(), ok.g(), ok.b(), 26);
-            egui::Frame::NONE
-                .fill(tag_bg)
-                .stroke(Stroke::new(0.8_f32, ok))
-                .corner_radius(CornerRadius::same(9))
-                .inner_margin(Margin::symmetric(6, 2))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(active_tag)
-                            .size(10.5)
-                            .color(ok)
-                            .strong(),
-                    );
-                });
+            p.rect_filled(tag_rect, CornerRadius::same(9), tag_bg);
+            p.rect_stroke(
+                tag_rect,
+                CornerRadius::same(9),
+                Stroke::new(0.8_f32, ok),
+                StrokeKind::Inside,
+            );
+            let tag_pos = pos2(
+                tag_rect.left() + (tag_rect.width() - tag_galley.size().x) * 0.5,
+                tag_rect.center().y - tag_galley.size().y * 0.5,
+            );
+            p.galley(tag_pos, tag_galley, ok);
         }
-        inner_resp
-    })
-    .inner
+    }
+
+    resp
 }
 
 /// Illuminated text-button toggle for feature options (lights up with external `active_tag` pill when active,
@@ -971,31 +1049,60 @@ fn parse_hex_color(input: &str) -> Option<[u8; 3]> {
     Some([r, g, b])
 }
 
+#[allow(clippy::too_many_arguments)]
+fn paint_pill_badge(
+    ui: &mut egui::Ui,
+    text: &str,
+    color: Color32,
+    font_size: f32,
+    pad: Vec2,
+    radius: u8,
+    stroke_w: f32,
+    bg_alpha: u8,
+) -> egui::Response {
+    let galley = egui::WidgetText::from(
+        egui::RichText::new(text)
+            .size(font_size)
+            .color(color)
+            .strong(),
+    )
+    .into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let size = vec2(
+        (galley.size().x + pad.x * 2.0).ceil(),
+        (galley.size().y + pad.y * 2.0).ceil(),
+    );
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter_at(rect);
+        let bg = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), bg_alpha);
+        p.rect_filled(rect, CornerRadius::same(radius), bg);
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(radius),
+            Stroke::new(stroke_w, color),
+            StrokeKind::Inside,
+        );
+        let text_pos = pos2(
+            rect.left() + (rect.width() - galley.size().x) * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        p.galley(text_pos, galley, color);
+    }
+    resp
+}
+
 pub fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
-    let bg = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 32);
-    let inner = egui::Frame::NONE
-        .fill(bg)
-        .stroke(Stroke::new(1.0_f32, color))
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::symmetric(10, 4))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
-        });
-    inner.response.interact(egui::Sense::hover())
+    paint_pill_badge(ui, text, color, 12.0, vec2(10.0, 4.0), 12, 1.0, 32)
 }
 
 /// Extra-compact pill badge for dense status strips in the 468px cockpit.
 pub fn compact_status_pill(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
-    let bg = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 28);
-    let inner = egui::Frame::NONE
-        .fill(bg)
-        .stroke(Stroke::new(0.9_f32, color))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::symmetric(7, 2))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(10.5).color(color).strong());
-        });
-    inner.response.interact(egui::Sense::hover())
+    paint_pill_badge(ui, text, color, 10.5, vec2(7.0, 2.0), 10, 0.9, 28)
 }
 
 pub fn clickable_status_badge(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
@@ -1117,18 +1224,16 @@ pub fn compact_toggle_pill(
     if active {
         rt = rt.strong();
     }
-    let resp = ui
-        .scope(|ui| {
-            ui.spacing_mut().button_padding = vec2(7.0, 2.0);
-            ui.add(
-                egui::Button::new(rt)
-                    .fill(fill)
-                    .stroke(stroke)
-                    .corner_radius(CornerRadius::same(10))
-                    .wrap_mode(TextWrapMode::Extend),
-            )
-        })
-        .inner;
+    let prev_pad = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding = vec2(7.0, 2.0);
+    let resp = ui.add(
+        egui::Button::new(rt)
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(CornerRadius::same(10))
+            .wrap_mode(TextWrapMode::Extend),
+    );
+    ui.spacing_mut().button_padding = prev_pad;
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -1354,7 +1459,8 @@ pub fn saved_theme_chip(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hex_color;
+    use super::{compute_toggle_layout, parse_hex_color};
+    use egui::vec2;
 
     #[test]
     fn parse_hex_color_validates_hex_inputs() {
@@ -1363,5 +1469,18 @@ mod tests {
         assert_eq!(parse_hex_color("12345"), None);
         assert_eq!(parse_hex_color("#1234567"), None);
         assert_eq!(parse_hex_color("#GGGGGG"), None);
+    }
+
+    #[test]
+    fn toggle_layout_keeps_button_width_constant_and_accounts_for_external_tag() {
+        let label_sz = vec2(120.4, 15.2);
+        let tag_sz = vec2(28.2, 13.0);
+        let (btn_off, _tag_off, total_off) = compute_toggle_layout(label_sz, tag_sz, false);
+        let (btn_on, tag_on, total_on) = compute_toggle_layout(label_sz, tag_sz, true);
+
+        assert_eq!(btn_off, btn_on);
+        assert_eq!(total_off, btn_off);
+        assert_eq!(total_on.x, btn_on.x + 5.0 + tag_on.x);
+        assert!(total_on.y >= btn_on.y.max(tag_on.y));
     }
 }
