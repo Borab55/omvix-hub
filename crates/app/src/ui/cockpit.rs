@@ -336,10 +336,20 @@ pub fn render(
         compact_card(t).show(ui, |ui| {
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    STATUS_WARN,
-                    RichText::new(config_warnings.join(" | ")).size(11.0),
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2((card_inner_w - 28.0).max(120.0), 0.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(config_warnings.join(" | "))
+                                    .size(11.0)
+                                    .color(STATUS_WARN),
+                            )
+                            .wrap(),
+                        );
+                    },
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     if ui.small_button("×").clicked() {

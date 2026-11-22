@@ -377,6 +377,9 @@
   "safe_mode.exit_btn": "Exit Safe Mode",
   "safe_mode.open_settings": "Settings / Reset",
 
+  "config.corrupt_backup_notice": "Corrupt config.toml was backed up to {path} and defaults were loaded ({error}).",
+  "config.corrupt_rename_failed": "Failed reading config.toml ({error}); backup rename failed and original file was left untouched.",
+
   "wizard.title": "Omvix Hub Setup Wizard",
   "wizard.step_indicator": "Step {step} of {total}",
   "wizard.skip": "Skip",

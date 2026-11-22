@@ -377,6 +377,9 @@
   "safe_mode.exit_btn": "Güvenli Moddan Çık",
   "safe_mode.open_settings": "Ayarlar / Sıfırla",
 
+  "config.corrupt_backup_notice": "Bozuk config.toml dosyası {path} konumuna yedeklendi ve varsayılan ayarlar yüklendi ({error}).",
+  "config.corrupt_rename_failed": "config.toml okunamadı ({error}); yedekleme yeniden adlandırması başarısız oldu, orijinal dosya değiştirilmedi.",
+
   "wizard.title": "Omvix Hub Kurulum Sihirbazı",
   "wizard.step_indicator": "Adım {step} / {total}",
   "wizard.skip": "Atla",

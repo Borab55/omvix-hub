@@ -587,6 +587,43 @@ impl Default for AppConfig {
     }
 }
 
+/// Outcome of loading `config.toml`, preserving unreadable corrupt files under `.bad-<stamp>`.
+#[derive(Debug, Clone)]
+pub struct ConfigLoadOutcome {
+    pub config: AppConfig,
+    pub warnings: Vec<String>,
+    pub corrupt_backup: Option<PathBuf>,
+    pub load_failed: bool,
+    pub load_error: Option<String>,
+}
+
+/// Builds `<file>.bad-<stamp>` in the same directory as `path`.
+pub fn corrupt_backup_path(path: &Path, stamp: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".to_string());
+    let candidate = format!("{file_name}.bad-{stamp}");
+    match path.parent() {
+        Some(parent) => parent.join(candidate),
+        None => PathBuf::from(candidate),
+    }
+}
+
+fn allocate_corrupt_backup_path(path: &Path, stamp: &str) -> PathBuf {
+    let primary = corrupt_backup_path(path, stamp);
+    if !primary.exists() {
+        return primary;
+    }
+    for idx in 1..=99u32 {
+        let candidate = corrupt_backup_path(path, &format!("{stamp}-{idx}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    primary
+}
+
 impl AppConfig {
     pub fn default_config_path() -> PathBuf {
         #[cfg(target_os = "windows")]
@@ -604,6 +641,62 @@ impl AppConfig {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let (cfg, _warnings) = Self::load_from_path_with_warnings(path)?;
         Ok(cfg)
+    }
+
+    /// Loads `config.toml`, quarantining unreadable corrupt files to `config.toml.bad-<YYYYMMDD-HHMMSS>`
+    /// so user edits are never silently wiped.
+    pub fn load_or_quarantine_corrupt(path: &Path) -> ConfigLoadOutcome {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        Self::load_or_quarantine_corrupt_with_stamp(path, &stamp)
+    }
+
+    pub fn load_or_quarantine_corrupt_with_stamp(path: &Path, stamp: &str) -> ConfigLoadOutcome {
+        match Self::load_from_path_with_warnings(path) {
+            Ok((config, warnings)) => ConfigLoadOutcome {
+                config,
+                warnings,
+                corrupt_backup: None,
+                load_failed: false,
+                load_error: None,
+            },
+            Err(err) => {
+                let err_msg = err.to_string();
+                if path.exists() {
+                    let backup = allocate_corrupt_backup_path(path, stamp);
+                    match fs::rename(path, &backup) {
+                        Ok(()) => ConfigLoadOutcome {
+                            config: Self::default(),
+                            warnings: vec![format!(
+                                "Corrupt config.toml was backed up to {} and defaults were loaded ({err_msg}).",
+                                backup.display()
+                            )],
+                            corrupt_backup: Some(backup),
+                            load_failed: true,
+                            load_error: Some(err_msg),
+                        },
+                        Err(rename_err) => ConfigLoadOutcome {
+                            config: Self::default(),
+                            warnings: vec![format!(
+                                "Failed reading config.toml ({err_msg}); backup rename failed ({rename_err}), leaving original untouched."
+                            )],
+                            corrupt_backup: None,
+                            load_failed: true,
+                            load_error: Some(format!("{err_msg}; rename error: {rename_err}")),
+                        },
+                    }
+                } else {
+                    ConfigLoadOutcome {
+                        config: Self::default(),
+                        warnings: vec![format!(
+                            "Failed reading config, restored defaults: {err_msg}"
+                        )],
+                        corrupt_backup: None,
+                        load_failed: true,
+                        load_error: Some(err_msg),
+                    }
+                }
+            }
+        }
     }
 
     pub fn load_from_path_with_warnings(path: &Path) -> Result<(Self, Vec<String>)> {
@@ -1130,5 +1223,76 @@ mod tests {
         let parsed: AppConfig = toml::from_str(&toml_text).expect("deserialize");
         assert!(!parsed.general.auto_check_updates);
         assert!(parsed.general.allow_unsigned_sha256_updates);
+    }
+
+    #[test]
+    fn corrupt_config_is_preserved_in_bad_backup_file() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_corrupt_cfg_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let corrupt_payload = "[general\nlanguage = \"broken_toml_missing_bracket\"\n";
+        fs::write(&path, corrupt_payload).unwrap();
+
+        let outcome = AppConfig::load_or_quarantine_corrupt_with_stamp(&path, "20261122-151500");
+        assert!(outcome.load_failed);
+        assert!(outcome.load_error.is_some());
+        let expected_backup = dir.join("config.toml.bad-20261122-151500");
+        assert_eq!(outcome.corrupt_backup.as_ref(), Some(&expected_backup));
+        assert!(expected_backup.is_file());
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read_to_string(&expected_backup).unwrap(),
+            corrupt_payload
+        );
+        assert!(!outcome.warnings.is_empty());
+        assert!(outcome.warnings[0].contains("config.toml.bad-20261122-151500"));
+        assert_eq!(
+            outcome.config.general.language,
+            AppConfig::default().general.language
+        );
+
+        // Collision on the same stamp allocates `-1` without clobbering existing backup
+        fs::write(&path, "not = [valid").unwrap();
+        let outcome2 = AppConfig::load_or_quarantine_corrupt_with_stamp(&path, "20261122-151500");
+        let expected_backup_2 = dir.join("config.toml.bad-20261122-151500-1");
+        assert_eq!(outcome2.corrupt_backup.as_ref(), Some(&expected_backup_2));
+        assert_eq!(
+            fs::read_to_string(&expected_backup).unwrap(),
+            corrupt_payload
+        );
+        assert_eq!(
+            fs::read_to_string(&expected_backup_2).unwrap(),
+            "not = [valid"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_config_with_sanitize_warning_does_not_create_bad_backup() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_valid_warn_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut cfg = AppConfig::default();
+        cfg.hotkeys.custom_command = "cmd.exe /c whoami".to_string();
+        cfg.save_to_path(&path).unwrap();
+
+        let outcome = AppConfig::load_or_quarantine_corrupt_with_stamp(&path, "20261122-151500");
+        assert!(!outcome.load_failed);
+        assert!(outcome.corrupt_backup.is_none());
+        assert!(!outcome.warnings.is_empty());
+        assert!(!dir.join("config.toml.bad-20261122-151500").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

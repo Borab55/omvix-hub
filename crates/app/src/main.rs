@@ -437,13 +437,9 @@ fn main() {
 
     let cfg_path = AppConfig::default_config_path();
     let cfg_existed = cfg_path.exists();
-    let (mut cfg, cfg_warnings) = AppConfig::load_from_path_with_warnings(&cfg_path)
-        .unwrap_or_else(|err| {
-            (
-                AppConfig::default(),
-                vec![format!("Failed reading config, restored defaults: {err}")],
-            )
-        });
+    let outcome = AppConfig::load_or_quarantine_corrupt(&cfg_path);
+    let mut cfg = outcome.config;
+    let mut cfg_warnings = outcome.warnings;
     if cfg.general.theme == "light"
         && cfg.general.custom_theme == CustomThemeConfig::preset_dark_slate()
     {
@@ -459,10 +455,25 @@ fn main() {
     for warning in &cfg_warnings {
         tracing::warn!("Config validation notice: {warning}");
     }
-    if !smoke_test && cfg_existed && !cfg_warnings.is_empty() {
+    let i18n = I18n::new(&cfg.general.language);
+    if outcome.load_failed {
+        let err_detail = outcome.load_error.as_deref().unwrap_or("parse error");
+        if let Some(ref backup_path) = outcome.corrupt_backup {
+            let backup_str = backup_path.display().to_string();
+            cfg_warnings = vec![i18n.t_fmt(
+                "config.corrupt_backup_notice",
+                &[("path", &backup_str), ("error", err_detail)],
+            )];
+            if !smoke_test {
+                let _ = cfg.save_to_path(&cfg_path);
+            }
+        } else if cfg_existed {
+            cfg_warnings =
+                vec![i18n.t_fmt("config.corrupt_rename_failed", &[("error", err_detail)])];
+        }
+    } else if !smoke_test && cfg_existed && !cfg_warnings.is_empty() {
         let _ = cfg.save_to_path(&cfg_path);
     }
-    let i18n = I18n::new(&cfg.general.language);
 
     if smoke_test {
         let (rgba, w, h) = build_tray_icon_rgba();

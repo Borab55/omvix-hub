@@ -18,7 +18,7 @@ pub mod updater;
 
 pub use app_profiles::{AppProfileRule, AppProfilesConfig};
 pub use battery_history::{BatteryHealthHistory, BatteryHealthRecord};
-pub use config::{AppConfig, BatteryProfile, CustomThemeConfig};
+pub use config::{AppConfig, BatteryProfile, ConfigLoadOutcome, CustomThemeConfig};
 pub use crash_guard::{crash_guard_path_for, CrashGuardState, SafeModeReason};
 pub use error::{OmvixError, Result};
 pub use history::{ChangeDomain, ChangeHistory, HardwareChangeEntry, RevertPayload};
