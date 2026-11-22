@@ -1,5 +1,6 @@
 use crate::theme::{
-    card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK, STATUS_WARN,
+    card_frame, feature_toggle_button, pill_button, section_title, status_badge, STATUS_ERR,
+    STATUS_OK, STATUS_WARN,
 };
 use crate::ui::charts::interactive_fan_curve;
 use crate::ui::control_committed;
@@ -64,12 +65,14 @@ pub fn render(
         });
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .checkbox(
-                    &mut cfg.thermal_fan.sync_windows_power_mode,
-                    i18n.t("thermal.sync_windows_power_mode"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("thermal.sync_windows_power_mode"),
+                &mut cfg.thermal_fan.sync_windows_power_mode,
+                &i18n.t("common.enabled"),
+                t,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -306,12 +309,14 @@ pub fn render(
 
         ui.add_space(6.0);
         ui.collapsing(i18n.t("fan.advanced_settings"), |ui| {
-            if ui
-                .checkbox(
-                    &mut cfg.thermal_fan.keep_alive_enabled,
-                    i18n.t("fan.keep_alive"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("fan.keep_alive"),
+                &mut cfg.thermal_fan.keep_alive_enabled,
+                &i18n.t("common.enabled"),
+                t,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));

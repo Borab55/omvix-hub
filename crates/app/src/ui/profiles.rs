@@ -1,5 +1,6 @@
 use crate::theme::{
-    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK,
+    accent_color, card_frame, feature_toggle_button, pill_button, section_toggle_button,
+    status_badge, STATUS_ERR, STATUS_OK,
 };
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Ui};
@@ -229,10 +230,14 @@ pub fn render(
     // Card 1: AC / Battery Auto-Profile
     card_frame(t).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            section_title(ui, i18n.t("thermal.auto_profile"), t);
-            if ui
-                .checkbox(&mut cfg.auto_profile.enabled, i18n.t("common.enabled"))
-                .changed()
+            if section_toggle_button(
+                ui,
+                &i18n.t("thermal.auto_profile"),
+                &mut cfg.auto_profile.enabled,
+                &i18n.t("common.enabled"),
+                t,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -292,12 +297,14 @@ pub fn render(
                 supported_hz,
             );
             ui.add_space(4.0);
-            if ui
-                .checkbox(
-                    &mut cfg.auto_profile.dim_keyboard_on_battery,
-                    i18n.t("auto_profile.dim_keyboard_on_battery"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("auto_profile.dim_keyboard_on_battery"),
+                &mut cfg.auto_profile.dim_keyboard_on_battery,
+                &i18n.t("common.enabled"),
+                t,
+            )
+            .changed()
             {
                 changed = true;
             }
@@ -313,10 +320,14 @@ pub fn render(
     // Card 2: App-Based (.exe) Profiles
     card_frame(t).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            section_title(ui, i18n.t("profiles.app_profiles_title"), t);
-            if ui
-                .checkbox(&mut cfg.app_profiles.enabled, i18n.t("common.enabled"))
-                .changed()
+            if section_toggle_button(
+                ui,
+                &i18n.t("profiles.app_profiles_title"),
+                &mut cfg.app_profiles.enabled,
+                &i18n.t("common.enabled"),
+                t,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -572,7 +583,16 @@ pub fn render(
                 let is_active = st.active_app_profile_id.as_deref() == Some(rule.id.as_str());
                 ui.group(|ui| {
                     ui.horizontal_wrapped(|ui| {
-                        if ui.checkbox(&mut rule.enabled, "").changed() {
+                        let label = rule.display_label().to_string();
+                        if feature_toggle_button(
+                            ui,
+                            &label,
+                            &mut rule.enabled,
+                            &i18n.t("common.enabled"),
+                            t,
+                        )
+                        .changed()
+                        {
                             rules_changed = true;
                         }
                         if ui.add_enabled(idx > 0, egui::Button::new("▲")).clicked() {
@@ -585,7 +605,6 @@ pub fn render(
                             move_down = Some(idx);
                         }
 
-                        ui.label(RichText::new(rule.display_label()).strong());
                         ui.monospace(&rule.exe_name);
 
                         if is_active {

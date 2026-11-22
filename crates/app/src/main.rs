@@ -319,6 +319,221 @@ fn win32_drawer_anchor_pos(
     }
 }
 
+#[cfg(windows)]
+fn win32_find_drawer_hwnd(main_hwnd_raw: isize, drawer_title: &str) -> isize {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, FindWindowW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    let cur_pid = std::process::id();
+    let title_w = HSTRING::from(drawer_title);
+    if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(title_w.as_ptr())) } {
+        if !hwnd.is_invalid() && (hwnd.0 as isize) != main_hwnd_raw {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if pid == cur_pid && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                return hwnd.0 as isize;
+            }
+        }
+    }
+
+    struct SearchCtx {
+        cur_pid: u32,
+        main_hwnd: isize,
+        found: isize,
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = unsafe { &mut *(lparam.0 as *mut SearchCtx) };
+        if (hwnd.0 as isize) == ctx.main_hwnd || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return BOOL(1);
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid != ctx.cur_pid {
+            return BOOL(1);
+        }
+        let mut buf = [0u16; 128];
+        let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+        if len > 0 {
+            let text = String::from_utf16_lossy(&buf[..len as usize]);
+            if text.starts_with("Omvix Hub — ") {
+                ctx.found = hwnd.0 as isize;
+                return BOOL(0);
+            }
+        }
+        BOOL(1)
+    }
+
+    let mut ctx = SearchCtx {
+        cur_pid,
+        main_hwnd: main_hwnd_raw,
+        found: 0,
+    };
+    let _ = unsafe {
+        EnumWindows(
+            Some(enum_proc),
+            LPARAM((&mut ctx as *mut SearchCtx) as isize),
+        )
+    };
+    ctx.found
+}
+
+#[cfg(windows)]
+fn win32_link_drawer_owner(drawer_hwnd_raw: isize, main_hwnd_raw: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWLP_HWNDPARENT,
+    };
+
+    if drawer_hwnd_raw == 0 || main_hwnd_raw == 0 || drawer_hwnd_raw == main_hwnd_raw {
+        return;
+    }
+    let drawer = HWND(drawer_hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        if GetWindowLongPtrW(drawer, GWLP_HWNDPARENT) != main_hwnd_raw {
+            let _ = SetWindowLongPtrW(drawer, GWLP_HWNDPARENT, main_hwnd_raw);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn win32_set_window_movable(hwnd_raw: isize, movable: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnableMenuItem, GetSystemMenu, MF_BYCOMMAND, MF_ENABLED, MF_GRAYED, SC_MOVE,
+    };
+
+    if hwnd_raw == 0 {
+        return;
+    }
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        let menu = GetSystemMenu(hwnd, false);
+        if !menu.is_invalid() {
+            let flags = MF_BYCOMMAND | if movable { MF_ENABLED } else { MF_GRAYED };
+            let _ = EnableMenuItem(menu, SC_MOVE, flags);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn win32_sync_drawer_pos(main_hwnd_raw: isize, drawer_hwnd_raw: isize) {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SystemParametersInfoW, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE,
+        SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    };
+
+    if main_hwnd_raw == 0 || drawer_hwnd_raw == 0 {
+        return;
+    }
+    let main_hwnd = HWND(main_hwnd_raw as *mut std::ffi::c_void);
+    let drawer_hwnd = HWND(drawer_hwnd_raw as *mut std::ffi::c_void);
+    let mut work = RECT::default();
+    unsafe {
+        if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some((&mut work as *mut RECT).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_err()
+        {
+            return;
+        }
+        let Some((_m_wr, m_vis)) = win32_visible_bounds(main_hwnd) else {
+            return;
+        };
+        let Some((d_wr, d_vis)) = win32_visible_bounds(drawer_hwnd) else {
+            return;
+        };
+        let d_vis_w = d_vis.right - d_vis.left;
+        let d_vis_h = d_vis.bottom - d_vis.top;
+        if d_vis_w <= 0 || d_vis_h <= 0 {
+            return;
+        }
+        let d_shadow_left = d_vis.left - d_wr.left;
+        let d_shadow_top = d_vis.top - d_wr.top;
+        let target_vis_x = (m_vis.left - d_vis_w - 8).max(work.left + 8);
+        let target_vis_y = m_vis
+            .top
+            .clamp(work.top + 8, (work.bottom - d_vis_h - 8).max(work.top + 8));
+        let target_x = target_vis_x - d_shadow_left;
+        let target_y = target_vis_y - d_shadow_top;
+        if (d_wr.left - target_x).abs() <= 1 && (d_wr.top - target_y).abs() <= 1 {
+            return;
+        }
+        let _ = SetWindowPos(
+            drawer_hwnd,
+            HWND::default(),
+            target_x,
+            target_y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(windows)]
+fn win32_is_window(hwnd_raw: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+
+    hwnd_raw != 0 && unsafe { IsWindow(HWND(hwnd_raw as *mut std::ffi::c_void)) }.as_bool()
+}
+
+#[cfg(windows)]
+fn win32_raise_window_pair(main_hwnd_raw: isize, drawer_hwnd_raw: isize, drawer_is_active: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+
+    if main_hwnd_raw == 0 || drawer_hwnd_raw == 0 {
+        return;
+    }
+    let main_hwnd = HWND(main_hwnd_raw as *mut std::ffi::c_void);
+    let drawer_hwnd = HWND(drawer_hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        if drawer_is_active {
+            // Drawer is already focused/on top; bring owned main cockpit right beneath it.
+            let _ = SetWindowPos(
+                main_hwnd,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            let _ = SetWindowPos(
+                main_hwnd,
+                drawer_hwnd,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        } else {
+            // Main cockpit gained focus (e.g. via Alt+Tab); raise the owned drawer right above it.
+            let _ = SetWindowPos(
+                drawer_hwnd,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 #[cfg(not(windows))]
 fn win32_drawer_anchor_pos(
     _hwnd_raw: isize,
@@ -327,6 +542,33 @@ fn win32_drawer_anchor_pos(
     _ppp: f32,
 ) -> Option<egui::Pos2> {
     None
+}
+
+#[cfg(not(windows))]
+fn win32_find_drawer_hwnd(_main_hwnd_raw: isize, _drawer_title: &str) -> isize {
+    0
+}
+
+#[cfg(not(windows))]
+fn win32_link_drawer_owner(_drawer_hwnd_raw: isize, _main_hwnd_raw: isize) {}
+
+#[cfg(not(windows))]
+fn win32_set_window_movable(_hwnd_raw: isize, _movable: bool) {}
+
+#[cfg(not(windows))]
+fn win32_sync_drawer_pos(_main_hwnd_raw: isize, _drawer_hwnd_raw: isize) {}
+
+#[cfg(not(windows))]
+fn win32_is_window(_hwnd_raw: isize) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn win32_raise_window_pair(
+    _main_hwnd_raw: isize,
+    _drawer_hwnd_raw: isize,
+    _drawer_is_active: bool,
+) {
 }
 
 #[cfg(windows)]
@@ -645,9 +887,13 @@ struct OmvixApp {
     open_drawer: Option<Drawer>,
     fans_power_tab: FansPowerSubTab,
     extra_tab: ExtraSubTab,
+    drawer_hwnd: isize,
+    prev_dock_locked: Option<bool>,
+    drawer_dock_locked: Option<bool>,
     pending_dock_frames: u8,
     last_shown_at: Instant,
     prev_focused: bool,
+    drawer_prev_focused: bool,
     config_dirty_since: Option<Instant>,
     worker_dead: bool,
     worker_dead_recovery_attempted: bool,
@@ -655,8 +901,10 @@ struct OmvixApp {
     profiles_draft: ui::profiles::ProfilesDraftState,
     battery_draft: ui::battery::BatteryDraftState,
     lighting_draft: ui::lighting_display::LightingDisplayDraftState,
+    hotkeys_draft: ui::hotkeys::HotkeysDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
     hotkey_bind_status: ui::hotkeys::HotkeyBindStatus,
+    hotkey_capture_active: Arc<AtomicBool>,
     last_seen_auto_revision: u64,
     last_seen_config_sync_rev: u64,
     window_visible: Arc<AtomicBool>,
@@ -818,9 +1066,13 @@ impl OmvixApp {
             open_drawer: None,
             fans_power_tab: FansPowerSubTab::default(),
             extra_tab: ExtraSubTab::default(),
+            drawer_hwnd: 0,
+            prev_dock_locked: None,
+            drawer_dock_locked: None,
             pending_dock_frames: dock_initial,
             last_shown_at: Instant::now(),
             prev_focused: true,
+            drawer_prev_focused: false,
             config_dirty_since: None,
             worker_dead: false,
             worker_dead_recovery_attempted: false,
@@ -828,8 +1080,10 @@ impl OmvixApp {
             profiles_draft: ui::profiles::ProfilesDraftState::default(),
             battery_draft: ui::battery::BatteryDraftState::default(),
             lighting_draft: ui::lighting_display::LightingDisplayDraftState::default(),
+            hotkeys_draft: ui::hotkeys::HotkeysDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
             hotkey_bind_status: ui::hotkeys::HotkeyBindStatus::Disabled,
+            hotkey_capture_active: Arc::new(AtomicBool::new(false)),
             last_seen_auto_revision: 0,
             last_seen_config_sync_rev: 0,
             window_visible,
@@ -927,7 +1181,10 @@ impl OmvixApp {
         running_exes_empty: bool,
         pending_cmds: &mut Vec<WorkerCommand>,
     ) -> bool {
-        if ctx.wants_keyboard_input() || ctx.memory(|m| m.any_popup_open()) {
+        if self.hotkeys_draft.capturing_shortcut
+            || ctx.wants_keyboard_input()
+            || ctx.memory(|m| m.any_popup_open())
+        {
             return false;
         }
         let (num1, num2, num3, num4, tab_next, tab_prev, alt_left, alt_right, esc) =
@@ -1036,13 +1293,19 @@ impl OmvixApp {
                 }));
             }
 
-            if !self.cfg.hotkeys.global_toggle_shortcut.trim().is_empty() {
+            if !self.hotkey_capture_active.load(Ordering::Relaxed)
+                && !self.cfg.hotkeys.global_toggle_shortcut.trim().is_empty()
+            {
                 let combo = self.cfg.hotkeys.global_toggle_shortcut.trim().to_string();
                 let tx = self.signal_tx.clone();
                 let c = ctx.clone();
                 let vis = Arc::clone(&self.window_visible);
                 let hwnd = Arc::clone(&self.hwnd_atomic);
+                let cap_active = Arc::clone(&self.hotkey_capture_active);
                 match spawn_global_hotkey_listener(&combo, move || {
+                    if cap_active.load(Ordering::Relaxed) {
+                        return;
+                    }
                     let prev = vis.fetch_xor(true, Ordering::SeqCst);
                     let next = !prev;
                     win32_set_visible(hwnd.load(Ordering::SeqCst), next);
@@ -1324,19 +1587,24 @@ impl eframe::App for OmvixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_signals(ctx);
 
+        let main_hwnd = self.hwnd_atomic.load(Ordering::SeqCst);
+        let dock_locked = self.cfg.general.dock_bottom_right;
+        if main_hwnd != 0 && self.prev_dock_locked != Some(dock_locked) {
+            self.prev_dock_locked = Some(dock_locked);
+            win32_set_window_movable(main_hwnd, !dock_locked);
+        }
+
         if self.pending_dock_frames > 0 {
             self.pending_dock_frames -= 1;
             if self.cfg.general.dock_bottom_right {
-                win32_dock_bottom_right(self.hwnd_atomic.load(Ordering::SeqCst));
+                win32_dock_bottom_right(main_hwnd);
             }
             if self.pending_dock_frames > 0 {
                 ctx.request_repaint();
             }
-        } else if self.cfg.general.dock_bottom_right
-            && self.window_visible.load(Ordering::Relaxed)
-            && !ctx.is_using_pointer()
+        } else if self.cfg.general.dock_bottom_right && self.window_visible.load(Ordering::Relaxed)
         {
-            win32_dock_bottom_right(self.hwnd_atomic.load(Ordering::SeqCst));
+            win32_dock_bottom_right(main_hwnd);
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -1351,6 +1619,7 @@ impl eframe::App for OmvixApp {
         }
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let main_gained_focus = focused && !self.prev_focused;
         if self.cfg.general.hide_on_focus_loss
             && !self.show_wizard
             && self.open_drawer.is_none()
@@ -1461,6 +1730,8 @@ impl eframe::App for OmvixApp {
         let mut should_hide_to_tray = false;
         let mut should_quit = false;
         let mut toggle_drawer: Option<Drawer> = None;
+        let mut open_drawer_exact: Option<Drawer> = None;
+        let mut open_fans_power: Option<FansPowerSubTab> = None;
         let mut open_extra: Option<ExtraSubTab> = None;
         let mut open_profiles = false;
 
@@ -1514,6 +1785,8 @@ impl eframe::App for OmvixApp {
                         &snapshot_state,
                         &self.i18n,
                         self.open_drawer,
+                        self.fans_power_tab,
+                        self.extra_tab,
                         COMPACT_SIZE[0],
                         self.worker_dead,
                         &mut self.config_warnings,
@@ -1521,6 +1794,8 @@ impl eframe::App for OmvixApp {
                         &mut mark_save,
                     );
                     toggle_drawer = res.toggle_drawer;
+                    open_drawer_exact = res.open_drawer_exact;
+                    open_fans_power = res.open_fans_power_subtab;
                     open_extra = res.open_extra_subtab;
                     if res.open_profiles {
                         open_profiles = true;
@@ -1543,15 +1818,31 @@ impl eframe::App for OmvixApp {
             if snapshot_state.running_exes_snapshot.is_empty() {
                 pending_cmds.push(WorkerCommand::RefreshRunningProcesses);
             }
+        } else if let Some(sub) = open_fans_power {
+            self.fans_power_tab = sub;
+            self.open_drawer = Some(Drawer::FansPower);
+            if sub == FansPowerSubTab::Profiles && snapshot_state.running_exes_snapshot.is_empty() {
+                pending_cmds.push(WorkerCommand::RefreshRunningProcesses);
+            }
         } else if let Some(sub) = open_extra {
             self.extra_tab = sub;
             self.open_drawer = Some(Drawer::Extra);
+        } else if let Some(d) = open_drawer_exact {
+            self.open_drawer = Some(d);
         } else if let Some(d) = toggle_drawer {
             self.open_drawer = if self.open_drawer == Some(d) {
                 None
             } else {
                 Some(d)
             };
+        }
+
+        if self.open_drawer != Some(Drawer::Extra)
+            || self.extra_tab != ExtraSubTab::Hotkeys
+            || self.show_wizard
+            || !self.window_visible.load(Ordering::Relaxed)
+        {
+            self.hotkeys_draft.capturing_shortcut = false;
         }
 
         self.process_keyboard_nav(
@@ -1573,8 +1864,9 @@ impl eframe::App for OmvixApp {
                     Drawer::Battery => self.i18n.t("nav.battery"),
                     Drawer::Extra => self.i18n.t("drawer.extra"),
                 };
+                let drawer_title_full = format!("Omvix Hub — {drawer_title}");
                 let mut builder = egui::ViewportBuilder::default()
-                    .with_title(format!("Omvix Hub — {drawer_title}"))
+                    .with_title(&drawer_title_full)
                     .with_inner_size(DRAWER_SIZE)
                     .with_resizable(false)
                     .with_maximize_button(false)
@@ -1591,12 +1883,19 @@ impl eframe::App for OmvixApp {
 
                 let mut close_drawer = false;
                 let mut theme_applied = false;
+                let mut drawer_gained_focus = false;
                 let drawer_id = egui::ViewportId::from_hash_of("omvix_drawer_viewport");
                 ctx.show_viewport_immediate(drawer_id, builder, |drawer_ctx, _class| {
                     if drawer_ctx.input(|i| i.viewport().close_requested()) {
                         close_drawer = true;
                         return;
                     }
+                    let drawer_focused =
+                        drawer_ctx.input(|i| i.viewport().focused.unwrap_or(false));
+                    if drawer_focused && !self.drawer_prev_focused {
+                        drawer_gained_focus = true;
+                    }
+                    self.drawer_prev_focused = drawer_focused;
                     if self.process_keyboard_nav(
                         drawer_ctx,
                         snapshot_state.running_exes_snapshot.is_empty(),
@@ -1641,12 +1940,10 @@ impl eframe::App for OmvixApp {
                                             (FansPowerSubTab::Profiles, "drawer.sub_profiles"),
                                             (FansPowerSubTab::Tuning, "drawer.sub_cpu_power"),
                                         ] {
-                                            if theme::tile_button(
+                                            if theme::pill_button(
                                                 ui,
                                                 &self.i18n.t(key),
                                                 self.fans_power_tab == sub,
-                                                152.0,
-                                                28.0,
                                                 &current_theme,
                                             )
                                             .clicked()
@@ -1677,12 +1974,10 @@ impl eframe::App for OmvixApp {
                                             (ExtraSubTab::Diagnostics, "drawer.sub_diagnostics"),
                                             (ExtraSubTab::Settings, "drawer.sub_settings"),
                                         ] {
-                                            if theme::tile_button(
+                                            if theme::pill_button(
                                                 ui,
                                                 &self.i18n.t(key),
                                                 self.extra_tab == sub,
-                                                114.0,
-                                                28.0,
                                                 &current_theme,
                                             )
                                             .clicked()
@@ -1696,12 +1991,10 @@ impl eframe::App for OmvixApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if theme::tile_button(
+                                        if theme::pill_button(
                                             ui,
                                             &self.i18n.t("drawer.collapse"),
                                             false,
-                                            88.0,
-                                            28.0,
                                             &current_theme,
                                         )
                                         .clicked()
@@ -1786,6 +2079,7 @@ impl eframe::App for OmvixApp {
                                             &self.i18n,
                                             &self.hotkey_bind_status,
                                             &self.config_warnings,
+                                            &mut self.hotkeys_draft,
                                             &mut push_cmd,
                                             &mut mark_save,
                                             &mut || should_rebind_hotkeys = true,
@@ -1844,8 +2138,39 @@ impl eframe::App for OmvixApp {
                         });
                 });
 
-                if close_drawer {
+                if close_drawer || self.open_drawer.is_none() {
                     self.open_drawer = None;
+                    self.drawer_hwnd = 0;
+                    self.drawer_dock_locked = None;
+                    self.drawer_prev_focused = false;
+                } else if main_hwnd != 0 {
+                    let dh = if win32_is_window(self.drawer_hwnd) {
+                        self.drawer_hwnd
+                    } else {
+                        self.drawer_dock_locked = None;
+                        let found = win32_find_drawer_hwnd(main_hwnd, &drawer_title_full);
+                        if found != 0 {
+                            self.drawer_hwnd = found;
+                            win32_link_drawer_owner(found, main_hwnd);
+                        } else {
+                            self.drawer_hwnd = 0;
+                        }
+                        found
+                    };
+                    if dh != 0 {
+                        if self.drawer_dock_locked != Some(dock_locked) {
+                            self.drawer_dock_locked = Some(dock_locked);
+                            win32_set_window_movable(dh, !dock_locked);
+                        }
+                        if dock_locked {
+                            win32_sync_drawer_pos(main_hwnd, dh);
+                        }
+                        if main_gained_focus {
+                            win32_raise_window_pair(main_hwnd, dh, false);
+                        } else if drawer_gained_focus {
+                            win32_raise_window_pair(main_hwnd, dh, true);
+                        }
+                    }
                 }
                 if theme_applied {
                     theme::apply_theme(
@@ -1854,7 +2179,32 @@ impl eframe::App for OmvixApp {
                         self.cfg.general.font_scale_pct,
                     );
                 }
+            } else {
+                self.drawer_hwnd = 0;
+                self.drawer_dock_locked = None;
+                self.drawer_prev_focused = false;
             }
+        } else {
+            self.drawer_hwnd = 0;
+            self.drawer_dock_locked = None;
+            self.drawer_prev_focused = false;
+        }
+
+        let capture_now = self.hotkeys_draft.capturing_shortcut
+            && self.open_drawer == Some(Drawer::Extra)
+            && self.extra_tab == ExtraSubTab::Hotkeys
+            && !self.show_wizard
+            && self.window_visible.load(Ordering::Relaxed);
+        let prev_capture = self
+            .hotkey_capture_active
+            .swap(capture_now, Ordering::Relaxed);
+        if capture_now && !prev_capture {
+            #[cfg(windows)]
+            if let Some(old) = self.hotkey_listener.take() {
+                old.stop();
+            }
+        } else if !capture_now && prev_capture {
+            should_rebind_hotkeys = true;
         }
 
         if should_restore_defaults {

@@ -1,5 +1,6 @@
 use crate::theme::{
-    accent_color, compact_card, pill_button, section_title, status_badge, STATUS_OK, STATUS_WARN,
+    accent_color, compact_card, feature_toggle_button, pill_button, section_title, status_badge,
+    STATUS_OK, STATUS_WARN,
 };
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Ui};
@@ -240,27 +241,33 @@ fn render_step_autostart(
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
 ) {
-    section_title(ui, i18n.t("wizard.step2_title"), &cfg.general.custom_theme);
+    let t = &cfg.general.custom_theme.clone();
+    section_title(ui, i18n.t("wizard.step2_title"), t);
     ui.label(i18n.t("wizard.step2_desc"));
     ui.add_space(6.0);
 
-    if ui
-        .checkbox(
-            &mut cfg.general.start_with_windows,
-            i18n.t("wizard.autostart_toggle"),
-        )
-        .changed()
+    if feature_toggle_button(
+        ui,
+        &i18n.t("wizard.autostart_toggle"),
+        &mut cfg.general.start_with_windows,
+        &i18n.t("common.enabled"),
+        t,
+    )
+    .changed()
     {
         on_save();
         on_cmd(WorkerCommand::SetAutostart(cfg.general.start_with_windows));
     }
 
-    if ui
-        .checkbox(
-            &mut cfg.general.start_minimized,
-            i18n.t("settings.start_minimized"),
-        )
-        .changed()
+    ui.add_space(4.0);
+    if feature_toggle_button(
+        ui,
+        &i18n.t("settings.start_minimized"),
+        &mut cfg.general.start_minimized,
+        &i18n.t("common.enabled"),
+        t,
+    )
+    .changed()
     {
         on_save();
     }
@@ -356,10 +363,16 @@ fn render_step_battery(
         }
     });
 
+    let t = &cfg.general.custom_theme.clone();
     ui.add_space(6.0);
-    if ui
-        .checkbox(&mut cfg.battery.enabled, i18n.t("battery.charge_limit"))
-        .changed()
+    if feature_toggle_button(
+        ui,
+        &i18n.t("battery.charge_limit"),
+        &mut cfg.battery.enabled,
+        &i18n.t("common.enabled"),
+        t,
+    )
+    .changed()
     {
         if cfg.battery.enabled && cfg.battery.mode == BatteryChargeMode::Auto {
             cfg.battery.mode = BatteryChargeMode::Inhibit;
@@ -368,12 +381,15 @@ fn render_step_battery(
         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
     }
 
-    if ui
-        .checkbox(
-            &mut cfg.battery.hold_when_shutdown,
-            i18n.t("battery.hold_when_shutdown"),
-        )
-        .changed()
+    ui.add_space(4.0);
+    if feature_toggle_button(
+        ui,
+        &i18n.t("battery.hold_when_shutdown"),
+        &mut cfg.battery.hold_when_shutdown,
+        &i18n.t("common.enabled"),
+        t,
+    )
+    .changed()
     {
         on_save();
         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));

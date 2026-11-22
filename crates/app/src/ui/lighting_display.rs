@@ -1,15 +1,17 @@
 use crate::theme::{
-    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_WARN,
+    accent_color, card_frame, fixed_color_picker_button, lighting_swatch_button, pill_button,
+    section_title, section_toggle_button, status_badge, ColorButtonStyle, STATUS_ERR, STATUS_WARN,
 };
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
-use omvix_core::{AppConfig, GpuMode, I18n, KeyboardType, RgbColor};
+use omvix_core::{AppConfig, GpuMode, I18n, KeyboardType, LightingProfile, RgbColor};
 
 #[derive(Debug, Default, Clone)]
 pub struct LightingDisplayDraftState {
     pub pending_gpu_mode: Option<GpuMode>,
     pub reboot_dismissed: bool,
+    pub profile_name: String,
 }
 
 pub fn render(
@@ -29,23 +31,30 @@ pub fn render(
 
     // Keyboard Backlight & RGB Card
     card_frame(t).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            section_title(ui, i18n.t("lighting.keyboard"), t);
-            status_badge(ui, &format!("{:?}", st.keyboard_type), accent);
-        });
-
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(&mut cfg.lighting.enabled, i18n.t("common.enabled"))
-                .changed()
+        ui.horizontal_wrapped(|ui| {
+            if section_toggle_button(
+                ui,
+                &i18n.t("lighting.keyboard"),
+                &mut cfg.lighting.enabled,
+                &i18n.t("common.enabled"),
+                t,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 on_cmd(WorkerCommand::ApplyLighting);
             }
-            ui.add_space(10.0);
+            status_badge(ui, &format!("{:?}", st.keyboard_type), accent);
+        });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
             ui.label(i18n.t("lighting.brightness"));
             let resp = ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
+            if resp.changed() {
+                cfg.lighting.active_profile_id = None;
+            }
             if control_committed(ui, "lighting_brightness", &resp) {
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -66,13 +75,24 @@ pub fn render(
                 for (z, cur) in cfg.lighting.zones.iter_mut().take(zone_count).enumerate() {
                     let mut srgb = [cur.r, cur.g, cur.b];
                     ui.label(i18n.t_fmt("lighting.zone", &[("index", &(z + 1).to_string())]));
-                    let resp = ui.color_edit_button_srgb(&mut srgb);
+                    let resp = fixed_color_picker_button(
+                        ui,
+                        ("lighting_zone_picker", z),
+                        &mut srgb,
+                        ColorButtonStyle::Swatch {
+                            size: egui::vec2(34.0, 20.0),
+                            radius: 5,
+                        },
+                        t,
+                    );
                     if resp.changed() {
                         *cur = RgbColor {
                             r: srgb[0],
                             g: srgb[1],
                             b: srgb[2],
                         };
+                        cfg.lighting.enabled = true;
+                        cfg.lighting.active_profile_id = None;
                     }
                     if control_committed(ui, ("lighting_zone_color", z), &resp) {
                         zone_committed = true;
@@ -86,49 +106,133 @@ pub fn render(
                 on_cmd(WorkerCommand::ApplyLighting);
             }
 
+            ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(i18n.t("lighting.presets"));
-                for (label, rgb) in [
-                    (
-                        "Cyan",
-                        RgbColor {
-                            r: 0,
-                            g: 180,
-                            b: 216,
-                        },
-                    ),
-                    (
-                        "White",
-                        RgbColor {
-                            r: 245,
-                            g: 245,
-                            b: 255,
-                        },
-                    ),
-                    (
-                        "Crimson",
-                        RgbColor {
-                            r: 220,
-                            g: 38,
-                            b: 38,
-                        },
-                    ),
-                    (
-                        "Emerald",
-                        RgbColor {
-                            r: 34,
-                            g: 197,
-                            b: 94,
-                        },
-                    ),
-                ] {
-                    if ui.button(label).clicked() {
-                        cfg.lighting.zones = [rgb; 4];
-                        cfg.lighting.enabled = true;
+                for preset in LightingProfile::builtins() {
+                    let selected = is_lighting_profile_active(cfg, &preset);
+                    if lighting_swatch_button(ui, &preset.zones, selected, &preset.name, t)
+                        .clicked()
+                    {
+                        apply_lighting_profile(cfg, &preset);
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                         on_cmd(WorkerCommand::ApplyLighting);
                     }
+                    if pill_button(ui, &preset.name, selected, t).clicked() {
+                        apply_lighting_profile(cfg, &preset);
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyLighting);
+                    }
+                }
+            });
+
+            ui.separator();
+            section_title(ui, i18n.t("lighting.profiles_title"), t);
+            ui.add_space(4.0);
+
+            if cfg.lighting.custom_profiles.is_empty() {
+                ui.weak(i18n.t("lighting.no_custom_profiles"));
+            } else {
+                let mut apply_prof: Option<LightingProfile> = None;
+                let mut delete_idx: Option<usize> = None;
+                for (idx, prof) in cfg.lighting.custom_profiles.iter().enumerate() {
+                    let is_active = is_lighting_profile_active(cfg, prof);
+                    ui.horizontal_wrapped(|ui| {
+                        if lighting_swatch_button(ui, &prof.zones, is_active, &prof.name, t)
+                            .clicked()
+                        {
+                            apply_prof = Some(prof.clone());
+                        }
+                        if pill_button(
+                            ui,
+                            &format!("{} ({}%)", prof.name, prof.brightness_pct),
+                            is_active,
+                            t,
+                        )
+                        .clicked()
+                        {
+                            apply_prof = Some(prof.clone());
+                        }
+                        if ui.button(i18n.t("lighting.delete_profile")).clicked() {
+                            delete_idx = Some(idx);
+                        }
+                    });
+                }
+                if let Some(p) = apply_prof {
+                    apply_lighting_profile(cfg, &p);
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    on_cmd(WorkerCommand::ApplyLighting);
+                }
+                if let Some(idx) = delete_idx {
+                    let removed = cfg.lighting.custom_profiles.remove(idx);
+                    if cfg.lighting.active_profile_id.as_deref() == Some(&removed.id) {
+                        cfg.lighting.active_profile_id = None;
+                    }
+                    on_save();
+                }
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(i18n.t("lighting.profile_name"));
+                ui.text_edit_singleline(&mut draft.profile_name);
+                if ui
+                    .button(RichText::new(i18n.t("lighting.save_profile")).strong())
+                    .clicked()
+                {
+                    let clean_name = draft.profile_name.trim();
+                    let final_name = if clean_name.is_empty() {
+                        format!(
+                            "RGB {:02X}{:02X}{:02X}",
+                            cfg.lighting.zones[0].r,
+                            cfg.lighting.zones[0].g,
+                            cfg.lighting.zones[0].b
+                        )
+                    } else {
+                        clean_name.to_string()
+                    };
+                    let slug_base = final_name
+                        .to_lowercase()
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                        .collect::<String>()
+                        .trim_matches('-')
+                        .to_string();
+                    let base = if slug_base.is_empty() {
+                        "rgb".to_string()
+                    } else {
+                        slug_base
+                    };
+                    let mut candidate = base.clone();
+                    let mut n = 2usize;
+                    while cfg
+                        .lighting
+                        .custom_profiles
+                        .iter()
+                        .any(|p| p.id == candidate)
+                        || LightingProfile::builtins()
+                            .iter()
+                            .any(|p| p.id == candidate)
+                    {
+                        candidate = format!("{base}-{n}");
+                        n += 1;
+                    }
+                    let prof = LightingProfile {
+                        id: candidate,
+                        name: final_name,
+                        brightness_pct: cfg.lighting.brightness_pct,
+                        zones: cfg.lighting.zones,
+                        builtin: false,
+                    };
+                    apply_lighting_profile(cfg, &prof);
+                    cfg.lighting.custom_profiles.push(prof);
+                    draft.profile_name.clear();
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    on_cmd(WorkerCommand::ApplyLighting);
                 }
             });
         }
@@ -235,4 +339,18 @@ pub fn render(
             ui.colored_label(STATUS_WARN, i18n.t("tuning.admin_required_warning"));
         }
     });
+}
+
+pub fn apply_lighting_profile(cfg: &mut AppConfig, profile: &LightingProfile) {
+    cfg.lighting.zones = profile.zones;
+    cfg.lighting.brightness_pct = profile.brightness_pct;
+    cfg.lighting.enabled = true;
+    cfg.lighting.active_profile_id = Some(profile.id.clone());
+}
+
+pub fn is_lighting_profile_active(cfg: &AppConfig, profile: &LightingProfile) -> bool {
+    if cfg.lighting.active_profile_id.as_deref() == Some(&profile.id) {
+        return cfg.lighting.enabled && cfg.lighting.zones == profile.zones;
+    }
+    cfg.lighting.enabled && cfg.lighting.zones == profile.zones
 }

@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Custom Theme Library (`core/config.rs`, `ui/settings.rs`):** Added save, apply, and delete management for user custom themes (`GeneralConfig::custom_themes`) with `CURRENT_CONFIG_VERSION = 6` migration preserving existing v5 settings.
+- **Keyboard Lighting Profiles (`core/config.rs`, `ui/lighting_display.rs`, `ui/cockpit.rs`):** Added `LightingProfile` presets (`Cyan`, `White`, `Crimson`, `Emerald`) and user custom 4-zone + brightness lighting profiles (`LightingConfig::custom_profiles`, `active_profile_id`) with multi-zone preview swatches in both the drawer and cockpit.
+- **Card Quick-Detail Dial Buttons & Shortcut Auto-Capture (`theme.rs`, `ui/cockpit.rs`, `ui/hotkeys.rs`, `main.rs`):** Added header dial buttons (`detail_dial_button`) on cockpit cards to jump directly to their corresponding detail tab/sub-tab, and replaced manual shortcut text typing with simultaneous key combination capture (`evaluate_shortcut_capture`) while suspending global hotkey execution during capture.
+
+### Changed
+- **Illuminated Text Toggle Buttons (`theme.rs`, `ui/*.rs`):** Replaced `.checkbox(...)` controls across the cockpit and all detail views with illuminated text-button toggles (`feature_toggle_button`, `section_toggle_button`) showing an active badge when enabled and dimming when disabled.
+- **Cockpit Battery Card & Travel Charge Labeling (`ui/cockpit.rs`, `locales/*.json`):** Removed the manual stop-threshold slider from the cockpit Battery card while keeping all built-in and custom battery profiles visible, and clarified the one-time 100% charge button label (`cockpit.travel_short`) and tooltip.
+- **Keyboard Swatch Styling, Color-Wheel Icon & Drawer Tab Sizing (`theme.rs`, `ui/cockpit.rs`, `main.rs`):** Upgraded keyboard swatches (`lighting_swatch_button`), switched the cockpit custom color trigger to an HSV ring wheel (`ColorButtonStyle::ColorWheel`), and replaced fixed-width drawer sub-tab tiles with auto-sizing `pill_button` controls.
+
 ### Security
 - **G1 — DLL & Executable Search Path Hardening (`paths.rs`, `power_mode.rs`, `telemetry.rs`, `main.rs`, CI):** Called `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` at startup in both `omvix-hub` and `omvix-cli`, switched `powrprof.dll` to `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)`, pinned NVML loading to `%SystemRoot%\System32\nvml.dll`, resolved all spawned Windows utilities via `GetSystemDirectoryW` / `GetWindowsDirectoryW` (`system_tool`), and added a CI grep guard against bare system invocations and unsafe loader calls.
 - **G4 — In-Memory Task Scheduler Registration (`autostart.rs`):** Replaced temporary XML creation in `%TEMP%` and `schtasks.exe` subprocesses with direct Task Scheduler COM API (`ITaskService::Connect`, `GetFolder("\\")`, `RegisterTask`, `GetTask`, `DeleteTask`) and set `<AllowHardTerminate>true</AllowHardTerminate>`.
@@ -13,6 +23,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 - **H2 — Corrupt Config Quarantine (`config.rs`, `main.rs`, `cockpit.rs`):** Preserved unreadable `config.toml` files as `config.toml.bad-<YYYYMMDD-HHMMSS>` instead of silently discarding them, and surfaced a localized persistent UI warning banner.
 - **H1 — Travel Charge Expiration & Persistence (`config.rs`, `battery_care.rs`, `battery_service.rs`, `worker.rs`, UI):** Added `travel_charge_until_utc` with a 12-hour deadline and `CURRENT_CONFIG_VERSION = 5` migration clearing legacy unbounded flags, atomically persisted cleared travel state from `OmvixBatteryService`, and synced cleared state back to the GUI/config so restarts never re-arm 100% charging.
 - **H3 — Explicit `BatteryChargeMode::Unknown` (`models.rs`, `battery.rs`, `worker.rs`, tray/UI):** Distinguished unreadable or unrecognized `0x2B` firmware responses as `BatteryChargeMode::Unknown` instead of `Auto`, prevented `ApplyBatteryNow` from skipping firmware writes when mode is unknown, rejected writing `Unknown` in `set_charge_mode`, and localized UI/tray labels.
+- **Vertical Support Bundle Button (`ui/diagnostics.rs`, `theme.rs`):** Separated the diagnostics heading from the button row and added `pill_button_enabled` with `TextWrapMode::Extend` so long localized button labels stay single-line horizontal.
+- **RGB Color Picker Width Expansion (`theme.rs`, `ui/lighting_display.rs`, `ui/settings.rs`, `ui/cockpit.rs`):** Replaced `egui::color_edit_button_srgb` with fixed-width `fixed_color_picker_button` (248 px popup and fixed 78 px RGB inputs) so 3-digit R/G/B values never widen the popup or create empty right-hand gaps.
+- **Drawer Alt+Tab Ownership & Docked Move Lock (`main.rs`):** Linked the drawer HWND to the main cockpit owner (`GWLP_HWNDPARENT`), raised both windows together on focus (`win32_raise_window_pair`), disabled `SC_MOVE` and kept the drawer anchored when `dock_bottom_right` is enabled.
 
 ## [0.5.1] - 2026-11-22
 

@@ -1,5 +1,6 @@
 use crate::theme::{
-    card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK, STATUS_WARN,
+    card_frame, feature_toggle_button, fixed_color_picker_button, pill_button, rgb, section_title,
+    status_badge, ColorButtonStyle, STATUS_ERR, STATUS_OK, STATUS_WARN,
 };
 use crate::ui::{control_committed, default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
@@ -98,51 +99,65 @@ pub fn render(
             }
         });
 
-        if ui
-            .checkbox(
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if feature_toggle_button(
+                ui,
+                &i18n.t("common.minimize_to_tray_on_close"),
                 &mut cfg.general.minimize_to_tray_on_close,
-                i18n.t("common.minimize_to_tray_on_close"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-        }
-        if ui
-            .checkbox(
+            {
+                on_save();
+            }
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.dock_bottom_right"),
                 &mut cfg.general.dock_bottom_right,
-                i18n.t("settings.dock_bottom_right"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-            actions.dock_changed = true;
-        }
-        if ui
-            .checkbox(
+            {
+                on_save();
+                actions.dock_changed = true;
+            }
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.hide_on_focus_loss"),
                 &mut cfg.general.hide_on_focus_loss,
-                i18n.t("settings.hide_on_focus_loss"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-        }
-        if ui
-            .checkbox(
+            {
+                on_save();
+            }
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.start_minimized"),
                 &mut cfg.general.start_minimized,
-                i18n.t("settings.start_minimized"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-        }
+            {
+                on_save();
+            }
+        });
+        ui.add_space(4.0);
 
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .checkbox(
-                    &mut cfg.general.start_with_windows,
-                    i18n.t("common.start_with_windows"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("common.start_with_windows"),
+                &mut cfg.general.start_with_windows,
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
+            )
+            .changed()
             {
                 on_save();
                 on_cmd(WorkerCommand::SetAutostart(cfg.general.start_with_windows));
@@ -210,9 +225,14 @@ pub fn render(
         });
         ui.add_space(4.0);
         let mut high_contrast = cfg.general.custom_theme.is_high_contrast();
-        if ui
-            .checkbox(&mut high_contrast, i18n.t("settings.high_contrast_mode"))
-            .changed()
+        if feature_toggle_button(
+            ui,
+            &i18n.t("settings.high_contrast_mode"),
+            &mut high_contrast,
+            &i18n.t("common.enabled"),
+            &theme_snapshot,
+        )
+        .changed()
         {
             cfg.general.custom_theme = if high_contrast {
                 CustomThemeConfig::preset_high_contrast()
@@ -259,12 +279,14 @@ pub fn render(
             {
                 on_save();
             }
-            if ui
-                .checkbox(
-                    &mut cfg.general.custom_theme.dark_base,
-                    i18n.t("settings.theme_dark_base"),
-                )
-                .changed()
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.theme_dark_base"),
+                &mut cfg.general.custom_theme.dark_base,
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
+            )
+            .changed()
             {
                 cfg.general.theme = if cfg.general.custom_theme.dark_base {
                     "dark".to_string()
@@ -274,6 +296,34 @@ pub fn render(
                 on_save();
                 actions.theme_changed = true;
             }
+            if pill_button(
+                ui,
+                &i18n.t("settings.save_theme_btn"),
+                false,
+                &theme_snapshot,
+            )
+            .clicked()
+            {
+                let mut to_save = cfg.general.custom_theme.clone();
+                let clean = to_save.name.trim();
+                to_save.name = if clean.is_empty() {
+                    format!("Theme {}", cfg.general.custom_themes.len() + 1)
+                } else {
+                    clean.to_string()
+                };
+                if let Some(existing) = cfg
+                    .general
+                    .custom_themes
+                    .iter_mut()
+                    .find(|x| x.name.eq_ignore_ascii_case(&to_save.name))
+                {
+                    *existing = to_save;
+                } else {
+                    cfg.general.custom_themes.push(to_save);
+                }
+                on_save();
+                draft.status_msg = Some((i18n.t("settings.theme_saved"), false));
+            }
         });
 
         ui.add_space(4.0);
@@ -281,8 +331,18 @@ pub fn render(
             .num_columns(6)
             .spacing([14.0, 6.0])
             .show(ui, |ui| {
+                let swatch_style = ColorButtonStyle::Swatch {
+                    size: egui::vec2(36.0, 20.0),
+                    radius: 5,
+                };
                 ui.label(i18n.t("settings.color_accent"));
-                let r0 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.accent);
+                let r0 = fixed_color_picker_button(
+                    ui,
+                    "settings_theme_accent",
+                    &mut cfg.general.custom_theme.accent,
+                    swatch_style,
+                    &theme_snapshot,
+                );
                 if r0.changed() {
                     actions.theme_changed = true;
                 }
@@ -291,7 +351,13 @@ pub fn render(
                 }
 
                 ui.label(i18n.t("settings.color_canvas"));
-                let r1 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.canvas_bg);
+                let r1 = fixed_color_picker_button(
+                    ui,
+                    "settings_theme_canvas",
+                    &mut cfg.general.custom_theme.canvas_bg,
+                    swatch_style,
+                    &theme_snapshot,
+                );
                 if r1.changed() {
                     actions.theme_changed = true;
                 }
@@ -300,7 +366,13 @@ pub fn render(
                 }
 
                 ui.label(i18n.t("settings.color_sidebar"));
-                let r2 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.sidebar_bg);
+                let r2 = fixed_color_picker_button(
+                    ui,
+                    "settings_theme_sidebar",
+                    &mut cfg.general.custom_theme.sidebar_bg,
+                    swatch_style,
+                    &theme_snapshot,
+                );
                 if r2.changed() {
                     actions.theme_changed = true;
                 }
@@ -310,7 +382,13 @@ pub fn render(
                 ui.end_row();
 
                 ui.label(i18n.t("settings.color_card"));
-                let r3 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.card_bg);
+                let r3 = fixed_color_picker_button(
+                    ui,
+                    "settings_theme_card",
+                    &mut cfg.general.custom_theme.card_bg,
+                    swatch_style,
+                    &theme_snapshot,
+                );
                 if r3.changed() {
                     actions.theme_changed = true;
                 }
@@ -319,7 +397,13 @@ pub fn render(
                 }
 
                 ui.label(i18n.t("settings.color_border"));
-                let r4 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.card_border);
+                let r4 = fixed_color_picker_button(
+                    ui,
+                    "settings_theme_border",
+                    &mut cfg.general.custom_theme.card_border,
+                    swatch_style,
+                    &theme_snapshot,
+                );
                 if r4.changed() {
                     actions.theme_changed = true;
                 }
@@ -328,7 +412,13 @@ pub fn render(
                 }
 
                 ui.label(i18n.t("settings.color_text"));
-                let r5 = ui.color_edit_button_srgb(&mut cfg.general.custom_theme.text_primary);
+                let r5 = fixed_color_picker_button(
+                    ui,
+                    "settings_theme_text",
+                    &mut cfg.general.custom_theme.text_primary,
+                    swatch_style,
+                    &theme_snapshot,
+                );
                 if r5.changed() {
                     actions.theme_changed = true;
                 }
@@ -337,6 +427,46 @@ pub fn render(
                 }
                 ui.end_row();
             });
+
+        ui.add_space(6.0);
+        section_title(ui, i18n.t("settings.saved_themes"), &theme_snapshot);
+        ui.add_space(4.0);
+        if cfg.general.custom_themes.is_empty() {
+            ui.weak(i18n.t("settings.no_saved_themes"));
+        } else {
+            let mut apply_saved: Option<CustomThemeConfig> = None;
+            let mut delete_saved: Option<usize> = None;
+            ui.horizontal_wrapped(|ui| {
+                for (idx, saved) in cfg.general.custom_themes.iter().enumerate() {
+                    let active = cfg.general.custom_theme == *saved;
+                    let dot_c = rgb(saved.accent);
+                    let (drect, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().circle_filled(drect.center(), 4.5, dot_c);
+                    if pill_button(ui, &saved.name, active, &theme_snapshot).clicked() {
+                        apply_saved = Some(saved.clone());
+                    }
+                    if ui.small_button(i18n.t("settings.delete_theme")).clicked() {
+                        delete_saved = Some(idx);
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+            if let Some(chosen) = apply_saved {
+                cfg.general.custom_theme = chosen.clone();
+                cfg.general.theme = if chosen.dark_base {
+                    "dark".to_string()
+                } else {
+                    "light".to_string()
+                };
+                on_save();
+                actions.theme_changed = true;
+            }
+            if let Some(idx) = delete_saved {
+                cfg.general.custom_themes.remove(idx);
+                on_save();
+            }
+        }
 
         ui.separator();
 
@@ -534,26 +664,32 @@ pub fn render(
         });
         ui.add_space(4.0);
 
-        if ui
-            .checkbox(
+        ui.horizontal_wrapped(|ui| {
+            if feature_toggle_button(
+                ui,
+                &i18n.t("updates.auto_check"),
                 &mut cfg.general.auto_check_updates,
-                i18n.t("updates.auto_check"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-        }
-        if ui
-            .checkbox(
+            {
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            }
+            if feature_toggle_button(
+                ui,
+                &i18n.t("updates.allow_unsigned"),
                 &mut cfg.general.allow_unsigned_sha256_updates,
-                i18n.t("updates.allow_unsigned"),
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
             )
             .changed()
-        {
-            on_save();
-            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-        }
+            {
+                on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            }
+        });
         ui.weak(RichText::new(i18n.t("updates.signature_policy_note")).size(11.0));
         ui.add_space(6.0);
 

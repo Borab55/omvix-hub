@@ -1,6 +1,6 @@
 use crate::theme::{
-    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK,
-    STATUS_WARN,
+    accent_color, card_frame, feature_toggle_button, pill_button, section_title,
+    section_toggle_button, status_badge, STATUS_ERR, STATUS_OK, STATUS_WARN,
 };
 use crate::ui::charts::battery_health_chart;
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
@@ -382,23 +382,25 @@ pub fn render(
 
     // Manual Charge Limiting & Travel Mode Card
     card_frame(t).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            section_title(ui, i18n.t("battery.charge_limit"), t);
-            if ui
-                .checkbox(&mut cfg.battery.enabled, i18n.t("common.enabled"))
-                .changed()
-            {
-                if !cfg.battery.enabled {
-                    cfg.battery.mode = BatteryChargeMode::Auto;
-                } else if cfg.battery.mode == BatteryChargeMode::Auto {
-                    cfg.battery.mode = BatteryChargeMode::Inhibit;
-                }
-                cfg.battery.active_profile_id = None;
-                on_save();
-                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                on_cmd(WorkerCommand::ApplyBatteryNow);
+        if section_toggle_button(
+            ui,
+            &i18n.t("battery.charge_limit"),
+            &mut cfg.battery.enabled,
+            &i18n.t("common.enabled"),
+            t,
+        )
+        .changed()
+        {
+            if !cfg.battery.enabled {
+                cfg.battery.mode = BatteryChargeMode::Auto;
+            } else if cfg.battery.mode == BatteryChargeMode::Auto {
+                cfg.battery.mode = BatteryChargeMode::Inhibit;
             }
-        });
+            cfg.battery.active_profile_id = None;
+            on_save();
+            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            on_cmd(WorkerCommand::ApplyBatteryNow);
+        }
 
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -454,12 +456,14 @@ pub fn render(
         }
 
         ui.add_space(6.0);
-        if ui
-            .checkbox(
-                &mut cfg.battery.hold_when_shutdown,
-                i18n.t("battery.hold_when_shutdown"),
-            )
-            .changed()
+        if feature_toggle_button(
+            ui,
+            &i18n.t("battery.hold_when_shutdown"),
+            &mut cfg.battery.hold_when_shutdown,
+            &i18n.t("common.enabled"),
+            t,
+        )
+        .changed()
         {
             on_save();
             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));

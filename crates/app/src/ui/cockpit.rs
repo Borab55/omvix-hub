@@ -1,20 +1,24 @@
 use crate::theme::{
     accent_color, clickable_status_badge, clickable_warning_badge, compact_card,
-    compact_status_pill, pill_button, rgb, section_title, status_badge, tile_button, STATUS_ERR,
-    STATUS_OK, STATUS_WARN,
+    compact_status_pill, detail_dial_button, fixed_color_picker_button, lighting_swatch_button,
+    pill_button, section_title, section_toggle_button, status_badge, tile_button, ColorButtonStyle,
+    STATUS_ERR, STATUS_OK, STATUS_WARN,
 };
-use crate::ui::{control_committed, Drawer, ExtraSubTab};
+use crate::ui::lighting_display::{apply_lighting_profile, is_lighting_profile_active};
+use crate::ui::{control_committed, Drawer, ExtraSubTab, FansPowerSubTab};
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{Color32, CornerRadius, RichText, Slider, Stroke, Ui};
+use egui::{Color32, RichText, Slider, Ui};
 use omvix_core::{
-    AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, PerformanceMode,
-    RgbColor, SafeModeReason, UpdateUiStatus,
+    AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, LightingProfile,
+    PerformanceMode, RgbColor, SafeModeReason, UpdateUiStatus,
 };
 use std::time::Duration;
 
 #[derive(Default)]
 pub struct CockpitActions {
     pub toggle_drawer: Option<Drawer>,
+    pub open_drawer_exact: Option<Drawer>,
+    pub open_fans_power_subtab: Option<FansPowerSubTab>,
     pub open_extra_subtab: Option<ExtraSubTab>,
     pub open_profiles: bool,
     pub restart_admin: bool,
@@ -29,6 +33,8 @@ pub fn render(
     st: &SharedState,
     i18n: &I18n,
     open_drawer: Option<Drawer>,
+    fans_power_tab: FansPowerSubTab,
+    extra_tab: ExtraSubTab,
     pane_width: f32,
     worker_dead: bool,
     config_warnings: &mut Vec<String>,
@@ -153,6 +159,14 @@ pub fn render(
         ui.horizontal(|ui| {
             ui.label(RichText::new(cpu_line).size(12.5).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mon_open = open_drawer == Some(Drawer::Monitor);
+                let mon_tip = i18n.t_fmt(
+                    "cockpit.open_detail_tooltip",
+                    &[("section", &i18n.t("monitor.title"))],
+                );
+                if detail_dial_button(ui, mon_open, &mon_tip, t).clicked() {
+                    actions.open_drawer_exact = Some(Drawer::Monitor);
+                }
                 if st.telemetry.gpu_sleeping {
                     ui.label(
                         RichText::new(format!("GPU — · {}", i18n.t("cockpit.gpu_sleep_short")))
@@ -433,6 +447,15 @@ pub fn render(
                 ui.horizontal(|ui| {
                     section_title(ui, i18n.t("thermal.mode"), t);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let perf_open = open_drawer == Some(Drawer::FansPower)
+                            && fans_power_tab == FansPowerSubTab::PerformanceFans;
+                        let perf_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_perf_fans"))],
+                        );
+                        if detail_dial_button(ui, perf_open, &perf_tip, t).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::PerformanceFans);
+                        }
                         if let Some(ref prof_name) = st.active_app_profile {
                             if clickable_status_badge(
                                 ui,
@@ -491,7 +514,20 @@ pub fn render(
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
-                section_title(ui, i18n.t("fan.mode"), t);
+                ui.horizontal(|ui| {
+                    section_title(ui, i18n.t("fan.mode"), t);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let fan_open = open_drawer == Some(Drawer::FansPower)
+                            && fans_power_tab == FansPowerSubTab::PerformanceFans;
+                        let fan_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_perf_fans"))],
+                        );
+                        if detail_dial_button(ui, fan_open, &fan_tip, t).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::PerformanceFans);
+                        }
+                    });
+                });
                 ui.add_space(3.0);
                 let items = [
                     (FanMode::Auto, i18n.t("cockpit.fan_auto")),
@@ -545,13 +581,22 @@ pub fn render(
                 ui.set_max_width(card_inner_w);
                 ui.horizontal(|ui| {
                     section_title(ui, i18n.t("home.quick_display"), t);
-                    if let Some(disp) = &st.display_mode {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let disp_open = open_drawer == Some(Drawer::Extra)
+                            && extra_tab == ExtraSubTab::LightingDisplay;
+                        let disp_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_lighting_display"))],
+                        );
+                        if detail_dial_button(ui, disp_open, &disp_tip, t).clicked() {
+                            actions.open_extra_subtab = Some(ExtraSubTab::LightingDisplay);
+                        }
+                        if let Some(disp) = &st.display_mode {
                             ui.weak(
                                 RichText::new(format!("{}x{}", disp.width, disp.height)).size(11.0),
                             );
-                        });
-                    }
+                        }
+                    });
                 });
                 ui.add_space(3.0);
                 if let Some(disp) = &st.display_mode {
@@ -579,7 +624,20 @@ pub fn render(
                 }
 
                 ui.add_space(5.0);
-                section_title(ui, i18n.t("home.quick_cpu_boost"), t);
+                ui.horizontal(|ui| {
+                    section_title(ui, i18n.t("home.quick_cpu_boost"), t);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let tune_open = open_drawer == Some(Drawer::FansPower)
+                            && fans_power_tab == FansPowerSubTab::Tuning;
+                        let tune_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_cpu_power"))],
+                        );
+                        if detail_dial_button(ui, tune_open, &tune_tip, t).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::Tuning);
+                        }
+                    });
+                });
                 ui.add_space(3.0);
                 let cur_boost = st
                     .cpu_boost
@@ -610,20 +668,40 @@ pub fn render(
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui.horizontal(|ui| {
-                    section_title(ui, i18n.t("home.quick_keyboard"), t);
-                    if ui
-                        .checkbox(&mut cfg.lighting.enabled, i18n.t("common.enabled"))
-                        .changed()
+                    if section_toggle_button(
+                        ui,
+                        &i18n.t("home.quick_keyboard"),
+                        &mut cfg.lighting.enabled,
+                        &i18n.t("common.enabled"),
+                        t,
+                    )
+                    .changed()
                     {
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                         on_cmd(WorkerCommand::ApplyLighting);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let light_open = open_drawer == Some(Drawer::Extra)
+                            && extra_tab == ExtraSubTab::LightingDisplay;
+                        let light_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("drawer.sub_lighting_display"))],
+                        );
+                        if detail_dial_button(ui, light_open, &light_tip, t).clicked() {
+                            actions.open_extra_subtab = Some(ExtraSubTab::LightingDisplay);
+                        }
+
                         let c0 = &mut cfg.lighting.zones[0];
                         let mut srgb = [c0.r, c0.g, c0.b];
-                        let resp = ui.color_edit_button_srgb(&mut srgb);
+                        let resp = fixed_color_picker_button(
+                            ui,
+                            "cockpit_kbd_wheel_picker",
+                            &mut srgb,
+                            ColorButtonStyle::ColorWheel { size: 22.0 },
+                            t,
+                        );
                         if resp.changed() {
                             let picked = RgbColor {
                                 r: srgb[0],
@@ -632,58 +710,61 @@ pub fn render(
                             };
                             cfg.lighting.zones = [picked; 4];
                             cfg.lighting.enabled = true;
+                            cfg.lighting.active_profile_id = None;
                         }
                         if control_committed(ui, "cockpit_kbd_color", &resp) {
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::ApplyLighting);
                         }
-                        let border_color = rgb(t.card_border);
-                        for rgb_preset in [
-                            RgbColor {
-                                r: 34,
-                                g: 197,
-                                b: 94,
-                            },
-                            RgbColor {
-                                r: 220,
-                                g: 38,
-                                b: 38,
-                            },
-                            RgbColor {
-                                r: 245,
-                                g: 245,
-                                b: 255,
-                            },
-                            RgbColor {
-                                r: 0,
-                                g: 180,
-                                b: 216,
-                            },
-                        ] {
-                            let swatch =
-                                Color32::from_rgb(rgb_preset.r, rgb_preset.g, rgb_preset.b);
-                            let btn = egui::Button::new("")
-                                .fill(swatch)
-                                .stroke(Stroke::new(1.0_f32, border_color))
-                                .corner_radius(CornerRadius::same(4))
-                                .min_size(egui::vec2(18.0, 18.0));
-                            if ui.add(btn).clicked() {
-                                cfg.lighting.zones = [rgb_preset; 4];
-                                cfg.lighting.enabled = true;
+                    });
+                });
+
+                ui.add_space(3.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
+                    for preset in LightingProfile::builtins() {
+                        let selected = is_lighting_profile_active(cfg, &preset);
+                        if lighting_swatch_button(ui, &preset.zones, selected, &preset.name, t)
+                            .clicked()
+                        {
+                            apply_lighting_profile(cfg, &preset);
+                            on_save();
+                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                            on_cmd(WorkerCommand::ApplyLighting);
+                        }
+                    }
+                    for custom in cfg.lighting.custom_profiles.clone() {
+                        let selected = is_lighting_profile_active(cfg, &custom);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            if lighting_swatch_button(ui, &custom.zones, selected, &custom.name, t)
+                                .clicked()
+                            {
+                                apply_lighting_profile(cfg, &custom);
                                 on_save();
                                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                                 on_cmd(WorkerCommand::ApplyLighting);
                             }
-                        }
-                    });
+                            if pill_button(ui, &custom.name, selected, t).clicked() {
+                                apply_lighting_profile(cfg, &custom);
+                                on_save();
+                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                                on_cmd(WorkerCommand::ApplyLighting);
+                            }
+                        });
+                    }
                 });
+
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.label(i18n.t("lighting.brightness"));
                     ui.spacing_mut().slider_width = (card_inner_w - 135.0).max(185.0);
                     let resp =
                         ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
+                    if resp.changed() {
+                        cfg.lighting.active_profile_id = None;
+                    }
                     if control_committed(ui, "cockpit_kbd_brightness", &resp) {
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -694,15 +775,19 @@ pub fn render(
 
             ui.add_space(5.0);
 
-            // Card E: Battery Charge Limit Presets + Threshold Slider
+            // Card E: Battery Charge Limit Profiles (All builtin + custom profiles)
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui.horizontal(|ui| {
-                    section_title(ui, i18n.t("home.quick_battery"), t);
-                    if ui
-                        .checkbox(&mut cfg.battery.enabled, i18n.t("common.enabled"))
-                        .changed()
+                    if section_toggle_button(
+                        ui,
+                        &i18n.t("home.quick_battery"),
+                        &mut cfg.battery.enabled,
+                        &i18n.t("common.enabled"),
+                        t,
+                    )
+                    .changed()
                     {
                         if !cfg.battery.enabled {
                             cfg.battery.mode = BatteryChargeMode::Auto;
@@ -715,10 +800,22 @@ pub fn render(
                         on_cmd(WorkerCommand::ApplyBatteryNow);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let bat_open = open_drawer == Some(Drawer::Battery);
+                        let bat_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("nav.battery"))],
+                        );
+                        if detail_dial_button(ui, bat_open, &bat_tip, t).clicked() {
+                            actions.open_drawer_exact = Some(Drawer::Battery);
+                        }
                         let now_utc = chrono::Utc::now().timestamp();
                         let travel_active = cfg.battery.is_travel_charge_active(now_utc);
                         let t_label = i18n.t("cockpit.travel_short");
-                        if pill_button(ui, &t_label, travel_active, t).clicked() {
+                        if pill_button(ui, &t_label, travel_active, t)
+                            .on_hover_text(i18n.t("cockpit.travel_short_tooltip"))
+                            .clicked()
+                        {
                             if travel_active {
                                 cfg.battery.clear_travel_charge();
                             } else {
@@ -772,30 +869,7 @@ pub fn render(
                     });
                 }
 
-                ui.add_space(3.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().slider_width = (card_inner_w - 72.0).max(235.0);
-                    let resp = ui.add(
-                        Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100).suffix("%"),
-                    );
-                    if resp.changed() {
-                        cfg.battery.start_threshold_pct =
-                            cfg.battery.stop_threshold_pct.saturating_sub(5).max(40);
-                        cfg.battery.active_profile_id = None;
-                    }
-                    if control_committed(ui, "cockpit_battery_stop", &resp) {
-                        if cfg.battery.stop_threshold_pct >= 100 {
-                            cfg.battery.enabled = false;
-                            cfg.battery.mode = BatteryChargeMode::Auto;
-                        } else if !cfg.battery.enabled {
-                            cfg.battery.enabled = true;
-                            cfg.battery.mode = BatteryChargeMode::Inhibit;
-                        }
-                        on_save();
-                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                        on_cmd(WorkerCommand::ApplyBatteryNow);
-                    }
-                });
+                ui.add_space(2.0);
                 let off_key = if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
                     "battery.when_off_hold_short"
                 } else {

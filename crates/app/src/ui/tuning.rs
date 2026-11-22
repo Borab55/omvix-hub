@@ -1,4 +1,6 @@
-use crate::theme::{card_frame, section_title, status_badge, STATUS_OK, STATUS_WARN};
+use crate::theme::{
+    card_frame, feature_toggle_button, section_title, status_badge, STATUS_OK, STATUS_WARN,
+};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Slider, Ui};
 use omvix_core::{AppConfig, CpuBoostMode, I18n};
@@ -86,9 +88,14 @@ pub fn render(
         ui.add_enabled_ui(st.board_known, |ui| {
             let mut pl1_enabled = cfg.tuning.pl1_watts.is_some();
             ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut pl1_enabled, i18n.t("tuning.power_limit_pl1"))
-                    .changed()
+                if feature_toggle_button(
+                    ui,
+                    &i18n.t("tuning.power_limit_pl1"),
+                    &mut pl1_enabled,
+                    &i18n.t("common.enabled"),
+                    t,
+                )
+                .changed()
                 {
                     cfg.tuning.pl1_watts = if pl1_enabled { Some(55) } else { None };
                     on_save();
@@ -102,9 +109,14 @@ pub fn render(
 
             let mut pl2_enabled = cfg.tuning.pl2_watts.is_some();
             ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut pl2_enabled, i18n.t("tuning.power_limit_pl2"))
-                    .changed()
+                if feature_toggle_button(
+                    ui,
+                    &i18n.t("tuning.power_limit_pl2"),
+                    &mut pl2_enabled,
+                    &i18n.t("common.enabled"),
+                    t,
+                )
+                .changed()
                 {
                     cfg.tuning.pl2_watts = if pl2_enabled { Some(115) } else { None };
                     on_save();

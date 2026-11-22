@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 5;
+pub const CURRENT_CONFIG_VERSION: u32 = 6;
 pub const DEFAULT_TRAVEL_CHARGE_DURATION_SECS: i64 = 12 * 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +320,7 @@ pub struct GeneralConfig {
     pub auto_check_updates: bool,
     pub allow_unsigned_sha256_updates: bool,
     pub custom_theme: CustomThemeConfig,
+    pub custom_themes: Vec<CustomThemeConfig>,
 }
 
 impl Default for GeneralConfig {
@@ -340,6 +341,7 @@ impl Default for GeneralConfig {
             auto_check_updates: true,
             allow_unsigned_sha256_updates: false,
             custom_theme: CustomThemeConfig::preset_dark_slate(),
+            custom_themes: Vec::new(),
         }
     }
 }
@@ -424,12 +426,42 @@ impl BatteryConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightingProfile {
+    pub id: String,
+    pub name: String,
+    pub brightness_pct: u8,
+    pub zones: [RgbColor; 4],
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+impl LightingProfile {
+    pub fn builtins() -> Vec<LightingProfile> {
+        let solid = |id: &str, name: &str, r: u8, g: u8, b: u8| LightingProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            brightness_pct: 100,
+            zones: [RgbColor { r, g, b }; 4],
+            builtin: true,
+        };
+        vec![
+            solid("cyan", "Cyan", 0, 180, 216),
+            solid("white", "White", 245, 245, 255),
+            solid("crimson", "Crimson", 220, 38, 38),
+            solid("emerald", "Emerald", 34, 197, 94),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LightingConfig {
     pub enabled: bool,
     pub brightness_pct: u8,
     pub zones: [RgbColor; 4],
+    pub active_profile_id: Option<String>,
+    pub custom_profiles: Vec<LightingProfile>,
 }
 
 impl Default for LightingConfig {
@@ -439,6 +471,8 @@ impl Default for LightingConfig {
             enabled: true,
             brightness_pct: 100,
             zones: [default_color; 4],
+            active_profile_id: None,
+            custom_profiles: Vec::new(),
         }
     }
 }
@@ -812,6 +846,31 @@ impl AppConfig {
         }
 
         self.lighting.brightness_pct = self.lighting.brightness_pct.clamp(0, 100);
+        for theme in &mut self.general.custom_themes {
+            let trimmed = theme.name.trim();
+            theme.name = if trimmed.is_empty() {
+                "Custom Theme".to_string()
+            } else {
+                trimmed.to_string()
+            };
+        }
+        self.general.custom_themes.truncate(24);
+
+        self.lighting
+            .custom_profiles
+            .retain(|p| !p.id.trim().is_empty());
+        for prof in &mut self.lighting.custom_profiles {
+            prof.id = prof.id.trim().to_string();
+            let name_trimmed = prof.name.trim();
+            prof.name = if name_trimmed.is_empty() {
+                prof.id.clone()
+            } else {
+                name_trimmed.to_string()
+            };
+            prof.brightness_pct = prof.brightness_pct.clamp(0, 100);
+            prof.builtin = false;
+        }
+        self.lighting.custom_profiles.truncate(24);
 
         if let Some(ref mut pl1) = self.tuning.pl1_watts {
             *pl1 = (*pl1).clamp(15, 200);
@@ -1400,5 +1459,100 @@ mod tests {
         let warnings_off = cfg_off.sanitize();
         assert_eq!(cfg_off.battery.mode, BatteryChargeMode::Auto);
         assert!(!warnings_off.is_empty());
+    }
+
+    #[test]
+    fn v5_to_v6_migration_preserves_settings_and_defaults_custom_lists() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_v5_mig_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let v5 = "config_version = 5\n\n[general]\nlanguage = \"en\"\n\n[lighting]\nenabled = true\nbrightness_pct = 80\n";
+        fs::write(&path, v5).unwrap();
+
+        let loaded = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(loaded.general.language, "en");
+        assert!(loaded.general.custom_themes.is_empty());
+        assert_eq!(loaded.lighting.brightness_pct, 80);
+        assert!(loaded.lighting.custom_profiles.is_empty());
+        assert!(loaded.lighting.active_profile_id.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_themes_and_lighting_profiles_roundtrip_and_sanitize() {
+        let mut cfg = AppConfig::default();
+        let mut theme = CustomThemeConfig::preset_omen_crimson();
+        theme.name = "   ".to_string();
+        cfg.general.custom_themes.push(theme);
+
+        cfg.lighting.custom_profiles.push(LightingProfile {
+            id: "".to_string(),
+            name: "InvalidEmptyId".to_string(),
+            brightness_pct: 50,
+            zones: [RgbColor {
+                r: 10,
+                g: 20,
+                b: 30,
+            }; 4],
+            builtin: false,
+        });
+        cfg.lighting.custom_profiles.push(LightingProfile {
+            id: " gaming-cyan ".to_string(),
+            name: "  Gaming Cyan ".to_string(),
+            brightness_pct: 150,
+            zones: [
+                RgbColor {
+                    r: 0,
+                    g: 180,
+                    b: 216,
+                },
+                RgbColor {
+                    r: 255,
+                    g: 0,
+                    b: 120,
+                },
+                RgbColor {
+                    r: 0,
+                    g: 180,
+                    b: 216,
+                },
+                RgbColor {
+                    r: 255,
+                    g: 0,
+                    b: 120,
+                },
+            ],
+            builtin: true,
+        });
+        cfg.lighting.active_profile_id = Some("gaming-cyan".to_string());
+
+        let _ = cfg.sanitize();
+        assert_eq!(cfg.general.custom_themes.len(), 1);
+        assert_eq!(cfg.general.custom_themes[0].name, "Custom Theme");
+        assert_eq!(cfg.lighting.custom_profiles.len(), 1);
+        assert_eq!(cfg.lighting.custom_profiles[0].id, "gaming-cyan");
+        assert_eq!(cfg.lighting.custom_profiles[0].name, "Gaming Cyan");
+        assert_eq!(cfg.lighting.custom_profiles[0].brightness_pct, 100);
+        assert!(!cfg.lighting.custom_profiles[0].builtin);
+
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        let parsed: AppConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.general.custom_themes, cfg.general.custom_themes);
+        assert_eq!(
+            parsed.lighting.custom_profiles,
+            cfg.lighting.custom_profiles
+        );
+        assert_eq!(
+            parsed.lighting.active_profile_id.as_deref(),
+            Some("gaming-cyan")
+        );
+        assert_eq!(LightingProfile::builtins().len(), 4);
     }
 }

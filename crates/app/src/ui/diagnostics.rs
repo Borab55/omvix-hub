@@ -1,4 +1,6 @@
-use crate::theme::{card_frame, pill_button, section_title, status_badge, STATUS_OK, STATUS_WARN};
+use crate::theme::{
+    card_frame, pill_button_enabled, section_title, status_badge, STATUS_OK, STATUS_WARN,
+};
 use crate::ui::{default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Ui};
@@ -12,9 +14,9 @@ pub fn render(
     t: &CustomThemeConfig,
     on_cmd: &mut dyn FnMut(WorkerCommand),
 ) {
+    ui.heading(i18n.t("diagnostics.title"));
+    ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
-        ui.heading(i18n.t("diagnostics.title"));
-        ui.add_space(8.0);
         if ui.button(i18n.t("diagnostics.run_probe")).clicked() {
             on_cmd(WorkerCommand::RefreshDiagnostics);
         }
@@ -27,13 +29,11 @@ pub fn render(
         } else {
             i18n.t("support_bundle.create_btn")
         };
-        ui.add_enabled_ui(!st.support_bundle_busy, |ui| {
-            if pill_button(ui, &bundle_lbl, true, t).clicked() {
-                on_cmd(WorkerCommand::CreateSupportBundle(
-                    default_support_bundle_path(),
-                ));
-            }
-        });
+        if pill_button_enabled(ui, &bundle_lbl, true, !st.support_bundle_busy, t).clicked() {
+            on_cmd(WorkerCommand::CreateSupportBundle(
+                default_support_bundle_path(),
+            ));
+        }
     });
     ui.add_space(6.0);
 
