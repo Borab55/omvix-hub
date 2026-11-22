@@ -49,10 +49,10 @@ jobs:
           }
 
       - name: Run Clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run workspace unit and integration tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   release-and-dll-audit:
     name: Release Build, MinGW DLL Audit & Clean Smoke Test
@@ -68,7 +68,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binaries
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
 
       - name: Audit DLL imports (forbid MinGW runtime DLLs)
         shell: pwsh
