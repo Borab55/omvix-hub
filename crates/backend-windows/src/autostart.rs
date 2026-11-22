@@ -106,7 +106,7 @@ pub fn extract_task_command_from_xml(xml: &str) -> Option<String> {
 }
 
 pub fn query_elevated_task_command() -> Option<String> {
-    let out = Command::new("schtasks.exe")
+    let out = Command::new(crate::paths::system_tool("schtasks.exe"))
         .args(["/Query", "/TN", TASK_NAME, "/XML"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -315,7 +315,7 @@ pub fn query_installed_copy_status() -> InstalledCopyStatus {
 
 /// Returns `true` if the elevated Windows Task Scheduler startup task (`OmvixHub`) exists.
 pub fn is_elevated_task_autostart_enabled() -> bool {
-    Command::new("schtasks.exe")
+    Command::new(crate::paths::system_tool("schtasks.exe"))
         .args(["/Query", "/TN", TASK_NAME])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -397,7 +397,7 @@ pub fn create_elevated_task(exe_path: &Path) -> Result<()> {
     let xml_bytes = build_elevated_task_xml(exe_path);
     fs::write(&tmp_path, xml_bytes)?;
 
-    let out = Command::new("schtasks.exe")
+    let out = Command::new(crate::paths::system_tool("schtasks.exe"))
         .args(["/Create", "/TN", TASK_NAME, "/XML"])
         .arg(&tmp_path)
         .arg("/F")
@@ -422,7 +422,7 @@ pub fn create_elevated_task(exe_path: &Path) -> Result<()> {
 }
 
 fn delete_elevated_task() {
-    let _ = Command::new("schtasks.exe")
+    let _ = Command::new(crate::paths::system_tool("schtasks.exe"))
         .args(["/Delete", "/TN", TASK_NAME, "/F"])
         .creation_flags(CREATE_NO_WINDOW)
         .output();

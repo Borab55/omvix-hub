@@ -37,6 +37,17 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Audit for bare Command::new, LoadLibraryW, and Nvml::init
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rsFiles = Get-ChildItem -Recurse -Include *.rs -Path crates
+          $hits = Select-String -Path $rsFiles -Pattern 'Command::new\(\s*"[^"\\:]+\.exe"|\bLoadLibraryW\b|\bNvml::init\b'
+          if ($hits) {
+            $hits | ForEach-Object { Write-Host "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
+            throw 'Forbidden bare system binary invocation or unsafe LoadLibraryW/Nvml::init found.'
+          }
+
       - name: Run Clippy (-D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 

@@ -537,7 +537,11 @@ pub fn render(
                     {
                         #[cfg(windows)]
                         if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
-                            let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
+                            let _ = std::process::Command::new(omvix_windows::paths::system_tool(
+                                "explorer.exe",
+                            ))
+                            .arg(dir)
+                            .spawn();
                         }
                     }
                 });
@@ -553,9 +557,11 @@ pub fn render(
                     {
                         #[cfg(windows)]
                         {
-                            let _ = std::process::Command::new("explorer.exe")
-                                .arg(&svc.data_dir_path)
-                                .spawn();
+                            let _ = std::process::Command::new(omvix_windows::paths::system_tool(
+                                "explorer.exe",
+                            ))
+                            .arg(&svc.data_dir_path)
+                            .spawn();
                         }
                     }
                 });

@@ -438,9 +438,11 @@ pub fn render(
             if ui.button(i18n.t("logs.open_folder")).clicked() {
                 #[cfg(windows)]
                 {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(&log_dir)
-                        .spawn();
+                    let _ = std::process::Command::new(omvix_windows::paths::system_tool(
+                        "explorer.exe",
+                    ))
+                    .arg(&log_dir)
+                    .spawn();
                 }
             }
             if ui.button(i18n.t("logs.clear_logs")).clicked() {

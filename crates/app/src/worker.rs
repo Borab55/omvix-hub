@@ -2498,21 +2498,22 @@ impl WorkerEngine {
             WorkerCommand::RebootSystem => {
                 use std::os::windows::process::CommandExt;
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                let res = std::process::Command::new(r"C:\Windows\System32\shutdown.exe")
-                    .args(["/r", "/t", "5", "/c", "Omvix Hub GPU MUX switch"])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .status()
-                    .map_err(omvix_core::OmvixError::from)
-                    .and_then(|s| {
-                        if s.success() {
-                            Ok(())
-                        } else {
-                            Err(omvix_core::OmvixError::Config(format!(
-                                "shutdown.exe exited with code {:?}",
-                                s.code()
-                            )))
-                        }
-                    });
+                let res =
+                    std::process::Command::new(omvix_windows::paths::system_tool("shutdown.exe"))
+                        .args(["/r", "/t", "5", "/c", "Omvix Hub GPU MUX switch"])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .status()
+                        .map_err(omvix_core::OmvixError::from)
+                        .and_then(|s| {
+                            if s.success() {
+                                Ok(())
+                            } else {
+                                Err(omvix_core::OmvixError::Config(format!(
+                                    "shutdown.exe exited with code {:?}",
+                                    s.code()
+                                )))
+                            }
+                        });
                 record_result(
                     &self.state,
                     res,

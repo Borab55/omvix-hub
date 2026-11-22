@@ -416,6 +416,9 @@ fn install_fan_safety_panic_hook(log_handle: Option<LogHandle>) {
 }
 
 fn main() {
+    #[cfg(windows)]
+    omvix_windows::paths::harden_dll_search_path();
+
     let args: Vec<String> = std::env::args().collect();
 
     #[cfg(windows)]

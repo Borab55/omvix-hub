@@ -849,16 +849,28 @@ impl WindowsTelemetryBackend {
                         {
                             guard.nvml_attempts = guard.nvml_attempts.saturating_add(1);
                             guard.nvml_last_attempt = Some(Instant::now());
-                            match Nvml::init() {
-                                Ok(nvml) => {
-                                    tracing::info!("Initialized NVIDIA NVML telemetry");
-                                    guard.nvml = Some(nvml);
-                                }
-                                Err(err) => {
-                                    tracing::debug!(
-                                        attempt = guard.nvml_attempts,
-                                        "NVML initialization skipped/unavailable: {err}"
-                                    );
+                            let nvml_path = crate::paths::system_tool("nvml.dll");
+                            if !nvml_path.is_file() {
+                                tracing::debug!(
+                                    path = %nvml_path.display(),
+                                    "System32 nvml.dll not present; disabling NVML telemetry"
+                                );
+                                guard.nvml_attempts = 5;
+                            } else {
+                                match Nvml::builder().lib_path(nvml_path.as_os_str()).init() {
+                                    Ok(nvml) => {
+                                        tracing::info!(
+                                            path = %nvml_path.display(),
+                                            "Initialized NVIDIA NVML telemetry"
+                                        );
+                                        guard.nvml = Some(nvml);
+                                    }
+                                    Err(err) => {
+                                        tracing::debug!(
+                                            attempt = guard.nvml_attempts,
+                                            "NVML initialization skipped/unavailable: {err}"
+                                        );
+                                    }
                                 }
                             }
                         }

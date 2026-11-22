@@ -147,11 +147,11 @@ pub fn show_file_in_folder(path: &std::path::Path) {
         use std::os::windows::process::CommandExt;
         if path.exists() {
             let safe = path.to_string_lossy().replace('"', "");
-            let _ = std::process::Command::new("explorer.exe")
+            let _ = std::process::Command::new(omvix_windows::paths::system_tool("explorer.exe"))
                 .raw_arg(format!("/select,\"{safe}\""))
                 .spawn();
         } else if let Some(parent) = path.parent() {
-            let _ = std::process::Command::new("explorer.exe")
+            let _ = std::process::Command::new(omvix_windows::paths::system_tool("explorer.exe"))
                 .arg(parent)
                 .spawn();
         }
