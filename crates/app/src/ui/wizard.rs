@@ -1,6 +1,6 @@
 use crate::theme::{
     accent_color, compact_card, feature_toggle_button, pill_button, section_title, status_badge,
-    STATUS_OK, STATUS_WARN,
+    status_ok, status_warn,
 };
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Ui};
@@ -190,18 +190,18 @@ fn render_step_board(
         ui.label(format!("{}: {board_disp}", i18n.t("diagnostics.board_id")));
         if !st.board_id.is_empty() {
             if st.board_known {
-                status_badge(ui, &i18n.t("wizard.board_verified"), STATUS_OK);
+                status_badge(ui, &i18n.t("wizard.board_verified"), status_ok(t));
             } else {
-                status_badge(ui, &i18n.t("wizard.board_unknown"), STATUS_WARN);
+                status_badge(ui, &i18n.t("wizard.board_unknown"), status_warn(t));
             }
         }
     });
 
     ui.horizontal_wrapped(|ui| {
         if st.security.is_admin {
-            status_badge(ui, &i18n.t("app.admin_active"), STATUS_OK);
+            status_badge(ui, &i18n.t("app.admin_active"), status_ok(t));
         } else {
-            status_badge(ui, "Standard User", STATUS_WARN);
+            status_badge(ui, "Standard User", status_warn(t));
             if ui.button(i18n.t("app.restart_as_admin")).clicked() {
                 actions.restart_admin = true;
             }
@@ -294,12 +294,12 @@ fn render_step_pawnio(
 
     ui.horizontal_wrapped(|ui| {
         if st.pawnio_cpu_active {
-            status_badge(ui, &i18n.t("monitor.pawnio_active"), STATUS_OK);
+            status_badge(ui, &i18n.t("monitor.pawnio_active"), status_ok(t));
             if let Some(temp) = st.telemetry.cpu_temp_c {
                 ui.label(RichText::new(format!("{temp:.1} °C")).strong());
             }
         } else {
-            status_badge(ui, &i18n.t("common.disabled"), STATUS_WARN);
+            status_badge(ui, &i18n.t("common.disabled"), status_warn(t));
         }
     });
 
@@ -330,7 +330,7 @@ fn render_step_battery(
     ui.add_space(6.0);
 
     ui.colored_label(
-        STATUS_WARN,
+        status_warn(t),
         RichText::new(i18n.t("wizard.step4_hold_warning"))
             .size(11.5)
             .strong(),
@@ -400,23 +400,23 @@ fn render_step_battery(
         ui.label(format!("{}:", i18n.t("battery.service_name_label")));
         match st.battery_service.state {
             BatteryServiceState::Running => {
-                status_badge(ui, &i18n.t("battery.service_state_running"), STATUS_OK);
+                status_badge(ui, &i18n.t("battery.service_state_running"), status_ok(t));
             }
             BatteryServiceState::Stopped => {
-                status_badge(ui, &i18n.t("battery.service_state_stopped"), STATUS_WARN);
+                status_badge(ui, &i18n.t("battery.service_state_stopped"), status_warn(t));
             }
             BatteryServiceState::Starting | BatteryServiceState::Stopping => {
                 status_badge(
                     ui,
                     &i18n.t("battery.service_state_transitioning"),
-                    STATUS_WARN,
+                    status_warn(t),
                 );
             }
             BatteryServiceState::NotInstalled | BatteryServiceState::Unknown => {
                 status_badge(
                     ui,
                     &i18n.t("battery.service_state_not_installed"),
-                    STATUS_WARN,
+                    status_warn(t),
                 );
                 if st.security.is_admin
                     && !st.battery_service_busy

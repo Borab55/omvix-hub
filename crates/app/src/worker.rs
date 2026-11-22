@@ -273,6 +273,10 @@ pub enum WorkerCommand {
         pl1: Option<u16>,
         pl2: Option<u16>,
     },
+    RestoreDefaultPowerLimits {
+        keep_pl1: Option<u16>,
+        keep_pl2: Option<u16>,
+    },
     InstallPawnIo,
     ReloadPawnIo,
     SystemSuspending(Sender<()>),
@@ -2302,6 +2306,53 @@ impl WorkerEngine {
                     format!("Power limits PL1={pl1:?} PL2={pl2:?}"),
                 );
             }
+            WorkerCommand::RestoreDefaultPowerLimits { keep_pl1, keep_pl2 } => {
+                if !check_hw_write_allowed(
+                    self.safe_mode,
+                    self.bios_writes_allowed,
+                    true,
+                    &self.state,
+                    "Power Limits",
+                ) {
+                    return false;
+                }
+                let prev_limits = self.last_committed_power_limits;
+                record_hw_write_attempt(
+                    &self.crash_guard,
+                    &self.crash_guard_path,
+                    &mut self.hw_applied_recorded,
+                );
+                let mut res = self.restore_ec_default_power_limits_via_profile();
+                if res.is_ok() && (keep_pl1.is_some() || keep_pl2.is_some()) {
+                    res = self.backends.tuning.set_power_limits(keep_pl1, keep_pl2);
+                }
+                if res.is_ok() {
+                    self.cfg.tuning.pl1_watts = keep_pl1;
+                    self.cfg.tuning.pl2_watts = keep_pl2;
+                    self.last_committed_power_limits = (keep_pl1, keep_pl2);
+                    if prev_limits != (keep_pl1, keep_pl2) {
+                        record_history_entry(
+                            &mut self.change_history,
+                            &self.state,
+                            ChangeDomain::PowerLimits,
+                            format_power_limits_summary(prev_limits.0, prev_limits.1),
+                            format_power_limits_summary(keep_pl1, keep_pl2),
+                            RevertPayload::PowerLimits {
+                                pl1_watts: prev_limits.0,
+                                pl2_watts: prev_limits.1,
+                            },
+                        );
+                    }
+                }
+                let ok_msg = if keep_pl1.is_none() && keep_pl2.is_none() {
+                    "Power limits restored to BIOS/EC defaults".to_string()
+                } else {
+                    format!(
+                        "Power limits PL1={keep_pl1:?} PL2={keep_pl2:?} (disabled channel reset to BIOS default)"
+                    )
+                };
+                record_result(&self.state, res, ok_msg);
+            }
             WorkerCommand::InstallPawnIo => {
                 let already_running = self
                     .state
@@ -3368,6 +3419,21 @@ impl WorkerEngine {
         }
     }
 
+    fn restore_ec_default_power_limits_via_profile(&self) -> Result<()> {
+        let effective_perf = self
+            .state
+            .lock()
+            .map(|st| st.effective_performance_mode)
+            .unwrap_or(self.cfg.thermal_fan.performance_mode);
+        // TODO(hw-verify): confirm whether HP WMI 0x29 has a dedicated default-reset byte or relies
+        // on re-applying the active thermal profile (0x1A/0x30) to restore EC default PL1/PL2.
+        let res = self.backends.thermal.set_performance_mode(effective_perf);
+        if res.is_ok() {
+            self.sync_win_power_mode_if_enabled(effective_perf);
+        }
+        res
+    }
+
     fn apply_undo_entry(&mut self, entry: HardwareChangeEntry) {
         record_hw_write_attempt(
             &self.crash_guard,
@@ -3519,7 +3585,18 @@ impl WorkerEngine {
                 pl1_watts,
                 pl2_watts,
             } => {
-                let r = self.backends.tuning.set_power_limits(pl1_watts, pl2_watts);
+                let needs_reset = (pl1_watts.is_none()
+                    && self.last_committed_power_limits.0.is_some())
+                    || (pl2_watts.is_none() && self.last_committed_power_limits.1.is_some())
+                    || (pl1_watts.is_none() && pl2_watts.is_none());
+                let mut r = if needs_reset {
+                    self.restore_ec_default_power_limits_via_profile()
+                } else {
+                    Ok(())
+                };
+                if r.is_ok() && (pl1_watts.is_some() || pl2_watts.is_some()) {
+                    r = self.backends.tuning.set_power_limits(pl1_watts, pl2_watts);
+                }
                 if r.is_ok() {
                     self.cfg.tuning.pl1_watts = pl1_watts;
                     self.cfg.tuning.pl2_watts = pl2_watts;
@@ -3743,6 +3820,7 @@ fn is_barrier_command(cmd: &WorkerCommand) -> bool {
             | WorkerCommand::SystemShuttingDown(_)
             | WorkerCommand::SystemResumed
             | WorkerCommand::RestoreAllDefaults
+            | WorkerCommand::RestoreDefaultPowerLimits { .. }
             | WorkerCommand::ExitSafeMode
             | WorkerCommand::InstallBatteryService
             | WorkerCommand::StartBatteryService

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 6;
+pub const CURRENT_CONFIG_VERSION: u32 = 7;
 pub const DEFAULT_TRAVEL_CHARGE_DURATION_SECS: i64 = 12 * 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +26,12 @@ pub struct CustomThemeConfig {
     pub card_bg: [u8; 3],
     pub card_border: [u8; 3],
     pub text_primary: [u8; 3],
+    pub text_muted: [u8; 3],
+    pub control_bg: [u8; 3],
+    pub control_hover_bg: [u8; 3],
+    pub status_ok: [u8; 3],
+    pub status_warn: [u8; 3],
+    pub status_err: [u8; 3],
 }
 
 impl Default for CustomThemeConfig {
@@ -34,7 +40,51 @@ impl Default for CustomThemeConfig {
     }
 }
 
+type ExtendedThemeColors = ([u8; 3], [u8; 3], [u8; 3], [u8; 3], [u8; 3], [u8; 3]);
+
 impl CustomThemeConfig {
+    /// Derives cohesive muted text, control surface, and status colors from a core theme palette.
+    pub fn derive_extended_colors(
+        dark_base: bool,
+        card_bg: [u8; 3],
+        text_primary: [u8; 3],
+    ) -> ExtendedThemeColors {
+        let blend = |a: [u8; 3], b: [u8; 3], num: u16, den: u16| -> [u8; 3] {
+            [
+                ((u16::from(a[0]) * num + u16::from(b[0]) * (den - num)) / den) as u8,
+                ((u16::from(a[1]) * num + u16::from(b[1]) * (den - num)) / den) as u8,
+                ((u16::from(a[2]) * num + u16::from(b[2]) * (den - num)) / den) as u8,
+            ]
+        };
+        let shift = |c: [u8; 3], delta: i16| -> [u8; 3] {
+            [
+                (i16::from(c[0]) + delta).clamp(0, 255) as u8,
+                (i16::from(c[1]) + delta).clamp(0, 255) as u8,
+                (i16::from(c[2]) + delta).clamp(0, 255) as u8,
+            ]
+        };
+        let text_muted = blend(text_primary, card_bg, 65, 100);
+        if dark_base {
+            (
+                text_muted,
+                shift(card_bg, 8),
+                shift(card_bg, 22),
+                [34, 197, 94],
+                [245, 158, 11],
+                [239, 68, 68],
+            )
+        } else {
+            (
+                text_muted,
+                shift(card_bg, -14),
+                shift(card_bg, -26),
+                [22, 163, 74],
+                [217, 119, 6],
+                [220, 38, 38],
+            )
+        }
+    }
+
     pub fn preset_dark_slate() -> Self {
         Self {
             name: "Dark Graphite".to_string(),
@@ -45,6 +95,12 @@ impl CustomThemeConfig {
             card_bg: [31, 31, 34],
             card_border: [52, 52, 57],
             text_primary: [238, 238, 240],
+            text_muted: [152, 156, 166],
+            control_bg: [39, 39, 43],
+            control_hover_bg: [53, 53, 59],
+            status_ok: [34, 197, 94],
+            status_warn: [245, 158, 11],
+            status_err: [239, 68, 68],
         }
     }
 
@@ -66,6 +122,12 @@ impl CustomThemeConfig {
             card_bg: [255, 255, 255],
             card_border: [216, 223, 232],
             text_primary: [24, 32, 44],
+            text_muted: [96, 108, 124],
+            control_bg: [241, 245, 249],
+            control_hover_bg: [226, 232, 240],
+            status_ok: [22, 163, 74],
+            status_warn: [217, 119, 6],
+            status_err: [220, 38, 38],
         }
     }
 
@@ -79,6 +141,12 @@ impl CustomThemeConfig {
             card_bg: [26, 21, 28],
             card_border: [58, 36, 46],
             text_primary: [244, 238, 242],
+            text_muted: [168, 150, 160],
+            control_bg: [36, 29, 39],
+            control_hover_bg: [50, 39, 53],
+            status_ok: [34, 197, 94],
+            status_warn: [245, 158, 11],
+            status_err: [248, 81, 92],
         }
     }
 
@@ -92,6 +160,12 @@ impl CustomThemeConfig {
             card_bg: [18, 29, 26],
             card_border: [31, 56, 48],
             text_primary: [228, 244, 238],
+            text_muted: [140, 174, 162],
+            control_bg: [26, 40, 36],
+            control_hover_bg: [38, 56, 50],
+            status_ok: [52, 211, 153],
+            status_warn: [245, 158, 11],
+            status_err: [239, 68, 68],
         }
     }
 
@@ -105,6 +179,12 @@ impl CustomThemeConfig {
             card_bg: [24, 22, 38],
             card_border: [48, 42, 74],
             text_primary: [238, 236, 248],
+            text_muted: [156, 152, 184],
+            control_bg: [34, 31, 52],
+            control_hover_bg: [48, 44, 72],
+            status_ok: [34, 197, 94],
+            status_warn: [245, 158, 11],
+            status_err: [244, 63, 94],
         }
     }
 
@@ -118,6 +198,12 @@ impl CustomThemeConfig {
             card_bg: [12, 12, 14],
             card_border: [220, 220, 225],
             text_primary: [255, 255, 255],
+            text_muted: [204, 204, 212],
+            control_bg: [24, 24, 28],
+            control_hover_bg: [44, 44, 52],
+            status_ok: [74, 222, 128],
+            status_warn: [250, 204, 21],
+            status_err: [248, 113, 113],
         }
     }
 
@@ -136,7 +222,49 @@ impl CustomThemeConfig {
         ]
     }
 
-    /// Encodes this theme into a compact shareable ASCII code (`OMVIX1|...`).
+    fn apply_legacy_extended_migration(&mut self) {
+        for preset in Self::presets() {
+            if self.dark_base == preset.dark_base
+                && self.accent == preset.accent
+                && self.canvas_bg == preset.canvas_bg
+                && self.sidebar_bg == preset.sidebar_bg
+                && self.card_bg == preset.card_bg
+                && self.card_border == preset.card_border
+                && self.text_primary == preset.text_primary
+            {
+                self.text_muted = preset.text_muted;
+                self.control_bg = preset.control_bg;
+                self.control_hover_bg = preset.control_hover_bg;
+                self.status_ok = preset.status_ok;
+                self.status_warn = preset.status_warn;
+                self.status_err = preset.status_err;
+                return;
+            }
+        }
+        let dflt = Self::preset_dark_slate();
+        let has_default_ext = self.text_muted == dflt.text_muted
+            && self.control_bg == dflt.control_bg
+            && self.control_hover_bg == dflt.control_hover_bg
+            && self.status_ok == dflt.status_ok
+            && self.status_warn == dflt.status_warn
+            && self.status_err == dflt.status_err;
+        if has_default_ext
+            && (!self.dark_base
+                || self.card_bg != dflt.card_bg
+                || self.text_primary != dflt.text_primary)
+        {
+            let (muted, ctrl, hover, ok, warn, err) =
+                Self::derive_extended_colors(self.dark_base, self.card_bg, self.text_primary);
+            self.text_muted = muted;
+            self.control_bg = ctrl;
+            self.control_hover_bg = hover;
+            self.status_ok = ok;
+            self.status_warn = warn;
+            self.status_err = err;
+        }
+    }
+
+    /// Encodes this theme into a compact shareable ASCII code (`OMVIX2|...`).
     pub fn encode_share_code(&self) -> String {
         let mode = if self.dark_base { "D" } else { "L" };
         let clean_name = self.name.replace(['|', '\r', '\n'], " ").trim().to_string();
@@ -146,7 +274,7 @@ impl CustomThemeConfig {
             clean_name
         };
         format!(
-            "OMVIX1|{}|{}|{}|{}|{}|{}|{}|{}",
+            "OMVIX2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             mode,
             rgb_to_hex(self.accent),
             rgb_to_hex(self.canvas_bg),
@@ -154,11 +282,17 @@ impl CustomThemeConfig {
             rgb_to_hex(self.card_bg),
             rgb_to_hex(self.card_border),
             rgb_to_hex(self.text_primary),
+            rgb_to_hex(self.text_muted),
+            rgb_to_hex(self.control_bg),
+            rgb_to_hex(self.control_hover_bg),
+            rgb_to_hex(self.status_ok),
+            rgb_to_hex(self.status_warn),
+            rgb_to_hex(self.status_err),
             display_name
         )
     }
 
-    /// Decodes either an `OMVIX1|...` compact share code or a raw JSON `CustomThemeConfig`.
+    /// Decodes an `OMVIX2|...`, legacy `OMVIX1|...`, or raw JSON `CustomThemeConfig`.
     pub fn decode_share_code(raw: &str) -> Result<Self> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -166,18 +300,27 @@ impl CustomThemeConfig {
         }
 
         if trimmed.starts_with('{') {
-            return serde_json::from_str::<Self>(trimmed)
-                .map_err(|e| OmvixError::Config(format!("Invalid theme JSON: {e}")));
+            let mut decoded = serde_json::from_str::<Self>(trimmed)
+                .map_err(|e| OmvixError::Config(format!("Invalid theme JSON: {e}")))?;
+            if let Ok(serde_json::Value::Object(map)) =
+                serde_json::from_str::<serde_json::Value>(trimmed)
+            {
+                if !map.contains_key("control_bg") {
+                    decoded.apply_legacy_extended_migration();
+                }
+            }
+            return Ok(decoded);
         }
 
         let parts: Vec<&str> = trimmed.split('|').collect();
-        if parts.len() < 8 || parts[0] != "OMVIX1" {
+        let version_tag = parts.first().copied().unwrap_or("");
+        if version_tag != "OMVIX1" && version_tag != "OMVIX2" {
             return Err(OmvixError::Config(
-                "Invalid theme code format (expected OMVIX1|... or JSON)".to_string(),
+                "Invalid theme code format (expected OMVIX2|..., OMVIX1|..., or JSON)".to_string(),
             ));
         }
 
-        let dark_base = match parts[1] {
+        let dark_base = match parts.get(1).copied().unwrap_or("") {
             "D" | "d" | "dark" | "1" | "true" => true,
             "L" | "l" | "light" | "0" | "false" => false,
             other => {
@@ -186,6 +329,54 @@ impl CustomThemeConfig {
                 )));
             }
         };
+
+        if version_tag == "OMVIX2" {
+            if parts.len() < 15 {
+                return Err(OmvixError::Config(
+                    "Invalid OMVIX2 theme code format (expected 15 fields)".to_string(),
+                ));
+            }
+            let accent = hex_to_rgb(parts[2])?;
+            let canvas_bg = hex_to_rgb(parts[3])?;
+            let sidebar_bg = hex_to_rgb(parts[4])?;
+            let card_bg = hex_to_rgb(parts[5])?;
+            let card_border = hex_to_rgb(parts[6])?;
+            let text_primary = hex_to_rgb(parts[7])?;
+            let text_muted = hex_to_rgb(parts[8])?;
+            let control_bg = hex_to_rgb(parts[9])?;
+            let control_hover_bg = hex_to_rgb(parts[10])?;
+            let status_ok = hex_to_rgb(parts[11])?;
+            let status_warn = hex_to_rgb(parts[12])?;
+            let status_err = hex_to_rgb(parts[13])?;
+            let name = parts[14..].join("|").trim().to_string();
+            let final_name = if name.is_empty() {
+                "Imported Theme".to_string()
+            } else {
+                name
+            };
+            return Ok(Self {
+                name: final_name,
+                dark_base,
+                accent,
+                canvas_bg,
+                sidebar_bg,
+                card_bg,
+                card_border,
+                text_primary,
+                text_muted,
+                control_bg,
+                control_hover_bg,
+                status_ok,
+                status_warn,
+                status_err,
+            });
+        }
+
+        if parts.len() < 8 {
+            return Err(OmvixError::Config(
+                "Invalid OMVIX1 theme code format (expected 8+ fields)".to_string(),
+            ));
+        }
 
         let accent = hex_to_rgb(parts[2])?;
         let canvas_bg = hex_to_rgb(parts[3])?;
@@ -199,8 +390,10 @@ impl CustomThemeConfig {
             .filter(|s| !s.is_empty())
             .unwrap_or("Imported Theme")
             .to_string();
+        let (text_muted, control_bg, control_hover_bg, status_ok, status_warn, status_err) =
+            Self::derive_extended_colors(dark_base, card_bg, text_primary);
 
-        Ok(Self {
+        let mut theme = Self {
             name,
             dark_base,
             accent,
@@ -209,7 +402,15 @@ impl CustomThemeConfig {
             card_bg,
             card_border,
             text_primary,
-        })
+            text_muted,
+            control_bg,
+            control_hover_bg,
+            status_ok,
+            status_warn,
+            status_err,
+        };
+        theme.apply_legacy_extended_migration();
+        Ok(theme)
     }
 }
 
@@ -781,6 +982,12 @@ impl AppConfig {
         {
             // Migrate legacy unbounded `one_time_full_charge = true` so restarts never re-arm 100% travel charge.
             cfg.battery.clear_travel_charge();
+        }
+        if cfg.config_version < 7 {
+            cfg.general.custom_theme.apply_legacy_extended_migration();
+            for theme in &mut cfg.general.custom_themes {
+                theme.apply_legacy_extended_migration();
+            }
         }
         cfg.config_version = CURRENT_CONFIG_VERSION;
         let warnings = cfg.sanitize();
@@ -1554,5 +1761,70 @@ mod tests {
             Some("gaming-cyan")
         );
         assert_eq!(LightingProfile::builtins().len(), 4);
+    }
+
+    #[test]
+    fn v6_to_v7_migration_populates_detailed_theme_colors() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_v6_mig_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let v6 = r#"
+config_version = 6
+
+[general]
+language = "tr"
+
+[general.custom_theme]
+name = "Clean Light"
+dark_base = false
+accent = [2, 132, 199]
+canvas_bg = [244, 246, 249]
+sidebar_bg = [235, 240, 246]
+card_bg = [255, 255, 255]
+card_border = [216, 223, 232]
+text_primary = [24, 32, 44]
+
+[[general.custom_themes]]
+name = "Warm Custom"
+dark_base = false
+accent = [10, 100, 200]
+canvas_bg = [240, 240, 240]
+sidebar_bg = [230, 230, 230]
+card_bg = [250, 250, 250]
+card_border = [200, 200, 200]
+text_primary = [20, 20, 20]
+"#;
+        fs::write(&path, v6).unwrap();
+
+        let loaded = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            loaded.general.custom_theme,
+            CustomThemeConfig::preset_clean_light()
+        );
+        assert_eq!(loaded.general.custom_themes.len(), 1);
+        assert!(loaded.general.custom_themes[0].control_bg[0] > 200);
+        assert_eq!(loaded.general.custom_themes[0].status_ok, [22, 163, 74]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn omvix1_legacy_share_code_still_decodes() {
+        let light = CustomThemeConfig::decode_share_code(
+            "OMVIX1|L|0284c7|f4f6f9|ebf0f6|ffffff|d8dfe8|18202c|Clean Light",
+        )
+        .unwrap();
+        assert_eq!(light, CustomThemeConfig::preset_clean_light());
+
+        let code_v2 = light.encode_share_code();
+        assert!(code_v2.starts_with("OMVIX2|"));
+        let decoded_v2 = CustomThemeConfig::decode_share_code(&code_v2).unwrap();
+        assert_eq!(decoded_v2, light);
     }
 }

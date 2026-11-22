@@ -11,7 +11,7 @@ pub mod settings;
 pub mod tuning;
 pub mod wizard;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Drawer {
     Monitor,
     FansPower,
@@ -39,7 +39,7 @@ impl Drawer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FansPowerSubTab {
     #[default]
     PerformanceFans,
@@ -65,7 +65,7 @@ impl FansPowerSubTab {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ExtraSubTab {
     #[default]
     LightingDisplay,

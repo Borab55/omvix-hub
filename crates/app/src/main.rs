@@ -36,6 +36,8 @@ use omvix_windows::power_events::{spawn_power_event_listener, PowerEventHandle, 
 #[derive(Debug, Clone)]
 enum AppSignal {
     SyncVisibility(bool),
+    ShowAndFocus,
+    RequestHide,
     TrayPerfChanged(PerformanceMode),
     TrayFanChanged(omvix_core::FanMode),
     TrayBatteryPreset {
@@ -534,6 +536,41 @@ fn win32_raise_window_pair(main_hwnd_raw: isize, drawer_hwnd_raw: isize, drawer_
     }
 }
 
+#[cfg(windows)]
+fn win32_show_and_focus_pair(main_hwnd_raw: isize, drawer_hwnd_raw: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOP,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW, SW_SHOWNA,
+    };
+
+    if main_hwnd_raw == 0 {
+        return;
+    }
+    let main_hwnd = HWND(main_hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        let _ = ShowWindow(main_hwnd, SW_SHOW);
+        if IsIconic(main_hwnd).as_bool() {
+            let _ = ShowWindow(main_hwnd, SW_RESTORE);
+        }
+        let _ = BringWindowToTop(main_hwnd);
+        let _ = SetForegroundWindow(main_hwnd);
+        if win32_is_window(drawer_hwnd_raw) {
+            let dh = HWND(drawer_hwnd_raw as *mut std::ffi::c_void);
+            let _ = ShowWindow(dh, SW_SHOWNA);
+            let _ = SetWindowPos(
+                dh,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 #[cfg(not(windows))]
 fn win32_drawer_anchor_pos(
     _hwnd_raw: isize,
@@ -570,6 +607,9 @@ fn win32_raise_window_pair(
     _drawer_is_active: bool,
 ) {
 }
+
+#[cfg(not(windows))]
+fn win32_show_and_focus_pair(_main_hwnd_raw: isize, _drawer_hwnd_raw: isize) {}
 
 #[cfg(windows)]
 fn is_shift_held_at_startup() -> bool {
@@ -888,9 +928,12 @@ struct OmvixApp {
     fans_power_tab: FansPowerSubTab,
     extra_tab: ExtraSubTab,
     drawer_hwnd: isize,
+    drawer_hwnd_atomic: Arc<AtomicIsize>,
     prev_dock_locked: Option<bool>,
     drawer_dock_locked: Option<bool>,
     pending_dock_frames: u8,
+    pending_hide_frames: u8,
+    last_applied_drawer_theme: Option<(CustomThemeConfig, u8)>,
     last_shown_at: Instant,
     prev_focused: bool,
     drawer_prev_focused: bool,
@@ -980,6 +1023,8 @@ impl OmvixApp {
         let wake_ctx = ctx.clone();
         let tray_vis = Arc::clone(&window_visible);
         let tray_hwnd = Arc::clone(&hwnd_atomic);
+        let drawer_hwnd_atomic = Arc::new(AtomicIsize::new(0));
+        let tray_drawer_hwnd = Arc::clone(&drawer_hwnd_atomic);
         let tray_force_quit = Arc::clone(&force_quit);
         let tray_quit_started = Arc::clone(&clean_quit_started);
         let tray_cfg_manual_speed = cfg.thermal_fan.manual_speed_pct;
@@ -987,11 +1032,27 @@ impl OmvixApp {
         thread::spawn(move || loop {
             for action in TrayController::poll_actions() {
                 match action {
+                    TrayAction::ShowAndFocus => {
+                        tray_vis.store(true, Ordering::SeqCst);
+                        let main = tray_hwnd.load(Ordering::SeqCst);
+                        let drawer = tray_drawer_hwnd.load(Ordering::SeqCst);
+                        win32_show_and_focus_pair(main, drawer);
+                        let _ = tray_tx.send(AppSignal::ShowAndFocus);
+                        wake_ctx.request_repaint();
+                    }
                     TrayAction::ToggleWindow => {
-                        let prev = tray_vis.fetch_xor(true, Ordering::SeqCst);
-                        let next = !prev;
-                        win32_set_visible(tray_hwnd.load(Ordering::SeqCst), next);
-                        let _ = tray_tx.send(AppSignal::SyncVisibility(next));
+                        if tray_vis.load(Ordering::SeqCst) {
+                            tray_vis.store(false, Ordering::SeqCst);
+                            let dh = tray_drawer_hwnd.load(Ordering::SeqCst);
+                            if dh != 0 {
+                                win32_set_visible(dh, false);
+                            }
+                            let _ = tray_tx.send(AppSignal::RequestHide);
+                        } else {
+                            tray_vis.store(true, Ordering::SeqCst);
+                            win32_show_and_focus_pair(tray_hwnd.load(Ordering::SeqCst), 0);
+                            let _ = tray_tx.send(AppSignal::SyncVisibility(true));
+                        }
                         wake_ctx.request_repaint();
                     }
                     TrayAction::SetPerformance(mode) => {
@@ -1067,9 +1128,12 @@ impl OmvixApp {
             fans_power_tab: FansPowerSubTab::default(),
             extra_tab: ExtraSubTab::default(),
             drawer_hwnd: 0,
+            drawer_hwnd_atomic,
             prev_dock_locked: None,
             drawer_dock_locked: None,
             pending_dock_frames: dock_initial,
+            pending_hide_frames: 0,
+            last_applied_drawer_theme: None,
             last_shown_at: Instant::now(),
             prev_focused: true,
             drawer_prev_focused: false,
@@ -1279,13 +1343,22 @@ impl OmvixApp {
                 let c = ctx.clone();
                 let vis = Arc::clone(&self.window_visible);
                 let hwnd = Arc::clone(&self.hwnd_atomic);
+                let d_hwnd = Arc::clone(&self.drawer_hwnd_atomic);
                 let action_code = Arc::clone(&self.omen_action_code);
                 self.omen_listener = Some(spawn_omen_key_listener(move || {
                     if action_code.load(Ordering::Relaxed) == 0 {
-                        let prev = vis.fetch_xor(true, Ordering::SeqCst);
-                        let next = !prev;
-                        win32_set_visible(hwnd.load(Ordering::SeqCst), next);
-                        let _ = tx.send(AppSignal::SyncVisibility(next));
+                        if vis.load(Ordering::SeqCst) {
+                            vis.store(false, Ordering::SeqCst);
+                            let dh = d_hwnd.load(Ordering::SeqCst);
+                            if dh != 0 {
+                                win32_set_visible(dh, false);
+                            }
+                            let _ = tx.send(AppSignal::RequestHide);
+                        } else {
+                            vis.store(true, Ordering::SeqCst);
+                            win32_show_and_focus_pair(hwnd.load(Ordering::SeqCst), 0);
+                            let _ = tx.send(AppSignal::SyncVisibility(true));
+                        }
                     } else {
                         let _ = tx.send(AppSignal::OmenKeyNonToggle);
                     }
@@ -1301,15 +1374,24 @@ impl OmvixApp {
                 let c = ctx.clone();
                 let vis = Arc::clone(&self.window_visible);
                 let hwnd = Arc::clone(&self.hwnd_atomic);
+                let d_hwnd = Arc::clone(&self.drawer_hwnd_atomic);
                 let cap_active = Arc::clone(&self.hotkey_capture_active);
                 match spawn_global_hotkey_listener(&combo, move || {
                     if cap_active.load(Ordering::Relaxed) {
                         return;
                     }
-                    let prev = vis.fetch_xor(true, Ordering::SeqCst);
-                    let next = !prev;
-                    win32_set_visible(hwnd.load(Ordering::SeqCst), next);
-                    let _ = tx.send(AppSignal::SyncVisibility(next));
+                    if vis.load(Ordering::SeqCst) {
+                        vis.store(false, Ordering::SeqCst);
+                        let dh = d_hwnd.load(Ordering::SeqCst);
+                        if dh != 0 {
+                            win32_set_visible(dh, false);
+                        }
+                        let _ = tx.send(AppSignal::RequestHide);
+                    } else {
+                        vis.store(true, Ordering::SeqCst);
+                        win32_show_and_focus_pair(hwnd.load(Ordering::SeqCst), 0);
+                        let _ = tx.send(AppSignal::SyncVisibility(true));
+                    }
                     c.request_repaint();
                 }) {
                     Ok(handle) => {
@@ -1350,30 +1432,76 @@ impl OmvixApp {
         let _ = ctx;
     }
 
-    fn sync_window_visibility(&mut self, ctx: &egui::Context, visible: bool) {
-        self.window_visible.store(visible, Ordering::SeqCst);
+    fn reset_drawer_handles(&mut self) {
+        self.drawer_hwnd = 0;
+        self.drawer_hwnd_atomic.store(0, Ordering::SeqCst);
+        self.drawer_dock_locked = None;
+        self.drawer_prev_focused = false;
+        self.last_applied_drawer_theme = None;
+    }
+
+    fn finish_hide_main_window(&mut self, ctx: &egui::Context) {
+        self.pending_hide_frames = 0;
+        self.window_visible.store(false, Ordering::SeqCst);
+        win32_set_visible(self.hwnd_atomic.load(Ordering::SeqCst), false);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.flush_config_if_dirty();
+        if let Some(tray) = &mut self.tray {
+            tray.update_labels(&self.i18n, false);
+        }
+    }
+
+    fn request_hide(&mut self, ctx: &egui::Context) {
+        self.hotkeys_draft.capturing_shortcut = false;
+        let prev_dh = self.drawer_hwnd;
+        let had_drawer = self.open_drawer.is_some() || win32_is_window(prev_dh);
+        self.open_drawer = None;
+        if prev_dh != 0 {
+            win32_set_visible(prev_dh, false);
+        }
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::from_hash_of("omvix_drawer_viewport"),
+            egui::ViewportCommand::Close,
+        );
+        self.reset_drawer_handles();
+
+        if had_drawer {
+            // Keep main window alive through one full eframe pass so `remove_viewports_not_in`
+            // cleanly destroys the secondary drawer viewport before hiding the main window.
+            self.pending_hide_frames = 2;
+            ctx.request_repaint();
+        } else {
+            self.finish_hide_main_window(ctx);
+        }
+    }
+
+    fn show_and_focus_window(&mut self, ctx: &egui::Context) {
+        self.pending_hide_frames = 0;
+        self.window_visible.store(true, Ordering::SeqCst);
         let hwnd = self.hwnd_atomic.load(Ordering::SeqCst);
-        if visible && self.cfg.general.dock_bottom_right {
+        if self.cfg.general.dock_bottom_right {
             win32_dock_bottom_right(hwnd);
         }
-        win32_set_visible(hwnd, visible);
-        if visible {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            self.last_shown_at = Instant::now();
-            self.prev_focused = true;
-            if self.cfg.general.dock_bottom_right {
-                self.pending_dock_frames = 2;
-                ctx.request_repaint();
-            }
-        } else {
-            self.open_drawer = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.flush_config_if_dirty();
+        win32_show_and_focus_pair(hwnd, self.drawer_hwnd);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.last_shown_at = Instant::now();
+        self.prev_focused = true;
+        if self.cfg.general.dock_bottom_right {
+            self.pending_dock_frames = 2;
+            ctx.request_repaint();
         }
         if let Some(tray) = &mut self.tray {
-            tray.update_labels(&self.i18n, visible);
+            tray.update_labels(&self.i18n, true);
+        }
+    }
+
+    fn sync_window_visibility(&mut self, ctx: &egui::Context, visible: bool) {
+        if visible {
+            self.show_and_focus_window(ctx);
+        } else {
+            self.request_hide(ctx);
         }
     }
 
@@ -1414,7 +1542,18 @@ impl OmvixApp {
             return;
         }
         self.quitting = true;
+        self.pending_hide_frames = 0;
+        if self.open_drawer.is_some() || win32_is_window(self.drawer_hwnd) {
+            if self.drawer_hwnd != 0 {
+                win32_set_visible(self.drawer_hwnd, false);
+            }
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::from_hash_of("omvix_drawer_viewport"),
+                egui::ViewportCommand::Close,
+            );
+        }
         self.open_drawer = None;
+        self.reset_drawer_handles();
         self.force_quit.store(true, Ordering::SeqCst);
         self.clean_quit_started.store(true, Ordering::SeqCst);
         self.save_config();
@@ -1446,6 +1585,12 @@ impl OmvixApp {
             match sig {
                 AppSignal::SyncVisibility(visible) => {
                     self.sync_window_visibility(ctx, visible);
+                }
+                AppSignal::ShowAndFocus => {
+                    self.show_and_focus_window(ctx);
+                }
+                AppSignal::RequestHide => {
+                    self.request_hide(ctx);
                 }
                 AppSignal::TrayPerfChanged(mode) => {
                     if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
@@ -1585,6 +1730,15 @@ fn worker_command_proxy(worker: &BackgroundWorker) -> Sender<WorkerCommand> {
 
 impl eframe::App for OmvixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.pending_hide_frames > 0 && self.open_drawer.is_none() {
+            self.pending_hide_frames -= 1;
+            if self.pending_hide_frames == 0 {
+                self.finish_hide_main_window(ctx);
+                return;
+            }
+            ctx.request_repaint();
+        }
+
         self.process_signals(ctx);
 
         let main_hwnd = self.hwnd_atomic.load(Ordering::SeqCst);
@@ -1594,7 +1748,7 @@ impl eframe::App for OmvixApp {
             win32_set_window_movable(main_hwnd, !dock_locked);
         }
 
-        if self.pending_dock_frames > 0 {
+        if self.pending_dock_frames > 0 && self.pending_hide_frames == 0 {
             self.pending_dock_frames -= 1;
             if self.cfg.general.dock_bottom_right {
                 win32_dock_bottom_right(main_hwnd);
@@ -1602,7 +1756,9 @@ impl eframe::App for OmvixApp {
             if self.pending_dock_frames > 0 {
                 ctx.request_repaint();
             }
-        } else if self.cfg.general.dock_bottom_right && self.window_visible.load(Ordering::Relaxed)
+        } else if self.cfg.general.dock_bottom_right
+            && self.window_visible.load(Ordering::Relaxed)
+            && self.pending_hide_frames == 0
         {
             win32_dock_bottom_right(main_hwnd);
         }
@@ -1623,6 +1779,7 @@ impl eframe::App for OmvixApp {
         if self.cfg.general.hide_on_focus_loss
             && !self.show_wizard
             && self.open_drawer.is_none()
+            && self.pending_hide_frames == 0
             && self.window_visible.load(Ordering::Relaxed)
             && !self.quitting
             && self.pending_dock_frames == 0
@@ -1904,22 +2061,13 @@ impl eframe::App for OmvixApp {
                         close_drawer = true;
                         return;
                     }
-                    let expected_font_px =
-                        theme::expected_body_font_size(self.cfg.general.font_scale_pct);
-                    let drawer_font_px = drawer_ctx
-                        .style()
-                        .text_styles
-                        .get(&egui::TextStyle::Body)
-                        .map(|f| f.size)
-                        .unwrap_or(0.0);
-                    if drawer_ctx.style().visuals.panel_fill != theme::rgb(current_theme.canvas_bg)
-                        || (drawer_font_px - expected_font_px).abs() > 0.1
-                    {
-                        theme::apply_theme(
-                            drawer_ctx,
-                            &self.cfg.general.custom_theme,
-                            self.cfg.general.font_scale_pct,
-                        );
+                    let theme_key = (
+                        self.cfg.general.custom_theme.clone(),
+                        self.cfg.general.font_scale_pct,
+                    );
+                    if self.last_applied_drawer_theme.as_ref() != Some(&theme_key) {
+                        theme::apply_theme(drawer_ctx, &theme_key.0, theme_key.1);
+                        self.last_applied_drawer_theme = Some(theme_key);
                     }
 
                     egui::CentralPanel::default()
@@ -2009,140 +2157,156 @@ impl eframe::App for OmvixApp {
                             ui.separator();
                             ui.add_space(6.0);
 
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
-                                let mut mark_save = || should_save = true;
+                            let drawer_body_w = (ui.available_width() - 14.0).max(360.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt((
+                                    "drawer_body_scroll",
+                                    drawer,
+                                    self.fans_power_tab,
+                                    self.extra_tab,
+                                ))
+                                .max_width(ui.available_width())
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.set_width(drawer_body_w);
+                                    ui.set_max_width(drawer_body_w);
+                                    let mut push_cmd = |c: WorkerCommand| pending_cmds.push(c);
+                                    let mut mark_save = || should_save = true;
 
-                                match drawer {
-                                    Drawer::Monitor => ui::monitor::render(
-                                        ui,
-                                        &mut self.cfg,
-                                        &snapshot_state,
-                                        &self.i18n,
-                                        &mut push_cmd,
-                                        &mut mark_save,
-                                    ),
-                                    Drawer::FansPower => match self.fans_power_tab {
-                                        FansPowerSubTab::PerformanceFans => {
-                                            ui::performance::render(
+                                    match drawer {
+                                        Drawer::Monitor => ui::monitor::render(
+                                            ui,
+                                            &mut self.cfg,
+                                            &snapshot_state,
+                                            &self.i18n,
+                                            &mut push_cmd,
+                                            &mut mark_save,
+                                        ),
+                                        Drawer::FansPower => match self.fans_power_tab {
+                                            FansPowerSubTab::PerformanceFans => {
+                                                ui::performance::render(
+                                                    ui,
+                                                    &mut self.cfg,
+                                                    &snapshot_state,
+                                                    &self.i18n,
+                                                    &mut self.performance_draft,
+                                                    &mut push_cmd,
+                                                    &mut mark_save,
+                                                )
+                                            }
+                                            FansPowerSubTab::Profiles => ui::profiles::render(
                                                 ui,
                                                 &mut self.cfg,
                                                 &snapshot_state,
                                                 &self.i18n,
-                                                &mut self.performance_draft,
+                                                &mut self.profiles_draft,
                                                 &mut push_cmd,
                                                 &mut mark_save,
-                                            )
-                                        }
-                                        FansPowerSubTab::Profiles => ui::profiles::render(
-                                            ui,
-                                            &mut self.cfg,
-                                            &snapshot_state,
-                                            &self.i18n,
-                                            &mut self.profiles_draft,
-                                            &mut push_cmd,
-                                            &mut mark_save,
-                                        ),
-                                        FansPowerSubTab::Tuning => ui::tuning::render(
-                                            ui,
-                                            &mut self.cfg,
-                                            &snapshot_state,
-                                            &self.i18n,
-                                            &mut push_cmd,
-                                            &mut mark_save,
-                                        ),
-                                    },
-                                    Drawer::Battery => ui::battery::render(
-                                        ui,
-                                        &mut self.cfg,
-                                        &snapshot_state,
-                                        &self.i18n,
-                                        &mut self.battery_draft,
-                                        &mut push_cmd,
-                                        &mut mark_save,
-                                    ),
-                                    Drawer::Extra => match self.extra_tab {
-                                        ExtraSubTab::LightingDisplay => {
-                                            ui::lighting_display::render(
+                                            ),
+                                            FansPowerSubTab::Tuning => ui::tuning::render(
                                                 ui,
                                                 &mut self.cfg,
                                                 &snapshot_state,
                                                 &self.i18n,
-                                                &mut self.lighting_draft,
                                                 &mut push_cmd,
                                                 &mut mark_save,
-                                            )
-                                        }
-                                        ExtraSubTab::Hotkeys => ui::hotkeys::render(
+                                            ),
+                                        },
+                                        Drawer::Battery => ui::battery::render(
                                             ui,
                                             &mut self.cfg,
-                                            &self.i18n,
-                                            &self.hotkey_bind_status,
-                                            &self.config_warnings,
-                                            &mut self.hotkeys_draft,
-                                            &mut push_cmd,
-                                            &mut mark_save,
-                                            &mut || should_rebind_hotkeys = true,
-                                        ),
-                                        ExtraSubTab::Diagnostics => ui::diagnostics::render(
-                                            ui,
                                             &snapshot_state,
                                             &self.i18n,
-                                            &current_theme,
+                                            &mut self.battery_draft,
                                             &mut push_cmd,
+                                            &mut mark_save,
                                         ),
-                                        ExtraSubTab::Settings => {
-                                            let res = ui::settings::render(
+                                        Drawer::Extra => match self.extra_tab {
+                                            ExtraSubTab::LightingDisplay => {
+                                                ui::lighting_display::render(
+                                                    ui,
+                                                    &mut self.cfg,
+                                                    &snapshot_state,
+                                                    &self.i18n,
+                                                    &mut self.lighting_draft,
+                                                    &mut push_cmd,
+                                                    &mut mark_save,
+                                                )
+                                            }
+                                            ExtraSubTab::Hotkeys => ui::hotkeys::render(
                                                 ui,
                                                 &mut self.cfg,
-                                                &snapshot_state,
-                                                &mut self.i18n,
-                                                &mut self.settings_draft,
+                                                &self.i18n,
+                                                &self.hotkey_bind_status,
+                                                &self.config_warnings,
+                                                &mut self.hotkeys_draft,
                                                 &mut push_cmd,
                                                 &mut mark_save,
-                                            );
-                                            if res.language_changed {
-                                                if let Some(tray) = &mut self.tray {
-                                                    tray.update_labels(
-                                                        &self.i18n,
-                                                        self.window_visible.load(Ordering::Relaxed),
+                                                &mut || should_rebind_hotkeys = true,
+                                            ),
+                                            ExtraSubTab::Diagnostics => ui::diagnostics::render(
+                                                ui,
+                                                &snapshot_state,
+                                                &self.i18n,
+                                                &current_theme,
+                                                &mut push_cmd,
+                                            ),
+                                            ExtraSubTab::Settings => {
+                                                let res = ui::settings::render(
+                                                    ui,
+                                                    &mut self.cfg,
+                                                    &snapshot_state,
+                                                    &mut self.i18n,
+                                                    &mut self.settings_draft,
+                                                    &mut push_cmd,
+                                                    &mut mark_save,
+                                                );
+                                                if res.language_changed {
+                                                    if let Some(tray) = &mut self.tray {
+                                                        tray.update_labels(
+                                                            &self.i18n,
+                                                            self.window_visible
+                                                                .load(Ordering::Relaxed),
+                                                        );
+                                                    }
+                                                }
+                                                if res.theme_changed {
+                                                    theme_applied = true;
+                                                    theme::apply_theme(
+                                                        drawer_ctx,
+                                                        &self.cfg.general.custom_theme,
+                                                        self.cfg.general.font_scale_pct,
                                                     );
+                                                    self.last_applied_drawer_theme = Some((
+                                                        self.cfg.general.custom_theme.clone(),
+                                                        self.cfg.general.font_scale_pct,
+                                                    ));
+                                                }
+                                                if res.dock_changed
+                                                    && self.cfg.general.dock_bottom_right
+                                                {
+                                                    self.pending_dock_frames = 2;
+                                                    ctx.request_repaint();
+                                                }
+                                                if res.open_wizard {
+                                                    self.open_drawer = None;
+                                                    self.wizard.step = 0;
+                                                    self.show_wizard = true;
+                                                }
+                                                if res.restore_defaults {
+                                                    should_restore_defaults = true;
                                                 }
                                             }
-                                            if res.theme_changed {
-                                                theme_applied = true;
-                                                theme::apply_theme(
-                                                    drawer_ctx,
-                                                    &self.cfg.general.custom_theme,
-                                                    self.cfg.general.font_scale_pct,
-                                                );
-                                            }
-                                            if res.dock_changed
-                                                && self.cfg.general.dock_bottom_right
-                                            {
-                                                self.pending_dock_frames = 2;
-                                                ctx.request_repaint();
-                                            }
-                                            if res.open_wizard {
-                                                self.open_drawer = None;
-                                                self.wizard.step = 0;
-                                                self.show_wizard = true;
-                                            }
-                                            if res.restore_defaults {
-                                                should_restore_defaults = true;
-                                            }
-                                        }
-                                    },
-                                }
-                            });
+                                        },
+                                    }
+                                });
                         });
                 });
 
                 if close_drawer || self.open_drawer.is_none() {
                     self.open_drawer = None;
-                    self.drawer_hwnd = 0;
-                    self.drawer_dock_locked = None;
-                    self.drawer_prev_focused = false;
+                    ctx.send_viewport_cmd_to(drawer_id, egui::ViewportCommand::Close);
+                    self.reset_drawer_handles();
                 } else if main_hwnd != 0 {
                     let dh = if win32_is_window(self.drawer_hwnd) {
                         self.drawer_hwnd
@@ -2151,9 +2315,11 @@ impl eframe::App for OmvixApp {
                         let found = win32_find_drawer_hwnd(main_hwnd, &drawer_title_full);
                         if found != 0 {
                             self.drawer_hwnd = found;
+                            self.drawer_hwnd_atomic.store(found, Ordering::SeqCst);
                             win32_link_drawer_owner(found, main_hwnd);
                         } else {
                             self.drawer_hwnd = 0;
+                            self.drawer_hwnd_atomic.store(0, Ordering::SeqCst);
                         }
                         found
                     };
@@ -2180,14 +2346,10 @@ impl eframe::App for OmvixApp {
                     );
                 }
             } else {
-                self.drawer_hwnd = 0;
-                self.drawer_dock_locked = None;
-                self.drawer_prev_focused = false;
+                self.reset_drawer_handles();
             }
         } else {
-            self.drawer_hwnd = 0;
-            self.drawer_dock_locked = None;
-            self.drawer_prev_focused = false;
+            self.reset_drawer_handles();
         }
 
         let capture_now = self.hotkeys_draft.capturing_shortcut

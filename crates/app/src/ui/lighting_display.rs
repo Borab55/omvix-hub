@@ -1,10 +1,10 @@
 use crate::theme::{
     accent_color, card_frame, fixed_color_picker_button, lighting_swatch_button, pill_button,
-    section_title, section_toggle_button, status_badge, ColorButtonStyle, STATUS_ERR, STATUS_WARN,
+    section_title, section_toggle_button, status_badge, status_err, status_warn, ColorButtonStyle,
 };
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{Color32, RichText, Slider, Ui};
+use egui::{RichText, Slider, Ui};
 use omvix_core::{AppConfig, GpuMode, I18n, KeyboardType, LightingProfile, RgbColor};
 
 #[derive(Debug, Default, Clone)]
@@ -25,6 +25,8 @@ pub fn render(
 ) {
     let t = &cfg.general.custom_theme.clone();
     let accent = accent_color(t);
+    let warn_c = status_warn(t);
+    let err_c = status_err(t);
 
     ui.heading(i18n.t("nav.lighting_display"));
     ui.add_space(6.0);
@@ -49,7 +51,7 @@ pub fn render(
         });
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("lighting.brightness"));
             let resp = ui.add(Slider::new(&mut cfg.lighting.brightness_pct, 0..=100).suffix("%"));
             if resp.changed() {
@@ -79,10 +81,7 @@ pub fn render(
                         ui,
                         ("lighting_zone_picker", z),
                         &mut srgb,
-                        ColorButtonStyle::Swatch {
-                            size: egui::vec2(34.0, 20.0),
-                            radius: 5,
-                        },
+                        ColorButtonStyle::ColorWheel { size: 22.0 },
                         t,
                     );
                     if resp.changed() {
@@ -291,7 +290,7 @@ pub fn render(
         if let Some(pending) = draft.pending_gpu_mode {
             ui.add_space(6.0);
             ui.colored_label(
-                STATUS_WARN,
+                warn_c,
                 RichText::new(i18n.t_fmt(
                     "gpu.mux_confirm_prompt",
                     &[("mode", &format!("{pending:?}"))],
@@ -299,7 +298,7 @@ pub fn render(
                 .strong(),
             );
             ui.colored_label(
-                STATUS_ERR,
+                err_c,
                 RichText::new(i18n.t("gpu.bitlocker_warning")).size(11.5),
             );
             ui.add_space(4.0);
@@ -317,9 +316,7 @@ pub fn render(
             });
         } else {
             ui.add_space(4.0);
-            ui.label(
-                RichText::new(i18n.t("gpu.reboot_required")).color(Color32::from_rgb(245, 158, 11)),
-            );
+            ui.label(RichText::new(i18n.t("gpu.reboot_required")).color(warn_c));
         }
 
         if st.gpu_mux_reboot_pending && !draft.reboot_dismissed {
@@ -336,7 +333,7 @@ pub fn render(
         }
 
         if !st.security.is_admin {
-            ui.colored_label(STATUS_WARN, i18n.t("tuning.admin_required_warning"));
+            ui.colored_label(warn_c, i18n.t("tuning.admin_required_warning"));
         }
     });
 }

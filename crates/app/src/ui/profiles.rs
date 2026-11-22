@@ -1,9 +1,9 @@
 use crate::theme::{
     accent_color, card_frame, feature_toggle_button, pill_button, section_toggle_button,
-    status_badge, STATUS_ERR, STATUS_OK,
+    status_badge, status_err, status_ok, status_warn,
 };
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{Color32, RichText, Ui};
+use egui::{RichText, Ui};
 use omvix_core::app_profiles::{normalize_exe_name, AppProfileRule};
 use omvix_core::{AppConfig, CpuBoostMode, FanCurvePreset, FanMode, I18n, PerformanceMode};
 
@@ -244,14 +244,10 @@ pub fn render(
             }
             match st.telemetry.ac_connected {
                 Some(true) => {
-                    status_badge(ui, &i18n.t("dashboard.power_source_ac"), STATUS_OK);
+                    status_badge(ui, &i18n.t("dashboard.power_source_ac"), status_ok(t));
                 }
                 Some(false) => {
-                    status_badge(
-                        ui,
-                        &i18n.t("dashboard.power_source_dc"),
-                        Color32::from_rgb(245, 158, 11),
-                    );
+                    status_badge(ui, &i18n.t("dashboard.power_source_dc"), status_warn(t));
                 }
                 None => {}
             }
@@ -336,7 +332,7 @@ pub fn render(
                 status_badge(
                     ui,
                     &i18n.t_fmt("profiles.active_rule_badge", &[("name", active)]),
-                    STATUS_OK,
+                    status_ok(t),
                 );
             } else if cfg.app_profiles.enabled {
                 status_badge(ui, &i18n.t("profiles.idle_badge"), accent);
@@ -346,7 +342,7 @@ pub fn render(
         ui.weak(RichText::new(i18n.t("profiles.app_profiles_desc")).size(11.5));
         ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("profiles.poll_interval"));
             for secs in [2u64, 3, 5, 10] {
                 if ui
@@ -564,7 +560,7 @@ pub fn render(
             });
 
             if let Some(ref err) = draft.error_msg {
-                ui.colored_label(STATUS_ERR, err);
+                ui.colored_label(status_err(t), err);
             }
         });
 
@@ -608,7 +604,7 @@ pub fn render(
                         ui.monospace(&rule.exe_name);
 
                         if is_active {
-                            status_badge(ui, &i18n.t("profiles.rule_running_badge"), STATUS_OK);
+                            status_badge(ui, &i18n.t("profiles.rule_running_badge"), status_ok(t));
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

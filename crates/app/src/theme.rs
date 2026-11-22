@@ -8,10 +8,6 @@ use omvix_core::{CustomThemeConfig, RgbColor};
 use std::fs;
 use std::path::Path;
 
-pub const STATUS_OK: Color32 = Color32::from_rgb(34, 197, 94);
-pub const STATUS_WARN: Color32 = Color32::from_rgb(245, 158, 11);
-pub const STATUS_ERR: Color32 = Color32::from_rgb(239, 68, 68);
-
 pub fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
@@ -24,6 +20,22 @@ pub fn sidebar_fill(t: &CustomThemeConfig) -> Color32 {
     rgb(t.sidebar_bg)
 }
 
+pub fn status_ok(t: &CustomThemeConfig) -> Color32 {
+    rgb(t.status_ok)
+}
+
+pub fn status_warn(t: &CustomThemeConfig) -> Color32 {
+    rgb(t.status_warn)
+}
+
+pub fn status_err(t: &CustomThemeConfig) -> Color32 {
+    rgb(t.status_err)
+}
+
+pub fn muted_text(t: &CustomThemeConfig) -> Color32 {
+    rgb(t.text_muted)
+}
+
 fn shift_color(c: [u8; 3], delta: i16) -> Color32 {
     let clamp = |v: u8| -> u8 { (v as i16 + delta).clamp(0, 255) as u8 };
     Color32::from_rgb(clamp(c[0]), clamp(c[1]), clamp(c[2]))
@@ -32,10 +44,6 @@ fn shift_color(c: [u8; 3], delta: i16) -> Color32 {
 fn is_bright_color(c: Color32) -> bool {
     let luma = 0.299 * f32::from(c.r()) + 0.587 * f32::from(c.g()) + 0.114 * f32::from(c.b());
     luma > 160.0
-}
-
-pub fn expected_body_font_size(font_scale_pct: u8) -> f32 {
-    13.0 * (f32::from(font_scale_pct.clamp(85, 130)) / 100.0)
 }
 
 pub fn configure_fonts(ctx: &egui::Context) {
@@ -100,6 +108,9 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u
     let card = rgb(t.card_bg);
     let border = rgb(t.card_border);
     let text = rgb(t.text_primary);
+    let muted = rgb(t.text_muted);
+    let ctrl_bg = rgb(t.control_bg);
+    let ctrl_hover = rgb(t.control_hover_bg);
     let border_w = if t.is_high_contrast() {
         1.5_f32
     } else {
@@ -109,29 +120,22 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u
     visuals.panel_fill = canvas;
     visuals.window_fill = canvas;
     visuals.extreme_bg_color = if t.dark_base {
-        shift_color(t.canvas_bg, -6)
+        shift_color(t.control_bg, -8)
     } else {
-        Color32::WHITE
+        shift_color(t.control_bg, 8)
     };
     visuals.faint_bg_color = card;
 
     visuals.widgets.noninteractive.bg_fill = card;
+    visuals.widgets.noninteractive.weak_bg_fill = muted;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(border_w, border);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, text);
 
-    visuals.widgets.inactive.bg_fill = if t.dark_base {
-        shift_color(t.card_bg, 10)
-    } else {
-        shift_color(t.card_bg, -18)
-    };
+    visuals.widgets.inactive.bg_fill = ctrl_bg;
     visuals.widgets.inactive.bg_stroke = Stroke::new(border_w, border);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, text);
 
-    visuals.widgets.hovered.bg_fill = if t.dark_base {
-        shift_color(t.card_bg, 22)
-    } else {
-        shift_color(t.card_bg, -30)
-    };
+    visuals.widgets.hovered.bg_fill = ctrl_hover;
     visuals.widgets.hovered.bg_stroke = Stroke::new(border_w.max(1.2), accent);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.2_f32, text);
 
@@ -144,13 +148,13 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u
     };
     visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, active_text);
 
-    visuals.widgets.open.bg_fill = if t.dark_base {
-        shift_color(t.card_bg, 16)
-    } else {
-        shift_color(t.card_bg, -24)
-    };
+    visuals.widgets.open.bg_fill = ctrl_hover;
     visuals.widgets.open.bg_stroke = Stroke::new(border_w, accent);
     visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, text);
+
+    visuals.warn_fg_color = status_warn(t);
+    visuals.error_fg_color = status_err(t);
+    visuals.hyperlink_color = accent;
 
     visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(
         accent.r(),
@@ -240,11 +244,7 @@ fn button_palette(selected: bool, t: &CustomThemeConfig) -> (Color32, Stroke, Co
         }
     } else {
         (
-            if t.dark_base {
-                shift_color(t.card_bg, 8)
-            } else {
-                shift_color(t.card_bg, -12)
-            },
+            rgb(t.control_bg),
             Stroke::new(border_w, rgb(t.card_border)),
             rgb(t.text_primary),
         )
@@ -337,7 +337,8 @@ fn render_toggle_button(
     t: &CustomThemeConfig,
 ) -> Response {
     let accent = accent_color(t);
-    let text_base = rgb(t.text_primary);
+    let muted = muted_text(t);
+    let ok = status_ok(t);
     let text_size = ui
         .style()
         .text_styles
@@ -375,30 +376,19 @@ fn render_toggle_button(
         };
         (bg, Stroke::new(1.3_f32, accent), fg)
     } else {
-        let bg = if t.dark_base {
-            shift_color(t.card_bg, 6)
-        } else {
-            shift_color(t.card_bg, -10)
-        };
-        let muted = Color32::from_rgba_unmultiplied(
-            text_base.r(),
-            text_base.g(),
-            text_base.b(),
-            if t.dark_base { 165 } else { 155 },
-        );
-        (bg, Stroke::new(1.0_f32, rgb(t.card_border)), muted)
+        (
+            rgb(t.control_bg),
+            Stroke::new(1.0_f32, rgb(t.card_border)),
+            muted,
+        )
     };
 
-    let display_text = if *active {
-        format!("{label}  •  {active_tag}")
-    } else {
-        label.to_string()
-    };
-
-    let mut rt = egui::RichText::new(display_text)
+    // Keep text and font weight identical across ON/OFF so the button never resizes when toggled;
+    // render the active status tag immediately outside the button.
+    let mut rt = egui::RichText::new(label)
         .size(text_size)
         .color(label_color);
-    if *active || header_emphasis {
+    if header_emphasis {
         rt = rt.strong();
     }
 
@@ -408,24 +398,44 @@ fn render_toggle_button(
         .corner_radius(CornerRadius::same(8))
         .wrap_mode(TextWrapMode::Extend);
 
-    let mut resp = ui
-        .scope(|ui| {
-            ui.spacing_mut().button_padding = vec2(9.0, 4.0);
-            ui.add(btn)
-        })
-        .inner;
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if resp.clicked() {
-        *active = !*active;
-        resp.mark_changed();
-    }
-    resp
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        let mut inner_resp = ui
+            .scope(|ui| {
+                ui.spacing_mut().button_padding = vec2(9.0, 4.0);
+                ui.add(btn)
+            })
+            .inner;
+        if inner_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if inner_resp.clicked() {
+            *active = !*active;
+            inner_resp.mark_changed();
+        }
+        if *active {
+            let tag_bg = Color32::from_rgba_unmultiplied(ok.r(), ok.g(), ok.b(), 26);
+            egui::Frame::NONE
+                .fill(tag_bg)
+                .stroke(Stroke::new(0.8_f32, ok))
+                .corner_radius(CornerRadius::same(9))
+                .inner_margin(Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(active_tag)
+                            .size(10.5)
+                            .color(ok)
+                            .strong(),
+                    );
+                });
+        }
+        inner_resp
+    })
+    .inner
 }
 
-/// Illuminated text-button toggle for feature options (lights up with `active_tag` when active,
-/// dims subtly with tag hidden when off).
+/// Illuminated text-button toggle for feature options (lights up with external `active_tag` pill when active,
+/// dims subtly with tag hidden when off without changing button width).
 pub fn feature_toggle_button(
     ui: &mut Ui,
     label: &str,
@@ -447,7 +457,7 @@ pub fn section_toggle_button(
     render_toggle_button(ui, title, active, active_tag, true, t)
 }
 
-/// Circular cockpit dial button that opens the corresponding side-drawer detail view.
+/// Compact rounded-square sliders/tune button that opens the corresponding side-drawer detail view.
 pub fn detail_dial_button(
     ui: &mut Ui,
     active: bool,
@@ -468,53 +478,62 @@ pub fn detail_dial_button(
                 accent.r(),
                 accent.g(),
                 accent.b(),
-                if t.dark_base { 66 } else { 44 },
+                if t.dark_base { 58 } else { 40 },
             )
         } else if resp.hovered() {
-            if t.dark_base {
-                shift_color(t.card_bg, 22)
-            } else {
-                shift_color(t.card_bg, -24)
-            }
-        } else if t.dark_base {
-            shift_color(t.card_bg, 10)
+            rgb(t.control_hover_bg)
         } else {
-            shift_color(t.card_bg, -12)
+            rgb(t.control_bg)
         };
         let stroke_color = if active || resp.hovered() {
             accent
         } else {
             rgb(t.card_border)
         };
-        let fg = if active || resp.hovered() {
+        let bar_fg = if active || resp.hovered() {
             if t.dark_base {
                 Color32::WHITE
             } else {
-                accent
+                rgb(t.text_primary)
             }
+        } else {
+            muted_text(t)
+        };
+        let knob_c = if active || resp.hovered() {
+            accent
         } else {
             rgb(t.text_primary)
         };
 
-        let center = rect.center();
-        let radius = rect.width() * 0.5 - 0.8;
-        p.circle_filled(center, radius, fill);
-        p.circle_stroke(center, radius, Stroke::new(1.1_f32, stroke_color));
+        p.rect_filled(rect, CornerRadius::same(6), fill);
+        p.rect_stroke(
+            rect.shrink(0.5),
+            CornerRadius::same(6),
+            Stroke::new(
+                if active || resp.hovered() {
+                    1.3_f32
+                } else {
+                    1.0_f32
+                },
+                stroke_color,
+            ),
+            StrokeKind::Inside,
+        );
 
-        // Subtle left-opening drawer chevron (`«`) + dot inside dial
-        let tip_x = center.x - 2.6;
-        let back_x = center.x + 1.8;
-        let dy = 3.4_f32;
-        let line_stroke = Stroke::new(1.5_f32, fg);
-        p.line_segment(
-            [pos2(back_x, center.y - dy), pos2(tip_x, center.y)],
-            line_stroke,
-        );
-        p.line_segment(
-            [pos2(tip_x, center.y), pos2(back_x, center.y + dy)],
-            line_stroke,
-        );
-        p.circle_filled(pos2(center.x + 4.4, center.y), 1.15, accent);
+        // Clean 3-rail vector "tune / detailed settings" sliders icon
+        let c = rect.center();
+        let x0 = c.x - 5.2;
+        let x1 = c.x + 5.2;
+        let rails = [
+            (c.y - 4.0, c.x - 1.8),
+            (c.y, c.x + 2.2),
+            (c.y + 4.0, c.x - 0.6),
+        ];
+        let bar_stroke = Stroke::new(1.3_f32, bar_fg);
+        for (ry, kx) in rails {
+            p.line_segment([pos2(x0, ry), pos2(x1, ry)], bar_stroke);
+            p.circle_filled(pos2(kx, ry), 1.9, knob_c);
+        }
     }
 
     resp.on_hover_text(tooltip)
@@ -1053,6 +1072,284 @@ pub fn clickable_warning_badge(ui: &mut egui::Ui, count: usize, color: Color32) 
     }
 
     resp
+}
+
+/// Compact illuminated pill toggle used for permanent inline cockpit switches (e.g., Auto AC/DC).
+pub fn compact_toggle_pill(
+    ui: &mut Ui,
+    label: &str,
+    active: bool,
+    t: &CustomThemeConfig,
+) -> Response {
+    let accent = accent_color(t);
+    let muted = muted_text(t);
+    let (fill, stroke, text_c) = if active {
+        let bg = if t.is_high_contrast() {
+            accent
+        } else {
+            Color32::from_rgba_unmultiplied(
+                accent.r(),
+                accent.g(),
+                accent.b(),
+                if t.dark_base { 52 } else { 36 },
+            )
+        };
+        let fg = if t.is_high_contrast() {
+            if is_bright_color(accent) {
+                Color32::BLACK
+            } else {
+                Color32::WHITE
+            }
+        } else if t.dark_base {
+            Color32::WHITE
+        } else {
+            accent
+        };
+        (bg, Stroke::new(1.1_f32, accent), fg)
+    } else {
+        (
+            rgb(t.control_bg),
+            Stroke::new(0.9_f32, rgb(t.card_border)),
+            muted,
+        )
+    };
+    let mut rt = egui::RichText::new(label).size(10.5).color(text_c);
+    if active {
+        rt = rt.strong();
+    }
+    let resp = ui
+        .scope(|ui| {
+            ui.spacing_mut().button_padding = vec2(7.0, 2.0);
+            ui.add(
+                egui::Button::new(rt)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .corner_radius(CornerRadius::same(10))
+                    .wrap_mode(TextWrapMode::Extend),
+            )
+        })
+        .inner;
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
+/// Compact footer button with a custom vector curved undo arrow + label (immune to font glyph gaps).
+pub fn undo_button(ui: &mut Ui, label: &str, t: &CustomThemeConfig) -> Response {
+    let accent = accent_color(t);
+    let text_c = rgb(t.text_primary);
+    let galley = egui::WidgetText::from(egui::RichText::new(label).size(11.5).color(text_c))
+        .into_galley(
+            ui,
+            Some(TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Button,
+        );
+
+    let pad_x = 8.0_f32;
+    let icon_w = 12.0_f32;
+    let gap = 5.0_f32;
+    let width = (pad_x * 2.0 + icon_w + gap + galley.size().x).ceil();
+    let height = 22.0_f32;
+
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter_at(rect);
+        let fill = if resp.hovered() {
+            rgb(t.control_hover_bg)
+        } else {
+            rgb(t.control_bg)
+        };
+        let border_c = if resp.hovered() {
+            accent
+        } else {
+            rgb(t.card_border)
+        };
+        p.rect_filled(rect, CornerRadius::same(7), fill);
+        p.rect_stroke(
+            rect.shrink(0.5),
+            CornerRadius::same(7),
+            Stroke::new(if resp.hovered() { 1.2_f32 } else { 1.0_f32 }, border_c),
+            StrokeKind::Inside,
+        );
+
+        let cx = rect.left() + pad_x + icon_w * 0.5 + 0.5;
+        let cy = rect.center().y + 0.5;
+        let r = 4.3_f32;
+        let start = 0.30_f32 * std::f32::consts::PI;
+        let end = -0.86_f32 * std::f32::consts::PI;
+        let steps = 10usize;
+        let mut pts = Vec::with_capacity(steps + 1);
+        for s in 0..=steps {
+            let f = s as f32 / steps as f32;
+            let a = lerp(start..=end, f);
+            pts.push(pos2(cx + r * a.cos(), cy + r * a.sin()));
+        }
+        let icon_c = if resp.hovered() { accent } else { text_c };
+        let icon_stroke = Stroke::new(1.4_f32, icon_c);
+        p.add(Shape::line(pts.clone(), icon_stroke));
+        if let Some(&tip) = pts.last() {
+            p.line_segment([tip, pos2(tip.x + 3.2, tip.y - 1.4)], icon_stroke);
+            p.line_segment([tip, pos2(tip.x - 0.9, tip.y - 3.4)], icon_stroke);
+        }
+
+        let text_pos = pos2(
+            rect.left() + pad_x + icon_w + gap,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        p.galley(text_pos, galley, text_c);
+    }
+
+    resp
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedChipAction {
+    None,
+    Apply,
+    Delete,
+}
+
+/// Saved custom theme chip with fixed width and inline circular `×` delete affordance revealed on hover.
+pub fn saved_theme_chip(
+    ui: &mut Ui,
+    name: &str,
+    accent_dot: Color32,
+    active: bool,
+    delete_tooltip: &str,
+    t: &CustomThemeConfig,
+) -> SavedChipAction {
+    let accent = accent_color(t);
+    let err_c = status_err(t);
+    let (_, _, text_c) = button_palette(active, t);
+    let btn_size = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Button)
+        .map(|f| f.size * 0.95)
+        .unwrap_or(12.5);
+    let mut rt = egui::RichText::new(name).size(btn_size).color(text_c);
+    if active {
+        rt = rt.strong();
+    }
+    let galley = egui::WidgetText::from(rt).into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+
+    let pad_l = 9.0_f32;
+    let pad_r = 6.0_f32;
+    let dot_d = 9.0_f32;
+    let gap = 6.0_f32;
+    let close_d = 16.0_f32;
+    let width = (pad_l + dot_d + gap + galley.size().x + gap + close_d + pad_r).ceil();
+    let height = 26.0_f32;
+
+    let (pill_rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let close_center = pos2(
+        pill_rect.right() - pad_r - close_d * 0.5,
+        pill_rect.center().y,
+    );
+    let close_rect = egui::Rect::from_center_size(close_center, Vec2::splat(close_d));
+    let apply_rect = egui::Rect::from_min_max(
+        pill_rect.min,
+        pos2(close_rect.left() - 2.0, pill_rect.bottom()),
+    );
+
+    let apply_resp = ui.interact(
+        apply_rect,
+        ui.id().with(("theme_chip_apply", name)),
+        Sense::click(),
+    );
+    let del_resp = ui
+        .interact(
+            close_rect,
+            ui.id().with(("theme_chip_del", name)),
+            Sense::click(),
+        )
+        .on_hover_text(delete_tooltip);
+
+    let chip_hovered = ui.rect_contains_pointer(pill_rect);
+    if apply_resp.hovered() || del_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if ui.is_rect_visible(pill_rect) {
+        let p = ui.painter_at(pill_rect);
+        let (base_fill, base_stroke, _) = button_palette(active, t);
+        let fill = if !active && chip_hovered {
+            rgb(t.control_hover_bg)
+        } else {
+            base_fill
+        };
+        let stroke = if active || chip_hovered {
+            Stroke::new(1.3_f32, accent)
+        } else {
+            base_stroke
+        };
+
+        p.rect_filled(pill_rect, CornerRadius::same(9), fill);
+        p.rect_stroke(
+            pill_rect.shrink(0.5),
+            CornerRadius::same(9),
+            stroke,
+            StrokeKind::Inside,
+        );
+
+        let dot_center = pos2(pill_rect.left() + pad_l + dot_d * 0.5, pill_rect.center().y);
+        p.circle_filled(dot_center, dot_d * 0.5, accent_dot);
+
+        let text_pos = pos2(
+            pill_rect.left() + pad_l + dot_d + gap,
+            pill_rect.center().y - galley.size().y * 0.5,
+        );
+        p.galley(text_pos, galley, text_c);
+
+        if chip_hovered || del_resp.hovered() {
+            let x_bg = if del_resp.hovered() {
+                Color32::from_rgba_unmultiplied(err_c.r(), err_c.g(), err_c.b(), 64)
+            } else {
+                Color32::from_rgba_unmultiplied(text_c.r(), text_c.g(), text_c.b(), 24)
+            };
+            let x_fg = if del_resp.hovered() {
+                err_c
+            } else {
+                muted_text(t)
+            };
+            p.circle_filled(close_center, close_d * 0.48, x_bg);
+            let r = 3.1_f32;
+            let xs = Stroke::new(1.4_f32, x_fg);
+            p.line_segment(
+                [
+                    pos2(close_center.x - r, close_center.y - r),
+                    pos2(close_center.x + r, close_center.y + r),
+                ],
+                xs,
+            );
+            p.line_segment(
+                [
+                    pos2(close_center.x + r, close_center.y - r),
+                    pos2(close_center.x - r, close_center.y + r),
+                ],
+                xs,
+            );
+        }
+    }
+
+    if del_resp.clicked() {
+        SavedChipAction::Delete
+    } else if apply_resp.clicked() {
+        SavedChipAction::Apply
+    } else {
+        SavedChipAction::None
+    }
 }
 
 #[cfg(test)]

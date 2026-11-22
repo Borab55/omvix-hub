@@ -1,6 +1,6 @@
 use crate::theme::{
     accent_color, card_frame, pill_button, section_title, section_toggle_button, status_badge,
-    STATUS_ERR, STATUS_OK, STATUS_WARN,
+    status_err, status_ok, status_warn,
 };
 use crate::worker::WorkerCommand;
 use egui::{Color32, CornerRadius, Key, Modifiers, RichText, Stroke, Ui};
@@ -169,6 +169,9 @@ pub fn render(
 ) {
     let t = &cfg.general.custom_theme.clone();
     let accent = accent_color(t);
+    let ok_c = status_ok(t);
+    let warn_c = status_warn(t);
+    let err_c = status_err(t);
 
     ui.heading(i18n.t("nav.hotkeys"));
     ui.add_space(6.0);
@@ -215,7 +218,7 @@ pub fn render(
             if cfg.hotkeys.omen_key_action == OmenKeyAction::LaunchCustomCommand {
                 if !config_warnings.is_empty() {
                     ui.colored_label(
-                        STATUS_WARN,
+                        warn_c,
                         RichText::new(config_warnings.join(" | ")).size(11.5),
                     );
                 }
@@ -234,9 +237,9 @@ pub fn render(
                         !cmd_trimmed.is_empty() && is_valid_custom_command_syntax(cmd_trimmed);
                     if !cmd_trimmed.is_empty() {
                         if cmd_valid {
-                            status_badge(ui, &i18n.t("common.status_ok"), STATUS_OK);
+                            status_badge(ui, &i18n.t("common.status_ok"), ok_c);
                         } else {
-                            status_badge(ui, &i18n.t("common.status_error"), STATUS_ERR);
+                            status_badge(ui, &i18n.t("common.status_error"), err_c);
                         }
                     }
                     if ui
@@ -277,10 +280,10 @@ pub fn render(
                 HotkeyBindStatus::Disabled => {
                     (i18n.t("common.disabled"), ui.visuals().weak_text_color())
                 }
-                HotkeyBindStatus::Bound(_) => (i18n.t("hotkeys.status_active"), STATUS_OK),
-                HotkeyBindStatus::Conflict(_) => (i18n.t("hotkeys.status_conflict"), STATUS_WARN),
+                HotkeyBindStatus::Bound(_) => (i18n.t("hotkeys.status_active"), ok_c),
+                HotkeyBindStatus::Conflict(_) => (i18n.t("hotkeys.status_conflict"), warn_c),
                 HotkeyBindStatus::Invalid(_) | HotkeyBindStatus::Error(_) => {
-                    (i18n.t("common.status_error"), STATUS_ERR)
+                    (i18n.t("common.status_error"), err_c)
                 }
             };
             status_badge(ui, &badge_text, badge_color);
@@ -375,9 +378,9 @@ pub fn render(
             #[cfg(windows)]
             if !cfg.hotkeys.global_toggle_shortcut.trim().is_empty() {
                 if parse_shortcut(&cfg.hotkeys.global_toggle_shortcut).is_ok() {
-                    status_badge(ui, &i18n.t("common.status_ok"), STATUS_OK);
+                    status_badge(ui, &i18n.t("common.status_ok"), ok_c);
                 } else {
-                    status_badge(ui, &i18n.t("common.status_error"), STATUS_ERR);
+                    status_badge(ui, &i18n.t("common.status_error"), err_c);
                 }
             }
         });
@@ -385,7 +388,7 @@ pub fn render(
             HotkeyBindStatus::Conflict(combo) => {
                 ui.add_space(4.0);
                 ui.colored_label(
-                    STATUS_WARN,
+                    warn_c,
                     RichText::new(
                         i18n.t("hotkeys.conflict_detail")
                             .replace("{shortcut}", combo),
@@ -406,7 +409,7 @@ pub fn render(
             }
             HotkeyBindStatus::Invalid(msg) | HotkeyBindStatus::Error(msg) => {
                 ui.add_space(4.0);
-                ui.colored_label(STATUS_ERR, RichText::new(msg).size(12.0));
+                ui.colored_label(err_c, RichText::new(msg).size(12.0));
             }
             HotkeyBindStatus::Disabled | HotkeyBindStatus::Bound(_) => {}
         }

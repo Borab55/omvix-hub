@@ -1042,3 +1042,69 @@ fn integration_apply_battery_now_never_skips_when_firmware_mode_unknown() {
     let g = rig.inner.lock().unwrap();
     assert_eq!(g.battery_mode_writes, vec![BatteryChargeMode::Inhibit]);
 }
+
+#[test]
+fn integration_restore_default_power_limits_reapplies_profile_and_keeps_other_channel() {
+    let dir = TempDirGuard::create("power_limit_reset");
+    let mut cfg = AppConfig::default();
+    cfg.thermal_fan.performance_mode = PerformanceMode::Performance;
+    cfg.tuning.pl1_watts = Some(55);
+    cfg.tuning.pl2_watts = Some(115);
+
+    let rig = MockRig::new(MockHardwareState::default());
+    let (mut engine, _state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+
+    // Clear only PL1 while keeping PL2 -> must re-apply active profile first, then apply (None, Some(95))
+    engine.handle_command(
+        WorkerCommand::RestoreDefaultPowerLimits {
+            keep_pl1: None,
+            keep_pl2: Some(95),
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    assert_eq!(engine.cfg.tuning.pl1_watts, None);
+    assert_eq!(engine.cfg.tuning.pl2_watts, Some(95));
+    assert_eq!(engine.last_committed_power_limits, (None, Some(95)));
+    {
+        let g = rig.inner.lock().unwrap();
+        assert_eq!(
+            g.event_log,
+            vec![
+                "perf:Performance".to_string(),
+                "win_power:BestPerformance".to_string(),
+                "limits:None:Some(95)".to_string(),
+            ]
+        );
+    }
+
+    // Clear all power limits -> re-applies active profile ONLY without calling set_power_limits
+    rig.inner.lock().unwrap().event_log.clear();
+    rig.inner.lock().unwrap().power_limits_writes.clear();
+    engine.handle_command(
+        WorkerCommand::RestoreDefaultPowerLimits {
+            keep_pl1: None,
+            keep_pl2: None,
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    assert_eq!(engine.cfg.tuning.pl1_watts, None);
+    assert_eq!(engine.cfg.tuning.pl2_watts, None);
+    assert_eq!(engine.last_committed_power_limits, (None, None));
+    {
+        let g = rig.inner.lock().unwrap();
+        assert_eq!(
+            g.event_log,
+            vec![
+                "perf:Performance".to_string(),
+                "win_power:BestPerformance".to_string(),
+            ]
+        );
+        assert!(g.power_limits_writes.is_empty());
+    }
+}
