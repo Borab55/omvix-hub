@@ -2,9 +2,9 @@ use crate::paths;
 use crate::security_fs::is_reparse_point;
 use crate::system_info::is_process_elevated;
 use omvix_core::updater::{
-    GITHUB_RELEASES_LATEST_API, MAX_API_JSON_BYTES, MAX_CHECKSUM_BYTES, MAX_UPDATE_BINARY_BYTES,
-    PINNED_SIGNER_SUBJECT, evaluate_authenticode_signature, parse_github_release_json,
-    parse_sha256_manifest, sha256_hex, validate_github_release_url,
+    evaluate_authenticode_signature, parse_github_release_json, parse_sha256_manifest, sha256_hex,
+    validate_github_release_url, GITHUB_RELEASES_LATEST_API, MAX_API_JSON_BYTES,
+    MAX_CHECKSUM_BYTES, MAX_UPDATE_BINARY_BYTES, PINNED_SIGNER_SUBJECT,
 };
 use omvix_core::{
     AuthenticodeInfo, OmvixError, ReleaseInfo, Result, SemVer, StagedUpdate, UpdateSignatureStatus,
@@ -13,15 +13,15 @@ use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
 use windows::core::{HSTRING, PCWSTR};
+use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const HTTP_404_MARKER: &str = "OMVIX_HTTP_404";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseCheckOutcome {
-    UpdateAvailable(ReleaseInfo),
+    UpdateAvailable(Box<ReleaseInfo>),
     UpToDate { latest_tag: String },
     NoReleasesPublished,
 }
@@ -33,8 +33,12 @@ fn hidden_powershell(script: &str, envs: &[(&str, &str)]) -> Result<Output> {
     for &(k, v) in envs {
         cmd.env(k, v);
     }
-    cmd.output()
-        .map_err(|e| OmvixError::Io(std::io::Error::new(e.kind(), format!("PowerShell launch failed: {e}"))))
+    cmd.output().map_err(|e| {
+        OmvixError::Io(std::io::Error::new(
+            e.kind(),
+            format!("PowerShell launch failed: {e}"),
+        ))
+    })
 }
 
 fn schedule_delete_on_reboot(path: &Path) {
@@ -111,7 +115,7 @@ if ([System.Text.Encoding]::UTF8.GetByteCount([string]$content) -gt [int]$env:OM
     let remote = SemVer::parse(&release.version);
     let local = SemVer::parse(current_version);
     match (remote, local) {
-        (Some(r), Some(l)) if r > l => Ok(ReleaseCheckOutcome::UpdateAvailable(release)),
+        (Some(r), Some(l)) if r > l => Ok(ReleaseCheckOutcome::UpdateAvailable(Box::new(release))),
         _ => Ok(ReleaseCheckOutcome::UpToDate {
             latest_tag: release.tag_name,
         }),
@@ -335,7 +339,9 @@ if ($assetLen -le 0 -or $assetLen -gt [int64]$env:OMVIX_MAX_ASSET) {
     };
     if cs_meta.len() > MAX_CHECKSUM_BYTES as u64 {
         cleanup_on_err(&staging);
-        return Err(OmvixError::Config("Downloaded checksum manifest exceeds size limit".into()));
+        return Err(OmvixError::Config(
+            "Downloaded checksum manifest exceeds size limit".into(),
+        ));
     }
     let manifest_bytes = match fs::read(&checksum_path) {
         Ok(b) => b,
@@ -364,7 +370,9 @@ if ($assetLen -le 0 -or $assetLen -gt [int64]$env:OMVIX_MAX_ASSET) {
     };
     if asset_meta.len() == 0 || asset_meta.len() > MAX_UPDATE_BINARY_BYTES {
         cleanup_on_err(&staging);
-        return Err(OmvixError::Config("Downloaded update asset size invalid".into()));
+        return Err(OmvixError::Config(
+            "Downloaded update asset size invalid".into(),
+        ));
     }
     let asset_bytes = match fs::read(&asset_path) {
         Ok(b) => b,
@@ -611,8 +619,11 @@ pub fn apply_staged_update(staged: &StagedUpdate, allow_unsigned_sha256: bool) -
 
     let live_sig = inspect_authenticode_signature(&staged.binary_path)?;
     let live_status = evaluate_authenticode_signature(&live_sig, PINNED_SIGNER_SUBJECT);
-    let sig_downgraded = matches!(staged.signature, UpdateSignatureStatus::AuthenticodeValid { .. })
-        && !matches!(live_status, UpdateSignatureStatus::AuthenticodeValid { .. });
+    let sig_downgraded =
+        matches!(
+            staged.signature,
+            UpdateSignatureStatus::AuthenticodeValid { .. }
+        ) && !matches!(live_status, UpdateSignatureStatus::AuthenticodeValid { .. });
     let sig_allowed = !sig_downgraded
         && match &live_status {
             UpdateSignatureStatus::AuthenticodeValid { .. } => true,

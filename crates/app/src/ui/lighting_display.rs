@@ -1,4 +1,6 @@
-use crate::theme::{STATUS_ERR, STATUS_WARN, accent_color, card_frame, pill_button, section_title, status_badge};
+use crate::theme::{
+    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_WARN,
+};
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
@@ -61,13 +63,12 @@ pub fn render(
             ui.add_space(4.0);
             let mut zone_committed = false;
             ui.horizontal_wrapped(|ui| {
-                for z in 0..zone_count {
-                    let cur = cfg.lighting.zones[z];
+                for (z, cur) in cfg.lighting.zones.iter_mut().take(zone_count).enumerate() {
                     let mut srgb = [cur.r, cur.g, cur.b];
                     ui.label(i18n.t_fmt("lighting.zone", &[("index", &(z + 1).to_string())]));
                     let resp = ui.color_edit_button_srgb(&mut srgb);
                     if resp.changed() {
-                        cfg.lighting.zones[z] = RgbColor {
+                        *cur = RgbColor {
                             r: srgb[0],
                             g: srgb[1],
                             b: srgb[2],
@@ -88,10 +89,38 @@ pub fn render(
             ui.horizontal_wrapped(|ui| {
                 ui.label(i18n.t("lighting.presets"));
                 for (label, rgb) in [
-                    ("Cyan", RgbColor { r: 0, g: 180, b: 216 }),
-                    ("White", RgbColor { r: 245, g: 245, b: 255 }),
-                    ("Crimson", RgbColor { r: 220, g: 38, b: 38 }),
-                    ("Emerald", RgbColor { r: 34, g: 197, b: 94 }),
+                    (
+                        "Cyan",
+                        RgbColor {
+                            r: 0,
+                            g: 180,
+                            b: 216,
+                        },
+                    ),
+                    (
+                        "White",
+                        RgbColor {
+                            r: 245,
+                            g: 245,
+                            b: 255,
+                        },
+                    ),
+                    (
+                        "Crimson",
+                        RgbColor {
+                            r: 220,
+                            g: 38,
+                            b: 38,
+                        },
+                    ),
+                    (
+                        "Emerald",
+                        RgbColor {
+                            r: 34,
+                            g: 197,
+                            b: 94,
+                        },
+                    ),
                 ] {
                     if ui.button(label).clicked() {
                         cfg.lighting.zones = [rgb; 4];
@@ -159,10 +188,16 @@ pub fn render(
             ui.add_space(6.0);
             ui.colored_label(
                 STATUS_WARN,
-                RichText::new(i18n.t_fmt("gpu.mux_confirm_prompt", &[("mode", &format!("{pending:?}"))]))
-                    .strong(),
+                RichText::new(i18n.t_fmt(
+                    "gpu.mux_confirm_prompt",
+                    &[("mode", &format!("{pending:?}"))],
+                ))
+                .strong(),
             );
-            ui.colored_label(STATUS_ERR, RichText::new(i18n.t("gpu.bitlocker_warning")).size(11.5));
+            ui.colored_label(
+                STATUS_ERR,
+                RichText::new(i18n.t("gpu.bitlocker_warning")).size(11.5),
+            );
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 if pill_button(ui, &i18n.t("gpu.confirm_apply"), true, t).clicked() {
@@ -178,7 +213,9 @@ pub fn render(
             });
         } else {
             ui.add_space(4.0);
-            ui.label(RichText::new(i18n.t("gpu.reboot_required")).color(Color32::from_rgb(245, 158, 11)));
+            ui.label(
+                RichText::new(i18n.t("gpu.reboot_required")).color(Color32::from_rgb(245, 158, 11)),
+            );
         }
 
         if st.gpu_mux_reboot_pending && !draft.reboot_dismissed {

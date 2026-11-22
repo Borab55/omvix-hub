@@ -1,8 +1,8 @@
 use crate::system_info::collect_system_identity;
-use crate::wmi_bios::{HpWmiBios, OutputSize, describe_wmi_return_code};
+use crate::wmi_bios::{describe_wmi_return_code, HpWmiBios, OutputSize};
 use omvix_core::thermal::{
-    DEFAULT_MAX_FAN_LEVEL, resolve_scheme_from_identity, smart_manual_wmi_level,
-    thermal_profile_byte,
+    resolve_scheme_from_identity, smart_manual_wmi_level, thermal_profile_byte,
+    DEFAULT_MAX_FAN_LEVEL,
 };
 use omvix_core::{
     FanMode, OmvixError, PerformanceMode, Result, ThermalFanBackend, ThermalProfileScheme,
@@ -35,7 +35,12 @@ pub fn restore_fan_auto_fresh_wmi() -> Result<()> {
         });
     }
     let mode_byte = thermal_profile_byte(scheme, PerformanceMode::Balanced);
-    let apply_auto = bios.execute(0x20008, 0x1A, &[0xFF, mode_byte, 0x01, 0x00], OutputSize::Size0)?;
+    let apply_auto = bios.execute(
+        0x20008,
+        0x1A,
+        &[0xFF, mode_byte, 0x01, 0x00],
+        OutputSize::Size0,
+    )?;
     if apply_auto.return_code != 0 {
         return Err(OmvixError::WmiCallFailed {
             command: 0x20008,
@@ -264,7 +269,11 @@ impl ThermalFanBackend for WindowsThermalFanBackend {
             .lock()
             .map(|g| g.fan_mode)
             .unwrap_or(FanMode::Auto);
-        let by_bios = if fan_mode == FanMode::Auto { 0x01 } else { 0x00 };
+        let by_bios = if fan_mode == FanMode::Auto {
+            0x01
+        } else {
+            0x00
+        };
 
         HpWmiBios::with_cached(|bios| {
             Self::write_bios_checked(bios, 0x20008, 0x1A, &[0xFF, mode_byte, by_bios, 0x00])
@@ -296,11 +305,7 @@ impl ThermalFanBackend for WindowsThermalFanBackend {
     }
 
     fn keep_alive_tick(&self) -> Result<()> {
-        let allow_zero = self
-            .state
-            .lock()
-            .map(|g| g.allow_zero_rpm)
-            .unwrap_or(false);
+        let allow_zero = self.state.lock().map(|g| g.allow_zero_rpm).unwrap_or(false);
         self.keep_alive_tick_with_cool_hint(allow_zero)
     }
 }

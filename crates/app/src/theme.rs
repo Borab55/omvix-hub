@@ -1,4 +1,6 @@
-use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Margin, Stroke, Style, Visuals};
+use egui::{
+    Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Margin, Stroke, Style, Visuals,
+};
 use omvix_core::CustomThemeConfig;
 use std::fs;
 use std::path::Path;
@@ -95,7 +97,11 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u
     let card = rgb(t.card_bg);
     let border = rgb(t.card_border);
     let text = rgb(t.text_primary);
-    let border_w = if t.is_high_contrast() { 1.5_f32 } else { 1.0_f32 };
+    let border_w = if t.is_high_contrast() {
+        1.5_f32
+    } else {
+        1.0_f32
+    };
 
     visuals.panel_fill = canvas;
     visuals.window_fill = canvas;
@@ -169,7 +175,11 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u
 }
 
 pub fn card_frame(t: &CustomThemeConfig) -> egui::Frame {
-    let border_w = if t.is_high_contrast() { 1.5_f32 } else { 1.0_f32 };
+    let border_w = if t.is_high_contrast() {
+        1.5_f32
+    } else {
+        1.0_f32
+    };
     egui::Frame::NONE
         .fill(rgb(t.card_bg))
         .stroke(Stroke::new(border_w, rgb(t.card_border)))
@@ -178,7 +188,11 @@ pub fn card_frame(t: &CustomThemeConfig) -> egui::Frame {
 }
 
 pub fn compact_card(t: &CustomThemeConfig) -> egui::Frame {
-    let border_w = if t.is_high_contrast() { 1.5_f32 } else { 1.0_f32 };
+    let border_w = if t.is_high_contrast() {
+        1.5_f32
+    } else {
+        1.0_f32
+    };
     egui::Frame::NONE
         .fill(rgb(t.card_bg))
         .stroke(Stroke::new(border_w, rgb(t.card_border)))
@@ -196,7 +210,11 @@ pub fn section_title(ui: &mut egui::Ui, text: impl Into<String>, t: &CustomTheme
 
 fn button_palette(selected: bool, t: &CustomThemeConfig) -> (Color32, Stroke, Color32) {
     let accent = accent_color(t);
-    let border_w = if t.is_high_contrast() { 1.5_f32 } else { 1.0_f32 };
+    let border_w = if t.is_high_contrast() {
+        1.5_f32
+    } else {
+        1.0_f32
+    };
     if selected {
         if t.is_high_contrast() {
             let fg = if is_bright_color(accent) {
@@ -332,11 +350,7 @@ pub fn clickable_status_badge(ui: &mut egui::Ui, text: &str, color: Color32) -> 
 }
 
 /// Compact pill badge with a custom-painted vector warning triangle (`▲`) + count.
-pub fn clickable_warning_badge(
-    ui: &mut egui::Ui,
-    count: usize,
-    color: Color32,
-) -> egui::Response {
+pub fn clickable_warning_badge(ui: &mut egui::Ui, count: usize, color: Color32) -> egui::Response {
     let galley = egui::WidgetText::from(
         egui::RichText::new(count.to_string())
             .size(12.0)

@@ -1,4 +1,4 @@
-use crate::app_profiles::{AppProfilesConfig, normalize_exe_name};
+use crate::app_profiles::{normalize_exe_name, AppProfilesConfig};
 use crate::error::{OmvixError, Result};
 use crate::logging::LogConfig;
 use crate::models::{
@@ -138,11 +138,7 @@ impl CustomThemeConfig {
     /// Encodes this theme into a compact shareable ASCII code (`OMVIX1|...`).
     pub fn encode_share_code(&self) -> String {
         let mode = if self.dark_base { "D" } else { "L" };
-        let clean_name = self
-            .name
-            .replace(['|', '\r', '\n'], " ")
-            .trim()
-            .to_string();
+        let clean_name = self.name.replace(['|', '\r', '\n'], " ").trim().to_string();
         let display_name = if clean_name.is_empty() {
             "Custom".to_string()
         } else {
@@ -509,7 +505,11 @@ pub fn split_legacy_command(raw: &str) -> (String, String) {
             if idx == trimmed.len() {
                 return (trimmed.to_string(), String::new());
             }
-            if trimmed[idx..].chars().next().is_some_and(|c| c.is_ascii_whitespace()) {
+            if trimmed[idx..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_whitespace())
+            {
                 return (
                     trimmed[..idx].trim().to_string(),
                     trimmed[idx..].trim().to_string(),
@@ -542,7 +542,7 @@ pub fn is_valid_custom_command_syntax(path: &str) -> bool {
     (lower.ends_with(".exe") && lower.len() > 4) || (lower.ends_with(".lnk") && lower.len() > 4)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TuningConfig {
     pub preferred_gpu_mode: Option<GpuMode>,
@@ -552,20 +552,6 @@ pub struct TuningConfig {
     pub tcc_temp_limit_c: Option<u8>,
     pub core_undervolt_mv: Option<i16>,
     pub use_pawn_io_if_available: bool,
-}
-
-impl Default for TuningConfig {
-    fn default() -> Self {
-        Self {
-            preferred_gpu_mode: None,
-            cpu_boost_mode: None,
-            pl1_watts: None,
-            pl2_watts: None,
-            tcc_temp_limit_c: None,
-            core_undervolt_mv: None,
-            use_pawn_io_if_available: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -605,9 +591,7 @@ impl AppConfig {
     pub fn default_config_path() -> PathBuf {
         #[cfg(target_os = "windows")]
         if let Some(app_data) = std::env::var_os("APPDATA") {
-            return PathBuf::from(app_data)
-                .join("OmvixHub")
-                .join("config.toml");
+            return PathBuf::from(app_data).join("OmvixHub").join("config.toml");
         }
 
         if let Some(dirs) = ProjectDirs::from("io", "omvix", "OmvixHub") {
@@ -824,7 +808,10 @@ mod tests {
         assert!(loaded.battery.enabled);
         assert_eq!(loaded.battery.stop_threshold_pct, 80);
         assert_eq!(loaded.battery.start_threshold_pct, 75);
-        assert_eq!(loaded.battery.active_profile_id.as_deref(), Some("balanced"));
+        assert_eq!(
+            loaded.battery.active_profile_id.as_deref(),
+            Some("balanced")
+        );
         assert_eq!(loaded.battery.custom_profiles.len(), 1);
         assert_eq!(loaded.battery.custom_profiles[0].name, "Gaming Cap");
         assert_eq!(loaded.logging.max_total_mb, 20);
@@ -846,7 +833,10 @@ mod tests {
 
         assert!(CustomThemeConfig::decode_share_code("").is_err());
         assert!(CustomThemeConfig::decode_share_code("INVALID|D|000000").is_err());
-        assert!(CustomThemeConfig::decode_share_code("OMVIX1|D|zzzzzz|000000|000000|000000|000000|ffffff|Bad").is_err());
+        assert!(CustomThemeConfig::decode_share_code(
+            "OMVIX1|D|zzzzzz|000000|000000|000000|000000|ffffff|Bad"
+        )
+        .is_err());
     }
 
     #[test]
@@ -884,14 +874,19 @@ mod tests {
         assert!(migrated.general.first_run_completed);
 
         // v2 config where user explicitly chose false -> preserves false, migrates thermal guard + first_run_completed
-        let v2_toml =
-            "config_version = 2\n[battery]\nenabled = true\nhold_when_shutdown = false\n";
+        let v2_toml = "config_version = 2\n[battery]\nenabled = true\nhold_when_shutdown = false\n";
         fs::write(&path, v2_toml).unwrap();
         let explicit = AppConfig::load_from_path(&path).expect("load v2");
         assert_eq!(explicit.config_version, CURRENT_CONFIG_VERSION);
         assert!(!explicit.battery.hold_when_shutdown);
-        assert_eq!(explicit.thermal_fan.guard_cpu_temp_c, DEFAULT_GUARD_CPU_TEMP_C);
-        assert_eq!(explicit.thermal_fan.guard_sustain_secs, DEFAULT_GUARD_SUSTAIN_SECS);
+        assert_eq!(
+            explicit.thermal_fan.guard_cpu_temp_c,
+            DEFAULT_GUARD_CPU_TEMP_C
+        );
+        assert_eq!(
+            explicit.thermal_fan.guard_sustain_secs,
+            DEFAULT_GUARD_SUSTAIN_SECS
+        );
         assert!(explicit.general.first_run_completed);
 
         // v3 config preserves explicit guard overrides and marks first_run_completed for existing users
@@ -923,9 +918,18 @@ mod tests {
         cfg.thermal_fan.guard_cpu_temp_c = 80;
         cfg.thermal_fan.guard_sustain_secs = 2;
         cfg.thermal_fan.custom_curve.points = vec![
-            crate::models::FanCurvePoint { temp_c: 40, speed_pct: 35 },
-            crate::models::FanCurvePoint { temp_c: 65, speed_pct: 20 },
-            crate::models::FanCurvePoint { temp_c: 85, speed_pct: 10 },
+            crate::models::FanCurvePoint {
+                temp_c: 40,
+                speed_pct: 35,
+            },
+            crate::models::FanCurvePoint {
+                temp_c: 65,
+                speed_pct: 20,
+            },
+            crate::models::FanCurvePoint {
+                temp_c: 85,
+                speed_pct: 10,
+            },
         ];
         let warnings = cfg.sanitize();
         assert!(!warnings.is_empty());
@@ -949,7 +953,8 @@ mod tests {
         let first_mtime = fs::metadata(&path).unwrap().modified().unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(25));
-        cfg.save_to_path(&path).expect("identical save should succeed");
+        cfg.save_to_path(&path)
+            .expect("identical save should succeed");
         let second_mtime = fs::metadata(&path).unwrap().modified().unwrap();
 
         assert_eq!(first_mtime, second_mtime);
@@ -986,7 +991,10 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.hotkeys.custom_command = r#""C:\Program Files\MyApp\tool.exe" --tray --fast"#.into();
         let w1 = cfg.sanitize();
-        assert_eq!(cfg.hotkeys.custom_command, r"C:\Program Files\MyApp\tool.exe");
+        assert_eq!(
+            cfg.hotkeys.custom_command,
+            r"C:\Program Files\MyApp\tool.exe"
+        );
         assert_eq!(cfg.hotkeys.custom_args, "--tray --fast");
         assert_eq!(w1.len(), 1);
 
@@ -1085,7 +1093,8 @@ mod tests {
         assert_eq!(parsed.app_profiles, cfg.app_profiles);
 
         // Older TOML lacking new fields deserializes cleanly with defaults
-        let older: AppConfig = toml::from_str("[thermal_fan]\nperformance_mode = \"Eco\"\n").unwrap();
+        let older: AppConfig =
+            toml::from_str("[thermal_fan]\nperformance_mode = \"Eco\"\n").unwrap();
         assert!(older.thermal_fan.sync_windows_power_mode);
         assert!(!older.app_profiles.enabled);
         assert_eq!(older.app_profiles.poll_interval_secs, 3);

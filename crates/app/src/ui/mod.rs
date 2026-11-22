@@ -171,9 +171,18 @@ mod tests {
         assert_eq!(Drawer::Monitor.prev(), Drawer::Extra);
         assert_eq!(Drawer::FansPower.prev(), Drawer::Monitor);
 
-        assert_eq!(FansPowerSubTab::PerformanceFans.next(), FansPowerSubTab::Profiles);
-        assert_eq!(FansPowerSubTab::Tuning.next(), FansPowerSubTab::PerformanceFans);
-        assert_eq!(FansPowerSubTab::PerformanceFans.prev(), FansPowerSubTab::Tuning);
+        assert_eq!(
+            FansPowerSubTab::PerformanceFans.next(),
+            FansPowerSubTab::Profiles
+        );
+        assert_eq!(
+            FansPowerSubTab::Tuning.next(),
+            FansPowerSubTab::PerformanceFans
+        );
+        assert_eq!(
+            FansPowerSubTab::PerformanceFans.prev(),
+            FansPowerSubTab::Tuning
+        );
 
         assert_eq!(ExtraSubTab::LightingDisplay.next(), ExtraSubTab::Hotkeys);
         assert_eq!(ExtraSubTab::Settings.next(), ExtraSubTab::LightingDisplay);

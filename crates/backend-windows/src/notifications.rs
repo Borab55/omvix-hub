@@ -2,27 +2,27 @@ use std::mem::size_of;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateRoundRectRgn,
-    CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
-    DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, FillRect,
-    InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor,
-    SetWindowRgn, TRANSPARENT as GDI_TRANSPARENT,
+    BeginPaint, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW,
+    EndPaint, FillRect, InvalidateRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE,
+    DT_VCENTER, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    TRANSPARENT as GDI_TRANSPARENT,
 };
 use windows::Win32::UI::Shell::{
-    NIF_INFO, NIF_TIP, NIIF_ERROR, NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    Shell_NotifyIconW, NIF_INFO, NIF_TIP, NIIF_ERROR, NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE,
+    NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetSystemMetrics, HMENU, HWND_MESSAGE, KillTimer, LWA_ALPHA, MSG, PostQuitMessage,
-    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes,
-    SetTimer, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_PAINT,
-    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    GetSystemMetrics, KillTimer, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes,
+    SetTimer, ShowWindow, TranslateMessage, HMENU, HWND_MESSAGE, LWA_ALPHA, MSG, SM_CXSCREEN,
+    SM_CYSCREEN, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_PAINT, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_POPUP,
 };
-use windows::core::{HSTRING, PCWSTR};
 
 const OSD_CLASS_NAME: &str = "OmvixHubOsdClass";
 const OSD_WIDTH: i32 = 320;
@@ -107,7 +107,7 @@ pub fn send_windows_toast(title: &str, body: &str, severity: ToastSeverity) {
             return;
         };
 
-        let mut nid = NOTIFYICONDATAW {
+        let nid = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
             uID: TOAST_ICON_ID,
@@ -126,7 +126,7 @@ pub fn send_windows_toast(title: &str, body: &str, severity: ToastSeverity) {
         let added = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) }.as_bool();
         if added {
             thread::sleep(Duration::from_millis(TOAST_DURATION_MS));
-            let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &mut nid) };
+            let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) };
         }
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -327,11 +327,8 @@ pub fn show_mode_osd(title: &str, subtitle: &str, accent_rgb: [u8; 3]) {
         let x = (sw - OSD_WIDTH) / 2;
         let y = (sh * 4 / 5).min(sh - OSD_HEIGHT - 48);
 
-        let ex_style = WS_EX_TOPMOST
-            | WS_EX_TOOLWINDOW
-            | WS_EX_NOACTIVATE
-            | WS_EX_TRANSPARENT
-            | WS_EX_LAYERED;
+        let ex_style =
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED;
         let Ok(hwnd) = (unsafe {
             CreateWindowExW(
                 ex_style,
@@ -385,7 +382,17 @@ mod tests {
     #[test]
     fn encode_utf16_fixed_truncates_and_nul_terminates() {
         let exact: [u16; 6] = encode_utf16_fixed("Omvix");
-        assert_eq!(exact, [b'O' as u16, b'm' as u16, b'v' as u16, b'i' as u16, b'x' as u16, 0]);
+        assert_eq!(
+            exact,
+            [
+                b'O' as u16,
+                b'm' as u16,
+                b'v' as u16,
+                b'i' as u16,
+                b'x' as u16,
+                0
+            ]
+        );
 
         let clipped: [u16; 4] = encode_utf16_fixed("Omvix Hub");
         assert_eq!(clipped, [b'O' as u16, b'm' as u16, b'v' as u16, 0]);

@@ -1,5 +1,7 @@
 use omvix_core::{BatteryChargeMode, FanMode, I18n, PerformanceMode};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{
+    CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+};
 use tray_icon::{Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +309,8 @@ impl TrayController {
         let check_key = (perf_mode, fan_mode, bat_enabled, bat_stop_pct);
         if self.last_checked_state != Some(check_key) {
             self.last_checked_state = Some(check_key);
-            self.item_mode_eco.set_checked(perf_mode == PerformanceMode::Eco);
+            self.item_mode_eco
+                .set_checked(perf_mode == PerformanceMode::Eco);
             self.item_mode_quiet
                 .set_checked(perf_mode == PerformanceMode::Quiet);
             self.item_mode_balanced
@@ -451,7 +454,10 @@ mod tests {
         let (badged, bw, bh) = build_tray_icon_rgba_styled(PerformanceMode::Performance, true);
         assert_eq!(bw, 32);
         assert_eq!(bh, 32);
-        assert_eq!(&badged[ring_idx..ring_idx + 3], &performance_mode_ring_rgb(PerformanceMode::Performance).0);
+        assert_eq!(
+            &badged[ring_idx..ring_idx + 3],
+            &performance_mode_ring_rgb(PerformanceMode::Performance).0
+        );
         assert_eq!(&badged[corner_idx..corner_idx + 4], &[245, 158, 11, 255]);
     }
 }

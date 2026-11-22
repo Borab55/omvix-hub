@@ -1,12 +1,12 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use omvix_core::{
-    AppConfig, BatteryChargeMode, BatteryLimitBackend, BatteryStatus, DiagnosticReport,
-    DiagnosticsBackend, DisplayBackend, FanMode, LogLevel, PerformanceMode, TelemetryBackend,
-    TelemetrySnapshot, ThermalFanBackend, init_logging, list_log_files, total_log_bytes,
+    init_logging, list_log_files, total_log_bytes, AppConfig, BatteryChargeMode,
+    BatteryLimitBackend, BatteryStatus, DiagnosticReport, DiagnosticsBackend, DisplayBackend,
+    FanMode, LogLevel, PerformanceMode, TelemetryBackend, TelemetrySnapshot, ThermalFanBackend,
 };
 use omvix_windows::{
-    WindowsBatteryBackend, WindowsCpuTuningBackend, WindowsDiagnosticsBackend,
-    WindowsDisplayBackend, WindowsTelemetryBackend, WindowsThermalFanBackend, system_info,
+    system_info, WindowsBatteryBackend, WindowsCpuTuningBackend, WindowsDiagnosticsBackend,
+    WindowsDisplayBackend, WindowsTelemetryBackend, WindowsThermalFanBackend,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -295,17 +295,19 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
-            BatteryAction::Auto => match WindowsBatteryBackend::new().set_charge_mode(BatteryChargeMode::Auto) {
-                Ok(()) => {
-                    println!("Restored battery charge mode: Auto (0x2B normal charging)");
-                    ExitCode::SUCCESS
+            BatteryAction::Auto => {
+                match WindowsBatteryBackend::new().set_charge_mode(BatteryChargeMode::Auto) {
+                    Ok(()) => {
+                        println!("Restored battery charge mode: Auto (0x2B normal charging)");
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        tracing::error!("Failed to restore Auto battery charge mode: {err}");
+                        eprintln!("Error: {err}");
+                        ExitCode::FAILURE
+                    }
                 }
-                Err(err) => {
-                    tracing::error!("Failed to restore Auto battery charge mode: {err}");
-                    eprintln!("Error: {err}");
-                    ExitCode::FAILURE
-                }
-            },
+            }
             BatteryAction::SetMode { mode } => {
                 let target: BatteryChargeMode = mode.into();
                 match WindowsBatteryBackend::new().set_charge_mode(target) {
@@ -597,7 +599,10 @@ fn print_report(r: &DiagnosticReport) {
         );
         println!("Notes        : {}", b.notes);
     } else {
-        println!("Matched      : None (unknown board ID `{}`)", r.identity.board_id);
+        println!(
+            "Matched      : None (unknown board ID `{}`)",
+            r.identity.board_id
+        );
     }
 
     println!("\n--- Security & Privileges ---");
@@ -635,13 +640,16 @@ fn print_report(r: &DiagnosticReport) {
         }
     }
 
-    println!("\n--- Read-Only WMI BIOS Probe Results ({}) ---", r.probes.len());
+    println!(
+        "\n--- Read-Only WMI BIOS Probe Results ({}) ---",
+        r.probes.len()
+    );
     if r.probes.is_empty() {
         println!("  No WMI BIOS probes executed (see WMI Status above).");
     } else {
         println!(
-            "{:<28} {:<8} {:<6} {:<6} {:<6} {}",
-            "Probe", "Cmd", "Type", "Out", "RC", "Data / Note"
+            "{:<28} {:<8} {:<6} {:<6} {:<6} Data / Note",
+            "Probe", "Cmd", "Type", "Out", "RC"
         );
         println!("{}", "-".repeat(92));
         for p in &r.probes {

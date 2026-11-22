@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - "feat/**"
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-and-test:
+    name: Format, Clippy & Workspace Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace unit and integration tests
+        run: cargo test --workspace
+
+  release-and-dll-audit:
+    name: Release Build, MinGW DLL Audit & Clean Smoke Test
+    runs-on: windows-latest
+    needs: check-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --workspace
+
+      - name: Audit DLL imports (forbid MinGW runtime DLLs)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targets = @(
+            'target\release\omvix-hub.exe',
+            'target\release\omvix-cli.exe'
+          )
+
+          function Get-PeImports {
+            param([string]$BinaryPath)
+            if (Get-Command objdump -ErrorAction SilentlyContinue) {
+              return (& objdump -p $BinaryPath | Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[-1].Trim() })
+            }
+            if (Get-Command llvm-objdump -ErrorAction SilentlyContinue) {
+              return (& llvm-objdump -p $BinaryPath | Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[-1].Trim() })
+            }
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+            if (Test-Path $vswhere) {
+              $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+              if ($dumpbin) {
+                $lines = & $dumpbin /nologo /dependents $BinaryPath
+                return ($lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9_.\-]+\.dll$' })
+              }
+            }
+            throw 'No PE import inspection tool (objdump, llvm-objdump, or dumpbin) found on runner.'
+          }
+
+          foreach ($bin in $targets) {
+            if (-not (Test-Path $bin)) {
+              throw "Missing release binary: $bin"
+            }
+            $dlls = @(Get-PeImports -BinaryPath $bin)
+            if ($dlls.Count -eq 0) {
+              throw "DLL inspection returned no imports for $bin"
+            }
+            Write-Host "=== $bin imported DLLs ==="
+            $dlls | Sort-Object -Unique | ForEach-Object { Write-Host "  - $_" }
+            $forbidden = $dlls | Where-Object { $_ -match '(?i)^(libgcc|libstdc\+\+|libwinpthread|msys-|mingw)' }
+            if ($forbidden) {
+              throw "Forbidden MinGW runtime DLL(s) detected in ${bin}: $($forbidden -join ', ')"
+            }
+          }
+
+      - name: Clean-PATH smoke test & CLI version verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+
+          $proc = Start-Process -FilePath '.\target\release\omvix-hub.exe' -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "omvix-hub.exe --smoke-test exited with code $($proc.ExitCode)"
+          }
+
+          $cliVer = (& '.\target\release\omvix-cli.exe' --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $cliVer -notmatch '^omvix-cli\s+\d+\.\d+\.\d+') {
+            throw "Unexpected omvix-cli --version output: $cliVer (exit=$LASTEXITCODE)"
+          }
+          Write-Host "Smoke test exit=$($proc.ExitCode), CLI=$cliVer"
+
+      - name: Generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = @(
+            'omvix-hub.exe',
+            'omvix-cli.exe'
+          ) | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path (Join-Path 'target\release' $_)).Hash.ToLowerInvariant()
+            "$hash  $_"
+          }
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path 'target\release').Path 'SHA256SUMS.txt'), $lines, $utf8NoBom)
+          Get-Content 'target\release\SHA256SUMS.txt'
+
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omvix-hub-windows-x64
+          path: |
+            target/release/omvix-hub.exe
+            target/release/omvix-cli.exe
+            target/release/SHA256SUMS.txt
+          retention-days: 7
+
+  linux-core-check:
+    name: Core & Linux Backend Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check core and linux crates
+        run: cargo check -p omvix-core -p omvix-linux --all-targets
+
+      - name: Run core and linux unit tests
+        run: cargo test -p omvix-core -p omvix-linux

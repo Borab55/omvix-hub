@@ -1,6 +1,6 @@
 use crate::wmi_com::{
-    WmiConnection, get_method_in_params, get_object, get_string, get_u8_array, get_u32,
-    put_variant, set_root_wmi_cache_enabled, variant_from_u8_array, variant_from_u32,
+    get_method_in_params, get_object, get_string, get_u32, get_u8_array, put_variant,
+    set_root_wmi_cache_enabled, variant_from_u32, variant_from_u8_array, WmiConnection,
 };
 use omvix_core::thermal::DEFAULT_MAX_FAN_LEVEL;
 use omvix_core::{OmvixError, Result, WmiProbeEntry};
@@ -160,7 +160,7 @@ impl HpWmiBios {
             } else {
                 41
             };
-            for chunk in table[5..].chunks_exact(3).take(max_chunks) {
+            for chunk in table[5..].as_chunks::<3>().0.iter().take(max_chunks) {
                 if chunk[0] == 0 && chunk[1] == 0 {
                     break;
                 }
@@ -264,8 +264,18 @@ impl HpWmiBios {
             ("KeyboardType", 0x20009, 0x01, OutputSize::Size4),
             ("KeyboardColorTable", 0x20009, 0x02, OutputSize::Size128),
             ("KeyboardBacklightGet", 0x20009, 0x04, OutputSize::Size4),
-            ("BatteryChargeControlGet_Std", 0x00001, 0x2B, OutputSize::Size4),
-            ("BatteryChargeControlGet_GM", 0x20008, 0x2B, OutputSize::Size4),
+            (
+                "BatteryChargeControlGet_Std",
+                0x00001,
+                0x2B,
+                OutputSize::Size4,
+            ),
+            (
+                "BatteryChargeControlGet_GM",
+                0x20008,
+                0x2B,
+                OutputSize::Size4,
+            ),
         ];
 
         let zero_in = [0u8; 4];
@@ -329,7 +339,11 @@ fn format_hex_preview(bytes: &[u8], limit: usize) -> String {
     if bytes.len() <= limit {
         format_hex(bytes)
     } else {
-        format!("{} ... ({} bytes)", format_hex(&bytes[..limit]), bytes.len())
+        format!(
+            "{} ... ({} bytes)",
+            format_hex(&bytes[..limit]),
+            bytes.len()
+        )
     }
 }
 
@@ -345,6 +359,9 @@ mod tests {
             .map(|h| u8::from_str_radix(h, 16).unwrap())
             .collect();
         assert_eq!(bytes.len(), 128);
-        assert_eq!(HpWmiBios::parse_max_fan_levels_from_table(&bytes), vec![0x3A, 0x3D]);
+        assert_eq!(
+            HpWmiBios::parse_max_fan_levels_from_table(&bytes),
+            vec![0x3A, 0x3D]
+        );
     }
 }

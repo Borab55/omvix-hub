@@ -2,25 +2,25 @@ use omvix_core::{OmvixError, Result};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr;
-use windows::core::{BSTR, HRESULT, HSTRING, IUnknown, Interface, PCWSTR, VARIANT};
+use windows::core::{IUnknown, Interface, BSTR, HRESULT, HSTRING, PCWSTR, VARIANT};
 use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, RPC_E_TOO_LATE, S_FALSE, S_OK};
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
-    CoInitializeSecurity, CoSetProxyBlanket, CoUninitialize, EOAC_NONE,
-    RPC_C_AUTHN_LEVEL_CALL, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, SAFEARRAY,
+    CoCreateInstance, CoInitializeEx, CoInitializeSecurity, CoSetProxyBlanket, CoUninitialize,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL,
+    RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, SAFEARRAY,
 };
 use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayCreateVector, SafeArrayGetLBound, SafeArrayGetUBound,
     SafeArrayUnaccessData,
 };
 use windows::Win32::System::Variant::{
-    VT_ARRAY, VT_I4, VT_TYPEMASK, VT_UI1, VT_UI4, VariantToUInt32,
+    VariantToUInt32, VT_ARRAY, VT_I4, VT_TYPEMASK, VT_UI1, VT_UI4,
 };
 use windows::Win32::System::Wmi::{
-    IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices, WBEM_E_ACCESS_DENIED,
-    WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_GENERIC_FLAG_TYPE, WBEM_INFINITE,
-    WbemLocator,
+    IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator,
+    WBEM_E_ACCESS_DENIED, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
+    WBEM_GENERIC_FLAG_TYPE, WBEM_INFINITE,
 };
 
 const RPC_C_AUTHN_WINNT: u32 = 10;
@@ -116,8 +116,8 @@ impl WmiConnection {
                 }
             }
 
-            let locator: IWbemLocator =
-                CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).map_err(|e| {
+            let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| {
                     OmvixError::WmiUnavailable(format!("Failed to create IWbemLocator: {e}"))
                 })?;
 
@@ -299,12 +299,12 @@ pub fn get_u32(obj: &IWbemClassObject, name: &str) -> Option<u32> {
 pub fn get_u32_array(obj: &IWbemClassObject, name: &str) -> Option<Vec<u32>> {
     let val = get_property(obj, name)?;
     unsafe {
-        let vt = (*val.as_raw()).Anonymous.Anonymous.vt;
+        let vt = val.as_raw().Anonymous.Anonymous.vt;
         let elem_vt = vt & VT_TYPEMASK.0;
         if (vt & VT_ARRAY.0) == 0 || (elem_vt != VT_I4.0 && elem_vt != VT_UI4.0) {
             return None;
         }
-        let psa = (*val.as_raw()).Anonymous.Anonymous.Anonymous.parray as *const SAFEARRAY;
+        let psa = val.as_raw().Anonymous.Anonymous.Anonymous.parray as *const SAFEARRAY;
         if psa.is_null() {
             return None;
         }
@@ -329,11 +329,11 @@ pub fn get_u32_array(obj: &IWbemClassObject, name: &str) -> Option<Vec<u32>> {
 pub fn get_u8_array(obj: &IWbemClassObject, name: &str) -> Option<Vec<u8>> {
     let val = get_property(obj, name)?;
     unsafe {
-        let vt = (*val.as_raw()).Anonymous.Anonymous.vt;
+        let vt = val.as_raw().Anonymous.Anonymous.vt;
         if (vt & VT_ARRAY.0) == 0 || (vt & VT_TYPEMASK.0) != VT_UI1.0 {
             return None;
         }
-        let psa = (*val.as_raw()).Anonymous.Anonymous.Anonymous.parray as *const SAFEARRAY;
+        let psa = val.as_raw().Anonymous.Anonymous.Anonymous.parray as *const SAFEARRAY;
         if psa.is_null() {
             return None;
         }

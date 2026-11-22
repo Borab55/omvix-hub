@@ -1,11 +1,13 @@
-use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, pill_button, section_title, status_badge};
+use crate::theme::{
+    card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK, STATUS_WARN,
+};
 use crate::ui::{control_committed, default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Slider, Ui};
 use omvix_core::updater::GITHUB_RELEASES_PAGE_URL;
 use omvix_core::{
-    AppConfig, CustomThemeConfig, I18n, LogLevel, UpdateSignatureStatus, UpdateUiStatus,
-    clear_logs, tail_logs, total_log_bytes,
+    clear_logs, tail_logs, total_log_bytes, AppConfig, CustomThemeConfig, I18n, LogLevel,
+    UpdateSignatureStatus, UpdateUiStatus,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -453,7 +455,9 @@ pub fn render(
                 .add_enabled(!st.support_bundle_busy, egui::Button::new(bundle_lbl))
                 .clicked()
             {
-                on_cmd(WorkerCommand::CreateSupportBundle(default_support_bundle_path()));
+                on_cmd(WorkerCommand::CreateSupportBundle(
+                    default_support_bundle_path(),
+                ));
             }
         });
 
@@ -464,7 +468,10 @@ pub fn render(
                     i18n.t("support_bundle.saved_label"),
                     zip_path.display()
                 ));
-                if ui.small_button(i18n.t("support_bundle.show_in_folder")).clicked() {
+                if ui
+                    .small_button(i18n.t("support_bundle.show_in_folder"))
+                    .clicked()
+                {
                     show_file_in_folder(zip_path);
                 }
             });

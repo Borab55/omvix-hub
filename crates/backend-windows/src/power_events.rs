@@ -2,19 +2,19 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Power::{
     RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DEVICE_NOTIFY_WINDOW_HANDLE, DispatchMessageW,
-    GetMessageW, HMENU, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL, PBT_APMRESUMESUSPEND,
-    PBT_APMSUSPEND, PostThreadMessageW, RegisterClassW, TranslateMessage, UnregisterClassW,
-    WINDOW_EX_STYLE, WM_ENDSESSION, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_QUIT, WNDCLASSW,
-    WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    PostThreadMessageW, RegisterClassW, TranslateMessage, UnregisterClassW,
+    DEVICE_NOTIFY_WINDOW_HANDLE, HMENU, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL,
+    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WINDOW_EX_STYLE, WM_ENDSESSION, WM_POWERBROADCAST,
+    WM_QUERYENDSESSION, WM_QUIT, WNDCLASSW, WS_OVERLAPPED,
 };
-use windows::core::PCWSTR;
 
 const POWER_CLASS_NAME: &str = "OmvixPowerEventWindow";
 const RESUME_DEBOUNCE: Duration = Duration::from_secs(2);
@@ -195,7 +195,9 @@ where
         }
         .ok();
         if notify_handle.is_none() {
-            tracing::debug!("RegisterSuspendResumeNotification failed; relying on WM_POWERBROADCAST");
+            tracing::debug!(
+                "RegisterSuspendResumeNotification failed; relying on WM_POWERBROADCAST"
+            );
         } else {
             tracing::info!("Started Windows Sleep / Modern Standby / Shutdown listener");
         }

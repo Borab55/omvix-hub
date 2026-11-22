@@ -1,7 +1,7 @@
-use crate::theme::{STATUS_ERR, STATUS_OK, STATUS_WARN, card_frame, section_title, status_badge};
+use crate::theme::{card_frame, section_title, status_badge, STATUS_ERR, STATUS_OK, STATUS_WARN};
 use crate::worker::WorkerCommand;
 use egui::{RichText, Ui};
-use omvix_core::config::{OmenKeyAction, is_valid_custom_command_syntax};
+use omvix_core::config::{is_valid_custom_command_syntax, OmenKeyAction};
 use omvix_core::{AppConfig, I18n};
 
 #[cfg(windows)]
@@ -17,12 +17,13 @@ pub enum HotkeyBindStatus {
     Error(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     ui: &mut Ui,
     cfg: &mut AppConfig,
     i18n: &I18n,
     bind_status: &HotkeyBindStatus,
-    config_warnings: &mut Vec<String>,
+    config_warnings: &[String],
     on_cmd: &mut dyn FnMut(WorkerCommand),
     on_save: &mut dyn FnMut(),
     on_rebind_hotkeys: &mut dyn FnMut(),
@@ -109,7 +110,9 @@ pub fn render(
                         .text_edit_singleline(&mut cfg.hotkeys.custom_args)
                         .changed()
                     {
-                        cfg.hotkeys.custom_args.retain(|c| !matches!(c, '\0' | '\r' | '\n'));
+                        cfg.hotkeys
+                            .custom_args
+                            .retain(|c| !matches!(c, '\0' | '\r' | '\n'));
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                     }
@@ -126,7 +129,9 @@ pub fn render(
         section_title(ui, i18n.t("hotkeys.global_shortcut"), t);
         ui.horizontal_wrapped(|ui| {
             let (badge_text, badge_color) = match bind_status {
-                HotkeyBindStatus::Disabled => (i18n.t("common.disabled"), ui.visuals().weak_text_color()),
+                HotkeyBindStatus::Disabled => {
+                    (i18n.t("common.disabled"), ui.visuals().weak_text_color())
+                }
                 HotkeyBindStatus::Bound(_) => (i18n.t("hotkeys.status_active"), STATUS_OK),
                 HotkeyBindStatus::Conflict(_) => (i18n.t("hotkeys.status_conflict"), STATUS_WARN),
                 HotkeyBindStatus::Invalid(_) | HotkeyBindStatus::Error(_) => {
@@ -155,8 +160,9 @@ pub fn render(
             #[cfg(not(windows))]
             let valid = true;
 
-            let enter_applied =
-                shortcut_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid;
+            let enter_applied = shortcut_resp.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && valid;
 
             if ui.button(i18n.t("common.apply")).clicked() || enter_applied {
                 on_save();
@@ -168,8 +174,11 @@ pub fn render(
                 ui.add_space(4.0);
                 ui.colored_label(
                     STATUS_WARN,
-                    RichText::new(i18n.t("hotkeys.conflict_detail").replace("{shortcut}", combo))
-                        .size(12.0),
+                    RichText::new(
+                        i18n.t("hotkeys.conflict_detail")
+                            .replace("{shortcut}", combo),
+                    )
+                    .size(12.0),
                 );
                 ui.horizontal_wrapped(|ui| {
                     ui.weak(i18n.t("hotkeys.conflict_alternatives"));
