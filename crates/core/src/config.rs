@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 4;
+pub const CURRENT_CONFIG_VERSION: u32 = 7;
+pub const DEFAULT_TRAVEL_CHARGE_DURATION_SECS: i64 = 12 * 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -25,6 +26,12 @@ pub struct CustomThemeConfig {
     pub card_bg: [u8; 3],
     pub card_border: [u8; 3],
     pub text_primary: [u8; 3],
+    pub text_muted: [u8; 3],
+    pub control_bg: [u8; 3],
+    pub control_hover_bg: [u8; 3],
+    pub status_ok: [u8; 3],
+    pub status_warn: [u8; 3],
+    pub status_err: [u8; 3],
 }
 
 impl Default for CustomThemeConfig {
@@ -33,7 +40,51 @@ impl Default for CustomThemeConfig {
     }
 }
 
+type ExtendedThemeColors = ([u8; 3], [u8; 3], [u8; 3], [u8; 3], [u8; 3], [u8; 3]);
+
 impl CustomThemeConfig {
+    /// Derives cohesive muted text, control surface, and status colors from a core theme palette.
+    pub fn derive_extended_colors(
+        dark_base: bool,
+        card_bg: [u8; 3],
+        text_primary: [u8; 3],
+    ) -> ExtendedThemeColors {
+        let blend = |a: [u8; 3], b: [u8; 3], num: u16, den: u16| -> [u8; 3] {
+            [
+                ((u16::from(a[0]) * num + u16::from(b[0]) * (den - num)) / den) as u8,
+                ((u16::from(a[1]) * num + u16::from(b[1]) * (den - num)) / den) as u8,
+                ((u16::from(a[2]) * num + u16::from(b[2]) * (den - num)) / den) as u8,
+            ]
+        };
+        let shift = |c: [u8; 3], delta: i16| -> [u8; 3] {
+            [
+                (i16::from(c[0]) + delta).clamp(0, 255) as u8,
+                (i16::from(c[1]) + delta).clamp(0, 255) as u8,
+                (i16::from(c[2]) + delta).clamp(0, 255) as u8,
+            ]
+        };
+        let text_muted = blend(text_primary, card_bg, 65, 100);
+        if dark_base {
+            (
+                text_muted,
+                shift(card_bg, 8),
+                shift(card_bg, 22),
+                [34, 197, 94],
+                [245, 158, 11],
+                [239, 68, 68],
+            )
+        } else {
+            (
+                text_muted,
+                shift(card_bg, -14),
+                shift(card_bg, -26),
+                [22, 163, 74],
+                [217, 119, 6],
+                [220, 38, 38],
+            )
+        }
+    }
+
     pub fn preset_dark_slate() -> Self {
         Self {
             name: "Dark Graphite".to_string(),
@@ -44,6 +95,12 @@ impl CustomThemeConfig {
             card_bg: [31, 31, 34],
             card_border: [52, 52, 57],
             text_primary: [238, 238, 240],
+            text_muted: [152, 156, 166],
+            control_bg: [39, 39, 43],
+            control_hover_bg: [53, 53, 59],
+            status_ok: [34, 197, 94],
+            status_warn: [245, 158, 11],
+            status_err: [239, 68, 68],
         }
     }
 
@@ -65,6 +122,12 @@ impl CustomThemeConfig {
             card_bg: [255, 255, 255],
             card_border: [216, 223, 232],
             text_primary: [24, 32, 44],
+            text_muted: [96, 108, 124],
+            control_bg: [241, 245, 249],
+            control_hover_bg: [226, 232, 240],
+            status_ok: [22, 163, 74],
+            status_warn: [217, 119, 6],
+            status_err: [220, 38, 38],
         }
     }
 
@@ -78,6 +141,12 @@ impl CustomThemeConfig {
             card_bg: [26, 21, 28],
             card_border: [58, 36, 46],
             text_primary: [244, 238, 242],
+            text_muted: [168, 150, 160],
+            control_bg: [36, 29, 39],
+            control_hover_bg: [50, 39, 53],
+            status_ok: [34, 197, 94],
+            status_warn: [245, 158, 11],
+            status_err: [248, 81, 92],
         }
     }
 
@@ -91,6 +160,12 @@ impl CustomThemeConfig {
             card_bg: [18, 29, 26],
             card_border: [31, 56, 48],
             text_primary: [228, 244, 238],
+            text_muted: [140, 174, 162],
+            control_bg: [26, 40, 36],
+            control_hover_bg: [38, 56, 50],
+            status_ok: [52, 211, 153],
+            status_warn: [245, 158, 11],
+            status_err: [239, 68, 68],
         }
     }
 
@@ -104,6 +179,12 @@ impl CustomThemeConfig {
             card_bg: [24, 22, 38],
             card_border: [48, 42, 74],
             text_primary: [238, 236, 248],
+            text_muted: [156, 152, 184],
+            control_bg: [34, 31, 52],
+            control_hover_bg: [48, 44, 72],
+            status_ok: [34, 197, 94],
+            status_warn: [245, 158, 11],
+            status_err: [244, 63, 94],
         }
     }
 
@@ -117,6 +198,12 @@ impl CustomThemeConfig {
             card_bg: [12, 12, 14],
             card_border: [220, 220, 225],
             text_primary: [255, 255, 255],
+            text_muted: [204, 204, 212],
+            control_bg: [24, 24, 28],
+            control_hover_bg: [44, 44, 52],
+            status_ok: [74, 222, 128],
+            status_warn: [250, 204, 21],
+            status_err: [248, 113, 113],
         }
     }
 
@@ -135,7 +222,49 @@ impl CustomThemeConfig {
         ]
     }
 
-    /// Encodes this theme into a compact shareable ASCII code (`OMVIX1|...`).
+    fn apply_legacy_extended_migration(&mut self) {
+        for preset in Self::presets() {
+            if self.dark_base == preset.dark_base
+                && self.accent == preset.accent
+                && self.canvas_bg == preset.canvas_bg
+                && self.sidebar_bg == preset.sidebar_bg
+                && self.card_bg == preset.card_bg
+                && self.card_border == preset.card_border
+                && self.text_primary == preset.text_primary
+            {
+                self.text_muted = preset.text_muted;
+                self.control_bg = preset.control_bg;
+                self.control_hover_bg = preset.control_hover_bg;
+                self.status_ok = preset.status_ok;
+                self.status_warn = preset.status_warn;
+                self.status_err = preset.status_err;
+                return;
+            }
+        }
+        let dflt = Self::preset_dark_slate();
+        let has_default_ext = self.text_muted == dflt.text_muted
+            && self.control_bg == dflt.control_bg
+            && self.control_hover_bg == dflt.control_hover_bg
+            && self.status_ok == dflt.status_ok
+            && self.status_warn == dflt.status_warn
+            && self.status_err == dflt.status_err;
+        if has_default_ext
+            && (!self.dark_base
+                || self.card_bg != dflt.card_bg
+                || self.text_primary != dflt.text_primary)
+        {
+            let (muted, ctrl, hover, ok, warn, err) =
+                Self::derive_extended_colors(self.dark_base, self.card_bg, self.text_primary);
+            self.text_muted = muted;
+            self.control_bg = ctrl;
+            self.control_hover_bg = hover;
+            self.status_ok = ok;
+            self.status_warn = warn;
+            self.status_err = err;
+        }
+    }
+
+    /// Encodes this theme into a compact shareable ASCII code (`OMVIX2|...`).
     pub fn encode_share_code(&self) -> String {
         let mode = if self.dark_base { "D" } else { "L" };
         let clean_name = self.name.replace(['|', '\r', '\n'], " ").trim().to_string();
@@ -145,7 +274,7 @@ impl CustomThemeConfig {
             clean_name
         };
         format!(
-            "OMVIX1|{}|{}|{}|{}|{}|{}|{}|{}",
+            "OMVIX2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             mode,
             rgb_to_hex(self.accent),
             rgb_to_hex(self.canvas_bg),
@@ -153,11 +282,17 @@ impl CustomThemeConfig {
             rgb_to_hex(self.card_bg),
             rgb_to_hex(self.card_border),
             rgb_to_hex(self.text_primary),
+            rgb_to_hex(self.text_muted),
+            rgb_to_hex(self.control_bg),
+            rgb_to_hex(self.control_hover_bg),
+            rgb_to_hex(self.status_ok),
+            rgb_to_hex(self.status_warn),
+            rgb_to_hex(self.status_err),
             display_name
         )
     }
 
-    /// Decodes either an `OMVIX1|...` compact share code or a raw JSON `CustomThemeConfig`.
+    /// Decodes an `OMVIX2|...`, legacy `OMVIX1|...`, or raw JSON `CustomThemeConfig`.
     pub fn decode_share_code(raw: &str) -> Result<Self> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -165,18 +300,27 @@ impl CustomThemeConfig {
         }
 
         if trimmed.starts_with('{') {
-            return serde_json::from_str::<Self>(trimmed)
-                .map_err(|e| OmvixError::Config(format!("Invalid theme JSON: {e}")));
+            let mut decoded = serde_json::from_str::<Self>(trimmed)
+                .map_err(|e| OmvixError::Config(format!("Invalid theme JSON: {e}")))?;
+            if let Ok(serde_json::Value::Object(map)) =
+                serde_json::from_str::<serde_json::Value>(trimmed)
+            {
+                if !map.contains_key("control_bg") {
+                    decoded.apply_legacy_extended_migration();
+                }
+            }
+            return Ok(decoded);
         }
 
         let parts: Vec<&str> = trimmed.split('|').collect();
-        if parts.len() < 8 || parts[0] != "OMVIX1" {
+        let version_tag = parts.first().copied().unwrap_or("");
+        if version_tag != "OMVIX1" && version_tag != "OMVIX2" {
             return Err(OmvixError::Config(
-                "Invalid theme code format (expected OMVIX1|... or JSON)".to_string(),
+                "Invalid theme code format (expected OMVIX2|..., OMVIX1|..., or JSON)".to_string(),
             ));
         }
 
-        let dark_base = match parts[1] {
+        let dark_base = match parts.get(1).copied().unwrap_or("") {
             "D" | "d" | "dark" | "1" | "true" => true,
             "L" | "l" | "light" | "0" | "false" => false,
             other => {
@@ -185,6 +329,54 @@ impl CustomThemeConfig {
                 )));
             }
         };
+
+        if version_tag == "OMVIX2" {
+            if parts.len() < 15 {
+                return Err(OmvixError::Config(
+                    "Invalid OMVIX2 theme code format (expected 15 fields)".to_string(),
+                ));
+            }
+            let accent = hex_to_rgb(parts[2])?;
+            let canvas_bg = hex_to_rgb(parts[3])?;
+            let sidebar_bg = hex_to_rgb(parts[4])?;
+            let card_bg = hex_to_rgb(parts[5])?;
+            let card_border = hex_to_rgb(parts[6])?;
+            let text_primary = hex_to_rgb(parts[7])?;
+            let text_muted = hex_to_rgb(parts[8])?;
+            let control_bg = hex_to_rgb(parts[9])?;
+            let control_hover_bg = hex_to_rgb(parts[10])?;
+            let status_ok = hex_to_rgb(parts[11])?;
+            let status_warn = hex_to_rgb(parts[12])?;
+            let status_err = hex_to_rgb(parts[13])?;
+            let name = parts[14..].join("|").trim().to_string();
+            let final_name = if name.is_empty() {
+                "Imported Theme".to_string()
+            } else {
+                name
+            };
+            return Ok(Self {
+                name: final_name,
+                dark_base,
+                accent,
+                canvas_bg,
+                sidebar_bg,
+                card_bg,
+                card_border,
+                text_primary,
+                text_muted,
+                control_bg,
+                control_hover_bg,
+                status_ok,
+                status_warn,
+                status_err,
+            });
+        }
+
+        if parts.len() < 8 {
+            return Err(OmvixError::Config(
+                "Invalid OMVIX1 theme code format (expected 8+ fields)".to_string(),
+            ));
+        }
 
         let accent = hex_to_rgb(parts[2])?;
         let canvas_bg = hex_to_rgb(parts[3])?;
@@ -198,8 +390,10 @@ impl CustomThemeConfig {
             .filter(|s| !s.is_empty())
             .unwrap_or("Imported Theme")
             .to_string();
+        let (text_muted, control_bg, control_hover_bg, status_ok, status_warn, status_err) =
+            Self::derive_extended_colors(dark_base, card_bg, text_primary);
 
-        Ok(Self {
+        let mut theme = Self {
             name,
             dark_base,
             accent,
@@ -208,7 +402,15 @@ impl CustomThemeConfig {
             card_bg,
             card_border,
             text_primary,
-        })
+            text_muted,
+            control_bg,
+            control_hover_bg,
+            status_ok,
+            status_warn,
+            status_err,
+        };
+        theme.apply_legacy_extended_migration();
+        Ok(theme)
     }
 }
 
@@ -319,6 +521,7 @@ pub struct GeneralConfig {
     pub auto_check_updates: bool,
     pub allow_unsigned_sha256_updates: bool,
     pub custom_theme: CustomThemeConfig,
+    pub custom_themes: Vec<CustomThemeConfig>,
 }
 
 impl Default for GeneralConfig {
@@ -339,6 +542,7 @@ impl Default for GeneralConfig {
             auto_check_updates: true,
             allow_unsigned_sha256_updates: false,
             custom_theme: CustomThemeConfig::preset_dark_slate(),
+            custom_themes: Vec::new(),
         }
     }
 }
@@ -382,6 +586,7 @@ pub struct BatteryConfig {
     pub start_threshold_pct: u8,
     pub hold_when_shutdown: bool,
     pub one_time_full_charge: bool,
+    pub travel_charge_until_utc: Option<i64>,
     pub active_profile_id: Option<String>,
     pub custom_profiles: Vec<BatteryProfile>,
 }
@@ -395,9 +600,58 @@ impl Default for BatteryConfig {
             start_threshold_pct: 75,
             hold_when_shutdown: true,
             one_time_full_charge: false,
+            travel_charge_until_utc: None,
             active_profile_id: None,
             custom_profiles: Vec::new(),
         }
+    }
+}
+
+impl BatteryConfig {
+    pub fn enable_travel_charge(&mut self, now_utc: i64) {
+        self.one_time_full_charge = true;
+        self.travel_charge_until_utc =
+            Some(now_utc.saturating_add(DEFAULT_TRAVEL_CHARGE_DURATION_SECS));
+    }
+
+    pub fn clear_travel_charge(&mut self) {
+        self.one_time_full_charge = false;
+        self.travel_charge_until_utc = None;
+    }
+
+    pub fn is_travel_charge_active(&self, now_utc: i64) -> bool {
+        match self.travel_charge_until_utc {
+            Some(until) => self.one_time_full_charge && now_utc < until,
+            None => self.one_time_full_charge,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightingProfile {
+    pub id: String,
+    pub name: String,
+    pub brightness_pct: u8,
+    pub zones: [RgbColor; 4],
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+impl LightingProfile {
+    pub fn builtins() -> Vec<LightingProfile> {
+        let solid = |id: &str, name: &str, r: u8, g: u8, b: u8| LightingProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            brightness_pct: 100,
+            zones: [RgbColor { r, g, b }; 4],
+            builtin: true,
+        };
+        vec![
+            solid("cyan", "Cyan", 0, 180, 216),
+            solid("white", "White", 245, 245, 255),
+            solid("crimson", "Crimson", 220, 38, 38),
+            solid("emerald", "Emerald", 34, 197, 94),
+        ]
     }
 }
 
@@ -407,6 +661,8 @@ pub struct LightingConfig {
     pub enabled: bool,
     pub brightness_pct: u8,
     pub zones: [RgbColor; 4],
+    pub active_profile_id: Option<String>,
+    pub custom_profiles: Vec<LightingProfile>,
 }
 
 impl Default for LightingConfig {
@@ -416,6 +672,8 @@ impl Default for LightingConfig {
             enabled: true,
             brightness_pct: 100,
             zones: [default_color; 4],
+            active_profile_id: None,
+            custom_profiles: Vec::new(),
         }
     }
 }
@@ -587,6 +845,43 @@ impl Default for AppConfig {
     }
 }
 
+/// Outcome of loading `config.toml`, preserving unreadable corrupt files under `.bad-<stamp>`.
+#[derive(Debug, Clone)]
+pub struct ConfigLoadOutcome {
+    pub config: AppConfig,
+    pub warnings: Vec<String>,
+    pub corrupt_backup: Option<PathBuf>,
+    pub load_failed: bool,
+    pub load_error: Option<String>,
+}
+
+/// Builds `<file>.bad-<stamp>` in the same directory as `path`.
+pub fn corrupt_backup_path(path: &Path, stamp: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".to_string());
+    let candidate = format!("{file_name}.bad-{stamp}");
+    match path.parent() {
+        Some(parent) => parent.join(candidate),
+        None => PathBuf::from(candidate),
+    }
+}
+
+fn allocate_corrupt_backup_path(path: &Path, stamp: &str) -> PathBuf {
+    let primary = corrupt_backup_path(path, stamp);
+    if !primary.exists() {
+        return primary;
+    }
+    for idx in 1..=99u32 {
+        let candidate = corrupt_backup_path(path, &format!("{stamp}-{idx}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    primary
+}
+
 impl AppConfig {
     pub fn default_config_path() -> PathBuf {
         #[cfg(target_os = "windows")]
@@ -604,6 +899,62 @@ impl AppConfig {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let (cfg, _warnings) = Self::load_from_path_with_warnings(path)?;
         Ok(cfg)
+    }
+
+    /// Loads `config.toml`, quarantining unreadable corrupt files to `config.toml.bad-<YYYYMMDD-HHMMSS>`
+    /// so user edits are never silently wiped.
+    pub fn load_or_quarantine_corrupt(path: &Path) -> ConfigLoadOutcome {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        Self::load_or_quarantine_corrupt_with_stamp(path, &stamp)
+    }
+
+    pub fn load_or_quarantine_corrupt_with_stamp(path: &Path, stamp: &str) -> ConfigLoadOutcome {
+        match Self::load_from_path_with_warnings(path) {
+            Ok((config, warnings)) => ConfigLoadOutcome {
+                config,
+                warnings,
+                corrupt_backup: None,
+                load_failed: false,
+                load_error: None,
+            },
+            Err(err) => {
+                let err_msg = err.to_string();
+                if path.exists() {
+                    let backup = allocate_corrupt_backup_path(path, stamp);
+                    match fs::rename(path, &backup) {
+                        Ok(()) => ConfigLoadOutcome {
+                            config: Self::default(),
+                            warnings: vec![format!(
+                                "Corrupt config.toml was backed up to {} and defaults were loaded ({err_msg}).",
+                                backup.display()
+                            )],
+                            corrupt_backup: Some(backup),
+                            load_failed: true,
+                            load_error: Some(err_msg),
+                        },
+                        Err(rename_err) => ConfigLoadOutcome {
+                            config: Self::default(),
+                            warnings: vec![format!(
+                                "Failed reading config.toml ({err_msg}); backup rename failed ({rename_err}), leaving original untouched."
+                            )],
+                            corrupt_backup: None,
+                            load_failed: true,
+                            load_error: Some(format!("{err_msg}; rename error: {rename_err}")),
+                        },
+                    }
+                } else {
+                    ConfigLoadOutcome {
+                        config: Self::default(),
+                        warnings: vec![format!(
+                            "Failed reading config, restored defaults: {err_msg}"
+                        )],
+                        corrupt_backup: None,
+                        load_failed: true,
+                        load_error: Some(err_msg),
+                    }
+                }
+            }
+        }
     }
 
     pub fn load_from_path_with_warnings(path: &Path) -> Result<(Self, Vec<String>)> {
@@ -624,6 +975,19 @@ impl AppConfig {
         if cfg.config_version < 4 {
             // Existing pre-v0.5 users already configured Omvix Hub; keep wizard accessible from Settings.
             cfg.general.first_run_completed = true;
+        }
+        if cfg.config_version < 5
+            && cfg.battery.one_time_full_charge
+            && cfg.battery.travel_charge_until_utc.is_none()
+        {
+            // Migrate legacy unbounded `one_time_full_charge = true` so restarts never re-arm 100% travel charge.
+            cfg.battery.clear_travel_charge();
+        }
+        if cfg.config_version < 7 {
+            cfg.general.custom_theme.apply_legacy_extended_migration();
+            for theme in &mut cfg.general.custom_themes {
+                theme.apply_legacy_extended_migration();
+            }
         }
         cfg.config_version = CURRENT_CONFIG_VERSION;
         let warnings = cfg.sanitize();
@@ -664,6 +1028,24 @@ impl AppConfig {
         self.battery.stop_threshold_pct = self.battery.stop_threshold_pct.clamp(50, 100);
         let max_start = self.battery.stop_threshold_pct.saturating_sub(2).max(40);
         self.battery.start_threshold_pct = self.battery.start_threshold_pct.clamp(40, max_start);
+        if self.battery.mode == BatteryChargeMode::Unknown {
+            self.battery.mode = if self.battery.enabled {
+                BatteryChargeMode::Inhibit
+            } else {
+                BatteryChargeMode::Auto
+            };
+            warnings.push(
+                "Reset invalid battery.mode = Unknown in config to safe charge mode.".to_string(),
+            );
+        }
+        if !self.battery.one_time_full_charge
+            || self
+                .battery
+                .travel_charge_until_utc
+                .is_some_and(|ts| ts <= 0)
+        {
+            self.battery.clear_travel_charge();
+        }
         for prof in &mut self.battery.custom_profiles {
             prof.stop_threshold_pct = prof.stop_threshold_pct.clamp(50, 100);
             let p_max_start = prof.stop_threshold_pct.saturating_sub(2).max(40);
@@ -671,6 +1053,31 @@ impl AppConfig {
         }
 
         self.lighting.brightness_pct = self.lighting.brightness_pct.clamp(0, 100);
+        for theme in &mut self.general.custom_themes {
+            let trimmed = theme.name.trim();
+            theme.name = if trimmed.is_empty() {
+                "Custom Theme".to_string()
+            } else {
+                trimmed.to_string()
+            };
+        }
+        self.general.custom_themes.truncate(24);
+
+        self.lighting
+            .custom_profiles
+            .retain(|p| !p.id.trim().is_empty());
+        for prof in &mut self.lighting.custom_profiles {
+            prof.id = prof.id.trim().to_string();
+            let name_trimmed = prof.name.trim();
+            prof.name = if name_trimmed.is_empty() {
+                prof.id.clone()
+            } else {
+                name_trimmed.to_string()
+            };
+            prof.brightness_pct = prof.brightness_pct.clamp(0, 100);
+            prof.builtin = false;
+        }
+        self.lighting.custom_profiles.truncate(24);
 
         if let Some(ref mut pl1) = self.tuning.pl1_watts {
             *pl1 = (*pl1).clamp(15, 200);
@@ -1130,5 +1537,294 @@ mod tests {
         let parsed: AppConfig = toml::from_str(&toml_text).expect("deserialize");
         assert!(!parsed.general.auto_check_updates);
         assert!(parsed.general.allow_unsigned_sha256_updates);
+    }
+
+    #[test]
+    fn corrupt_config_is_preserved_in_bad_backup_file() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_corrupt_cfg_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let corrupt_payload = "[general\nlanguage = \"broken_toml_missing_bracket\"\n";
+        fs::write(&path, corrupt_payload).unwrap();
+
+        let outcome = AppConfig::load_or_quarantine_corrupt_with_stamp(&path, "20261122-151500");
+        assert!(outcome.load_failed);
+        assert!(outcome.load_error.is_some());
+        let expected_backup = dir.join("config.toml.bad-20261122-151500");
+        assert_eq!(outcome.corrupt_backup.as_ref(), Some(&expected_backup));
+        assert!(expected_backup.is_file());
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read_to_string(&expected_backup).unwrap(),
+            corrupt_payload
+        );
+        assert!(!outcome.warnings.is_empty());
+        assert!(outcome.warnings[0].contains("config.toml.bad-20261122-151500"));
+        assert_eq!(
+            outcome.config.general.language,
+            AppConfig::default().general.language
+        );
+
+        // Collision on the same stamp allocates `-1` without clobbering existing backup
+        fs::write(&path, "not = [valid").unwrap();
+        let outcome2 = AppConfig::load_or_quarantine_corrupt_with_stamp(&path, "20261122-151500");
+        let expected_backup_2 = dir.join("config.toml.bad-20261122-151500-1");
+        assert_eq!(outcome2.corrupt_backup.as_ref(), Some(&expected_backup_2));
+        assert_eq!(
+            fs::read_to_string(&expected_backup).unwrap(),
+            corrupt_payload
+        );
+        assert_eq!(
+            fs::read_to_string(&expected_backup_2).unwrap(),
+            "not = [valid"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_config_with_sanitize_warning_does_not_create_bad_backup() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_valid_warn_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut cfg = AppConfig::default();
+        cfg.hotkeys.custom_command = "cmd.exe /c whoami".to_string();
+        cfg.save_to_path(&path).unwrap();
+
+        let outcome = AppConfig::load_or_quarantine_corrupt_with_stamp(&path, "20261122-151500");
+        assert!(!outcome.load_failed);
+        assert!(outcome.corrupt_backup.is_none());
+        assert!(!outcome.warnings.is_empty());
+        assert!(!dir.join("config.toml.bad-20261122-151500").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v4_migration_clears_legacy_unbounded_one_time_full_charge() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_v4_mig_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let legacy =
+            "config_version = 4\n\n[battery]\nenabled = true\none_time_full_charge = true\n";
+        fs::write(&path, legacy).unwrap();
+
+        let loaded = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
+        assert!(!loaded.battery.one_time_full_charge);
+        assert!(loaded.battery.travel_charge_until_utc.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn travel_charge_until_utc_roundtrip() {
+        let mut cfg = AppConfig::default();
+        let now = 1_800_000_000i64;
+        cfg.battery.enable_travel_charge(now);
+        assert!(cfg.battery.is_travel_charge_active(now + 60));
+        assert!(!cfg
+            .battery
+            .is_travel_charge_active(now + DEFAULT_TRAVEL_CHARGE_DURATION_SECS));
+
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        let parsed: AppConfig = toml::from_str(&serialized).unwrap();
+        assert!(parsed.battery.one_time_full_charge);
+        assert_eq!(
+            parsed.battery.travel_charge_until_utc,
+            Some(now + DEFAULT_TRAVEL_CHARGE_DURATION_SECS)
+        );
+    }
+
+    #[test]
+    fn sanitize_resets_unknown_battery_mode_with_warning() {
+        let mut cfg = AppConfig::default();
+        cfg.battery.enabled = true;
+        cfg.battery.mode = BatteryChargeMode::Unknown;
+        let warnings = cfg.sanitize();
+        assert_eq!(cfg.battery.mode, BatteryChargeMode::Inhibit);
+        assert!(warnings.iter().any(|w| w.contains("battery.mode")));
+
+        let mut cfg_off = AppConfig::default();
+        cfg_off.battery.enabled = false;
+        cfg_off.battery.mode = BatteryChargeMode::Unknown;
+        let warnings_off = cfg_off.sanitize();
+        assert_eq!(cfg_off.battery.mode, BatteryChargeMode::Auto);
+        assert!(!warnings_off.is_empty());
+    }
+
+    #[test]
+    fn v5_to_v6_migration_preserves_settings_and_defaults_custom_lists() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_v5_mig_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let v5 = "config_version = 5\n\n[general]\nlanguage = \"en\"\n\n[lighting]\nenabled = true\nbrightness_pct = 80\n";
+        fs::write(&path, v5).unwrap();
+
+        let loaded = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(loaded.general.language, "en");
+        assert!(loaded.general.custom_themes.is_empty());
+        assert_eq!(loaded.lighting.brightness_pct, 80);
+        assert!(loaded.lighting.custom_profiles.is_empty());
+        assert!(loaded.lighting.active_profile_id.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_themes_and_lighting_profiles_roundtrip_and_sanitize() {
+        let mut cfg = AppConfig::default();
+        let mut theme = CustomThemeConfig::preset_omen_crimson();
+        theme.name = "   ".to_string();
+        cfg.general.custom_themes.push(theme);
+
+        cfg.lighting.custom_profiles.push(LightingProfile {
+            id: "".to_string(),
+            name: "InvalidEmptyId".to_string(),
+            brightness_pct: 50,
+            zones: [RgbColor {
+                r: 10,
+                g: 20,
+                b: 30,
+            }; 4],
+            builtin: false,
+        });
+        cfg.lighting.custom_profiles.push(LightingProfile {
+            id: " gaming-cyan ".to_string(),
+            name: "  Gaming Cyan ".to_string(),
+            brightness_pct: 150,
+            zones: [
+                RgbColor {
+                    r: 0,
+                    g: 180,
+                    b: 216,
+                },
+                RgbColor {
+                    r: 255,
+                    g: 0,
+                    b: 120,
+                },
+                RgbColor {
+                    r: 0,
+                    g: 180,
+                    b: 216,
+                },
+                RgbColor {
+                    r: 255,
+                    g: 0,
+                    b: 120,
+                },
+            ],
+            builtin: true,
+        });
+        cfg.lighting.active_profile_id = Some("gaming-cyan".to_string());
+
+        let _ = cfg.sanitize();
+        assert_eq!(cfg.general.custom_themes.len(), 1);
+        assert_eq!(cfg.general.custom_themes[0].name, "Custom Theme");
+        assert_eq!(cfg.lighting.custom_profiles.len(), 1);
+        assert_eq!(cfg.lighting.custom_profiles[0].id, "gaming-cyan");
+        assert_eq!(cfg.lighting.custom_profiles[0].name, "Gaming Cyan");
+        assert_eq!(cfg.lighting.custom_profiles[0].brightness_pct, 100);
+        assert!(!cfg.lighting.custom_profiles[0].builtin);
+
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        let parsed: AppConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.general.custom_themes, cfg.general.custom_themes);
+        assert_eq!(
+            parsed.lighting.custom_profiles,
+            cfg.lighting.custom_profiles
+        );
+        assert_eq!(
+            parsed.lighting.active_profile_id.as_deref(),
+            Some("gaming-cyan")
+        );
+        assert_eq!(LightingProfile::builtins().len(), 4);
+    }
+
+    #[test]
+    fn v6_to_v7_migration_populates_detailed_theme_colors() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_v6_mig_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let v6 = r#"
+config_version = 6
+
+[general]
+language = "tr"
+
+[general.custom_theme]
+name = "Clean Light"
+dark_base = false
+accent = [2, 132, 199]
+canvas_bg = [244, 246, 249]
+sidebar_bg = [235, 240, 246]
+card_bg = [255, 255, 255]
+card_border = [216, 223, 232]
+text_primary = [24, 32, 44]
+
+[[general.custom_themes]]
+name = "Warm Custom"
+dark_base = false
+accent = [10, 100, 200]
+canvas_bg = [240, 240, 240]
+sidebar_bg = [230, 230, 230]
+card_bg = [250, 250, 250]
+card_border = [200, 200, 200]
+text_primary = [20, 20, 20]
+"#;
+        fs::write(&path, v6).unwrap();
+
+        let loaded = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            loaded.general.custom_theme,
+            CustomThemeConfig::preset_clean_light()
+        );
+        assert_eq!(loaded.general.custom_themes.len(), 1);
+        assert!(loaded.general.custom_themes[0].control_bg[0] > 200);
+        assert_eq!(loaded.general.custom_themes[0].status_ok, [22, 163, 74]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn omvix1_legacy_share_code_still_decodes() {
+        let light = CustomThemeConfig::decode_share_code(
+            "OMVIX1|L|0284c7|f4f6f9|ebf0f6|ffffff|d8dfe8|18202c|Clean Light",
+        )
+        .unwrap();
+        assert_eq!(light, CustomThemeConfig::preset_clean_light());
+
+        let code_v2 = light.encode_share_code();
+        assert!(code_v2.starts_with("OMVIX2|"));
+        let decoded_v2 = CustomThemeConfig::decode_share_code(&code_v2).unwrap();
+        assert_eq!(decoded_v2, light);
     }
 }

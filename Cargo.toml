@@ -9,11 +9,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0-beta.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Borab55"]
-repository = "https://github.com/Borab55/hp-omen-hub-lite"
+repository = "https://github.com/Borab55/omvix-hub"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

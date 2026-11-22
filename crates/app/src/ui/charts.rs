@@ -1,4 +1,4 @@
-use crate::theme::{accent_color, rgb, STATUS_WARN};
+use crate::theme::{accent_color, rgb, status_ok, status_warn};
 use egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Shape, Stroke, StrokeKind, Ui, Vec2,
 };
@@ -594,6 +594,7 @@ pub fn interactive_fan_curve(
 
     // Live operating point marker
     if let Some(cur_t) = live_temp_c {
+        let warn_c = status_warn(t);
         let clamped_t = cur_t.clamp(MIN_TEMP, MAX_TEMP);
         let lx = temp_to_x(clamped_t);
         painter.line_segment(
@@ -603,17 +604,12 @@ pub fn interactive_fan_curve(
             ],
             Stroke::new(
                 1.5_f32,
-                Color32::from_rgba_unmultiplied(
-                    STATUS_WARN.r(),
-                    STATUS_WARN.g(),
-                    STATUS_WARN.b(),
-                    140,
-                ),
+                Color32::from_rgba_unmultiplied(warn_c.r(), warn_c.g(), warn_c.b(), 140),
             ),
         );
         let interp_pct = eval_linear_pct(points, clamped_t);
         let live_pt = Pos2::new(lx, pct_to_y(interp_pct));
-        painter.circle_filled(live_pt, 5.0, STATUS_WARN);
+        painter.circle_filled(live_pt, 5.0, warn_c);
         painter.circle_stroke(live_pt, 5.0, Stroke::new(1.5_f32, bg));
     }
 
@@ -727,8 +723,8 @@ pub fn battery_health_chart(
         return;
     }
 
-    let health_color = Color32::from_rgb(34, 197, 94);
-    let wear_color = STATUS_WARN;
+    let health_color = status_ok(t);
+    let wear_color = status_warn(t);
     let axis_text = muted_text_color(t);
     let bg = chart_bg_color(t);
     let border = rgb(t.card_border);

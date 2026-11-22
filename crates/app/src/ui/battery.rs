@@ -1,12 +1,12 @@
 use crate::theme::{
-    accent_color, card_frame, pill_button, section_title, status_badge, STATUS_ERR, STATUS_OK,
-    STATUS_WARN,
+    accent_color, card_frame, feature_toggle_button, muted_text, pill_button, section_title,
+    section_toggle_button, status_badge, status_err, status_ok, status_warn,
 };
 use crate::ui::charts::battery_health_chart;
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
 use crate::ui::control_committed;
 use crate::worker::{SharedState, WorkerCommand};
-use egui::{Color32, RichText, Slider, Ui};
+use egui::{RichText, Slider, Ui};
 use omvix_core::{AppConfig, BatteryChargeMode, BatteryProfile, BatteryServiceState, I18n};
 use std::path::Path;
 
@@ -42,6 +42,10 @@ pub fn render(
 ) {
     let t = &cfg.general.custom_theme.clone();
     let accent = accent_color(t);
+    let ok_c = status_ok(t);
+    let warn_c = status_warn(t);
+    let err_c = status_err(t);
+    let muted_c = muted_text(t);
 
     ui.heading(i18n.t("nav.battery"));
     ui.add_space(6.0);
@@ -49,7 +53,7 @@ pub fn render(
     if st.hp_charge_service_running {
         card_frame(t).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                status_badge(ui, "hp-charge-limit-rs", STATUS_WARN);
+                status_badge(ui, "hp-charge-limit-rs", warn_c);
                 ui.label(i18n.t("battery.conflict_service_warning"));
             });
         });
@@ -77,10 +81,18 @@ pub fn render(
                     .as_deref()
                     .map(|h| format!(" [{h}]"))
                     .unwrap_or_default();
+                let mode_text = match b.current_mode {
+                    BatteryChargeMode::Unknown => i18n.t("battery.mode_unknown"),
+                    other => format!("{other:?}"),
+                };
                 status_badge(
                     ui,
-                    &format!("{src} | {:?}{hex_suffix}", b.current_mode),
-                    if b.charging { STATUS_WARN } else { STATUS_OK },
+                    &format!("{src} | {mode_text}{hex_suffix}"),
+                    if b.charging || b.current_mode == BatteryChargeMode::Unknown {
+                        warn_c
+                    } else {
+                        ok_c
+                    },
                 );
                 let off_badge_key = if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
                     "battery.when_off_hold_short"
@@ -91,9 +103,9 @@ pub fn render(
                     ui,
                     &i18n.t(off_badge_key),
                     if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
-                        STATUS_WARN
+                        warn_c
                     } else {
-                        STATUS_OK
+                        ok_c
                     },
                 );
             });
@@ -294,7 +306,7 @@ pub fn render(
             ui.label(i18n.t("battery.profile_name"));
             ui.text_edit_singleline(&mut draft.profile_name);
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("battery.stop_threshold"));
             ui.add(Slider::new(&mut draft.stop_pct, 50..=100).suffix("%"));
         });
@@ -302,7 +314,7 @@ pub fn render(
         if draft.start_pct > draft_max_start {
             draft.start_pct = draft_max_start;
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("battery.start_threshold"));
             ui.add(Slider::new(&mut draft.start_pct, 40..=draft_max_start).suffix("%"));
         });
@@ -374,23 +386,25 @@ pub fn render(
 
     // Manual Charge Limiting & Travel Mode Card
     card_frame(t).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            section_title(ui, i18n.t("battery.charge_limit"), t);
-            if ui
-                .checkbox(&mut cfg.battery.enabled, i18n.t("common.enabled"))
-                .changed()
-            {
-                if !cfg.battery.enabled {
-                    cfg.battery.mode = BatteryChargeMode::Auto;
-                } else if cfg.battery.mode == BatteryChargeMode::Auto {
-                    cfg.battery.mode = BatteryChargeMode::Inhibit;
-                }
-                cfg.battery.active_profile_id = None;
-                on_save();
-                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                on_cmd(WorkerCommand::ApplyBatteryNow);
+        if section_toggle_button(
+            ui,
+            &i18n.t("battery.charge_limit"),
+            &mut cfg.battery.enabled,
+            &i18n.t("common.enabled"),
+            t,
+        )
+        .changed()
+        {
+            if !cfg.battery.enabled {
+                cfg.battery.mode = BatteryChargeMode::Auto;
+            } else if cfg.battery.mode == BatteryChargeMode::Auto {
+                cfg.battery.mode = BatteryChargeMode::Inhibit;
             }
-        });
+            cfg.battery.active_profile_id = None;
+            on_save();
+            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+            on_cmd(WorkerCommand::ApplyBatteryNow);
+        }
 
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -412,7 +426,7 @@ pub fn render(
         });
 
         let mut commit_battery = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("battery.stop_threshold"));
             let stop_resp =
                 ui.add(Slider::new(&mut cfg.battery.stop_threshold_pct, 50..=100).suffix("%"));
@@ -428,7 +442,7 @@ pub fn render(
         if cfg.battery.start_threshold_pct > max_start {
             cfg.battery.start_threshold_pct = max_start;
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("battery.start_threshold"));
             let start_resp = ui
                 .add(Slider::new(&mut cfg.battery.start_threshold_pct, 40..=max_start).suffix("%"));
@@ -446,12 +460,14 @@ pub fn render(
         }
 
         ui.add_space(6.0);
-        if ui
-            .checkbox(
-                &mut cfg.battery.hold_when_shutdown,
-                i18n.t("battery.hold_when_shutdown"),
-            )
-            .changed()
+        if feature_toggle_button(
+            ui,
+            &i18n.t("battery.hold_when_shutdown"),
+            &mut cfg.battery.hold_when_shutdown,
+            &i18n.t("common.enabled"),
+            t,
+        )
+        .changed()
         {
             on_save();
             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -460,22 +476,31 @@ pub fn render(
 
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            let travel_btn_label = if cfg.battery.one_time_full_charge {
+            let now_utc = chrono::Utc::now().timestamp();
+            let travel_active = cfg.battery.is_travel_charge_active(now_utc);
+            let travel_btn_label = if travel_active {
                 format!("✓ {}", i18n.t("battery.one_time_full_charge"))
             } else {
                 i18n.t("battery.one_time_full_charge")
             };
-            if pill_button(ui, &travel_btn_label, cfg.battery.one_time_full_charge, t).clicked() {
-                cfg.battery.one_time_full_charge = !cfg.battery.one_time_full_charge;
+            if pill_button(ui, &travel_btn_label, travel_active, t).clicked() {
+                if travel_active {
+                    cfg.battery.clear_travel_charge();
+                } else {
+                    cfg.battery.enable_travel_charge(now_utc);
+                }
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 on_cmd(WorkerCommand::ApplyBatteryNow);
             }
         });
 
-        if cfg.battery.one_time_full_charge {
+        if cfg
+            .battery
+            .is_travel_charge_active(chrono::Utc::now().timestamp())
+        {
             ui.add_space(4.0);
-            ui.colored_label(STATUS_WARN, i18n.t("battery.one_time_active"));
+            ui.colored_label(warn_c, i18n.t("battery.one_time_active"));
         } else {
             ui.weak(i18n.t("battery.travel_mode_desc"));
         }
@@ -483,7 +508,7 @@ pub fn render(
         if st.battery_service.state == BatteryServiceState::Running {
             ui.add_space(4.0);
             ui.colored_label(
-                STATUS_OK,
+                ok_c,
                 RichText::new(i18n.t("battery.service_active_sync_note")).size(11.5),
             );
         }
@@ -495,15 +520,14 @@ pub fn render(
     card_frame(t).show(ui, |ui| {
         let svc = &st.battery_service;
         let (state_text, state_color) = match svc.state {
-            BatteryServiceState::Running => (i18n.t("battery.service_state_running"), STATUS_OK),
-            BatteryServiceState::Stopped => (i18n.t("battery.service_state_stopped"), STATUS_WARN),
+            BatteryServiceState::Running => (i18n.t("battery.service_state_running"), ok_c),
+            BatteryServiceState::Stopped => (i18n.t("battery.service_state_stopped"), warn_c),
             BatteryServiceState::Starting | BatteryServiceState::Stopping => {
-                (i18n.t("battery.service_state_transitioning"), STATUS_WARN)
+                (i18n.t("battery.service_state_transitioning"), warn_c)
             }
-            BatteryServiceState::NotInstalled | BatteryServiceState::Unknown => (
-                i18n.t("battery.service_state_not_installed"),
-                Color32::from_rgb(138, 144, 156),
-            ),
+            BatteryServiceState::NotInstalled | BatteryServiceState::Unknown => {
+                (i18n.t("battery.service_state_not_installed"), muted_c)
+            }
         };
 
         ui.horizontal_wrapped(|ui| {
@@ -524,12 +548,18 @@ pub fn render(
             .spacing([14.0, 4.0])
             .show(ui, |ui| {
                 ui.label(i18n.t("battery.service_name_label"));
-                ui.monospace(format!("{}  (LocalSystem · AutoStart)", svc.service_name));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{}  (LocalSystem · AutoStart)", svc.service_name))
+                            .monospace(),
+                    )
+                    .wrap(),
+                );
                 ui.end_row();
 
                 ui.label(i18n.t("battery.service_exe_path"));
                 ui.horizontal_wrapped(|ui| {
-                    ui.monospace(exe_display);
+                    ui.add(egui::Label::new(RichText::new(exe_display).monospace()).wrap());
                     if svc.exe_exists
                         && ui
                             .small_button(i18n.t("battery.service_open_folder"))
@@ -537,7 +567,11 @@ pub fn render(
                     {
                         #[cfg(windows)]
                         if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
-                            let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
+                            let _ = std::process::Command::new(omvix_windows::paths::system_tool(
+                                "explorer.exe",
+                            ))
+                            .arg(dir)
+                            .spawn();
                         }
                     }
                 });
@@ -545,7 +579,7 @@ pub fn render(
 
                 ui.label(i18n.t("battery.service_data_path"));
                 ui.horizontal_wrapped(|ui| {
-                    ui.monospace(&svc.data_dir_path);
+                    ui.add(egui::Label::new(RichText::new(&svc.data_dir_path).monospace()).wrap());
                     if svc.data_dir_exists
                         && ui
                             .small_button(i18n.t("battery.service_open_folder"))
@@ -553,9 +587,11 @@ pub fn render(
                     {
                         #[cfg(windows)]
                         {
-                            let _ = std::process::Command::new("explorer.exe")
-                                .arg(&svc.data_dir_path)
-                                .spawn();
+                            let _ = std::process::Command::new(omvix_windows::paths::system_tool(
+                                "explorer.exe",
+                            ))
+                            .arg(&svc.data_dir_path)
+                            .spawn();
                         }
                     }
                 });
@@ -574,7 +610,7 @@ pub fn render(
             ui.add_space(4.0);
         }
         if st.battery_service_busy {
-            ui.colored_label(STATUS_WARN, i18n.t("battery.service_busy"));
+            ui.colored_label(warn_c, i18n.t("battery.service_busy"));
         }
 
         ui.add_enabled_ui(!st.battery_service_busy, |ui| {
@@ -591,7 +627,7 @@ pub fn render(
                         && ui
                             .button(
                                 RichText::new(i18n.t("battery.service_clean_leftovers"))
-                                    .color(STATUS_ERR),
+                                    .color(err_c),
                             )
                             .clicked()
                     {
@@ -625,8 +661,7 @@ pub fn render(
                 if !draft.confirm_uninstall_service {
                     if ui
                         .button(
-                            RichText::new(i18n.t("battery.service_uninstall_zero"))
-                                .color(STATUS_ERR),
+                            RichText::new(i18n.t("battery.service_uninstall_zero")).color(err_c),
                         )
                         .clicked()
                     {
@@ -641,7 +676,7 @@ pub fn render(
                             .button(
                                 RichText::new(i18n.t("battery.service_uninstall_confirm_btn"))
                                     .strong()
-                                    .color(STATUS_ERR),
+                                    .color(err_c),
                             )
                             .clicked()
                         {
@@ -649,7 +684,7 @@ pub fn render(
                             cfg.battery.enabled = false;
                             cfg.battery.mode = BatteryChargeMode::Auto;
                             cfg.battery.active_profile_id = None;
-                            cfg.battery.one_time_full_charge = false;
+                            cfg.battery.clear_travel_charge();
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::UninstallBatteryServiceZeroTrace);

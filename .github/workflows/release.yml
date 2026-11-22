@@ -1,0 +1,262 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify Tag, Checks & Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches Cargo.toml workspace version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "Release tag '$tag' does not match v<semver> (e.g. v0.6.0-beta.1 or v0.6.0)."
+          }
+          $tagVer = $Matches[1]
+          $cargoToml = Get-Content -Raw -Path 'Cargo.toml'
+          $m = [regex]::Match($cargoToml, '(?ms)^\[workspace\.package\]\s.*?^version\s*=\s*"([^"]+)"')
+          if (-not $m.Success) {
+            throw 'Could not parse [workspace.package].version from Cargo.toml.'
+          }
+          $cargoVer = $m.Groups[1].Value
+          if ($tagVer -ne $cargoVer) {
+            throw "Tag version '$tagVer' does not match Cargo.toml workspace version '$cargoVer'."
+          }
+          Write-Host "Verified tag '$tag' matches Cargo.toml version '$cargoVer'."
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Audit for bare Command::new, LoadLibraryW, and Nvml::init
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rsFiles = Get-ChildItem -Recurse -Include *.rs -Path crates
+          $hits = Select-String -Path $rsFiles -Pattern 'Command::new\(\s*"[^"\\:]+\.exe"|\bLoadLibraryW\b|\bNvml::init\b'
+          if ($hits) {
+            $hits | ForEach-Object { Write-Host "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
+            throw 'Forbidden bare system binary invocation or unsafe LoadLibraryW/Nvml::init found.'
+          }
+
+      - name: Run Clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run workspace unit and integration tests
+        run: cargo test --workspace --locked
+
+  build-and-release:
+    name: Build Release & Publish GitHub Release
+    runs-on: windows-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --locked
+
+      - name: Audit DLL imports (forbid MinGW runtime DLLs)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targets = @(
+            'target\release\omvix-hub.exe',
+            'target\release\omvix-cli.exe'
+          )
+
+          function Get-PeImports {
+            param([string]$BinaryPath)
+            if (Get-Command objdump -ErrorAction SilentlyContinue) {
+              return (& objdump -p $BinaryPath | Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[-1].Trim() })
+            }
+            if (Get-Command llvm-objdump -ErrorAction SilentlyContinue) {
+              return (& llvm-objdump -p $BinaryPath | Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[-1].Trim() })
+            }
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+            if (Test-Path $vswhere) {
+              $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+              if ($dumpbin) {
+                $lines = & $dumpbin /nologo /dependents $BinaryPath
+                return ($lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9_.\-]+\.dll$' })
+              }
+            }
+            throw 'No PE import inspection tool (objdump, llvm-objdump, or dumpbin) found on runner.'
+          }
+
+          foreach ($bin in $targets) {
+            if (-not (Test-Path $bin)) {
+              throw "Missing release binary: $bin"
+            }
+            $dlls = @(Get-PeImports -BinaryPath $bin)
+            if ($dlls.Count -eq 0) {
+              throw "DLL inspection returned no imports for $bin"
+            }
+            Write-Host "=== $bin imported DLLs ==="
+            $dlls | Sort-Object -Unique | ForEach-Object { Write-Host "  - $_" }
+            $forbidden = $dlls | Where-Object { $_ -match '(?i)^(libgcc|libstdc\+\+|libwinpthread|msys-|mingw)' }
+            if ($forbidden) {
+              throw "Forbidden MinGW runtime DLL(s) detected in ${bin}: $($forbidden -join ', ')"
+            }
+          }
+
+      - name: Clean-PATH smoke test & CLI version verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+
+          $proc = Start-Process -FilePath '.\target\release\omvix-hub.exe' -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "omvix-hub.exe --smoke-test exited with code $($proc.ExitCode)"
+          }
+
+          $expectedVer = $env:GITHUB_REF_NAME.TrimStart('v')
+          $cliVer = (& '.\target\release\omvix-cli.exe' --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $cliVer -ne "omvix-cli $expectedVer") {
+            throw "Unexpected omvix-cli --version output: '$cliVer' (expected 'omvix-cli $expectedVer', exit=$LASTEXITCODE)"
+          }
+          Write-Host "Smoke test exit=$($proc.ExitCode), CLI=$cliVer"
+
+      - name: Stage release assets & SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path 'dist') {
+            Remove-Item -Recurse -Force 'dist'
+          }
+          New-Item -ItemType Directory -Path 'dist' | Out-Null
+          New-Item -ItemType Directory -Path 'dist\zip-stage' | Out-Null
+
+          Copy-Item 'target\release\omvix-hub.exe' 'dist\omvix-hub.exe'
+          Copy-Item 'target\release\omvix-cli.exe' 'dist\omvix-cli.exe'
+
+          Copy-Item 'target\release\omvix-hub.exe' 'dist\zip-stage\omvix-hub.exe'
+          Copy-Item 'target\release\omvix-cli.exe' 'dist\zip-stage\omvix-cli.exe'
+          Copy-Item 'README.md' 'dist\zip-stage\README.md'
+          Copy-Item 'CHANGELOG.md' 'dist\zip-stage\CHANGELOG.md'
+
+          Compress-Archive -Path 'dist\zip-stage\*' -DestinationPath 'dist\omvix-hub-windows-x64.zip' -Force
+          Remove-Item -Recurse -Force 'dist\zip-stage'
+
+          $lines = @(
+            'omvix-hub.exe',
+            'omvix-cli.exe',
+            'omvix-hub-windows-x64.zip'
+          ) | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path (Join-Path 'dist' $_)).Hash.ToLowerInvariant()
+            "$hash  $_"
+          }
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path 'dist').Path 'SHA256SUMS.txt'), $lines, $utf8NoBom)
+          Get-Content 'dist\SHA256SUMS.txt'
+
+      - name: Prepare release notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          $ver = $tag.TrimStart('v')
+          $escapedVer = [regex]::Escape($ver)
+          $changelog = Get-Content -Raw -Path 'CHANGELOG.md'
+          $m = [regex]::Match($changelog, "(?ms)^## \[$escapedVer\][^\r\n]*\r?\n(.*?)(?=^## \[|\z)")
+          if ($m.Success -and -not [string]::IsNullOrWhiteSpace($m.Groups[1].Value)) {
+            $body = $m.Groups[1].Value.Trim()
+          } else {
+            $body = "Automated release build for Omvix Hub $tag."
+          }
+
+          $checksums = (Get-Content -Raw -Path 'dist\SHA256SUMS.txt').Trim()
+          $noteLines = @(
+            $body,
+            '',
+            '---',
+            '',
+            '### Checksums (`SHA256SUMS.txt`)',
+            '```text',
+            $checksums,
+            '```',
+            '',
+            '> **Not:** Bu sürüm henüz Authenticode kod imzalama sertifikası olmadan yayınlanmıştır; Windows SmartScreen uyarısı gösterebilir ve yerleşik güncelleyici varsayılan güvenlik ayarında imzasız kurulumu engeller.'
+          )
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText((Join-Path (Resolve-Path 'dist').Path 'release_notes.md'), ($noteLines -join "`n"), $utf8NoBom)
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          $isPrerelease = $tag -match '-'
+          $assets = @(
+            'dist\omvix-hub.exe',
+            'dist\omvix-cli.exe',
+            'dist\omvix-hub-windows-x64.zip',
+            'dist\SHA256SUMS.txt'
+          )
+
+          $prevPref = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          gh release view $tag 2>$null | Out-Null
+          $exists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $prevPref
+
+          $extraFlags = @()
+          if ($isPrerelease) {
+            $extraFlags += '--prerelease'
+          }
+
+          if ($exists) {
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "gh release upload failed with exit code $LASTEXITCODE"
+            }
+            gh release edit $tag --title "Omvix Hub $tag" --notes-file 'dist\release_notes.md' @extraFlags
+            if ($LASTEXITCODE -ne 0) {
+              throw "gh release edit failed with exit code $LASTEXITCODE"
+            }
+          } else {
+            gh release create $tag @assets --title "Omvix Hub $tag" --notes-file 'dist\release_notes.md' @extraFlags
+            if ($LASTEXITCODE -ne 0) {
+              throw "gh release create failed with exit code $LASTEXITCODE"
+            }
+          }
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omvix-hub-release-${{ github.ref_name }}
+          path: dist/*
+          retention-days: 30

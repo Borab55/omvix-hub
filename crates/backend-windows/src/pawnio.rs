@@ -246,7 +246,7 @@ try {
 }
 "#;
 
-    let out = Command::new("powershell.exe")
+    let out = Command::new(crate::paths::system_tool("powershell.exe"))
         .args(["-NoProfile", "-Command", script])
         .env("OMVIX_PAWNIO_DIR", &dir)
         .env("OMVIX_SKIP_DRIVER", if skip_driver { "1" } else { "0" })

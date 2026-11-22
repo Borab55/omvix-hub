@@ -17,16 +17,19 @@ struct BatteryWmiMetrics {
 /// as well as standard OMEN/Victus `0x0500` / `0x0300` status words.
 pub fn decode_charge_mode(data: &[u8]) -> BatteryChargeMode {
     if data.len() < 2 {
-        return BatteryChargeMode::Auto;
+        return BatteryChargeMode::Unknown;
     }
     let le = u16::from_le_bytes([data[0], data[1]]);
     match le {
+        0x0000 => BatteryChargeMode::Auto,
         0x0300 => BatteryChargeMode::Hold,
         0x0500 => BatteryChargeMode::Inhibit,
         _ => match data[0] {
             0x04 | 0x05 => BatteryChargeMode::Inhibit,
             0x02 | 0x03 => BatteryChargeMode::Hold,
-            _ => BatteryChargeMode::Auto,
+            // TODO(hw-verify): confirm 0x01 / 0x00 0xFF Auto response bytes on non-8C99 HP BIOS variants
+            0x00 | 0x01 if data[1] == 0x00 || data[1] == 0xFF => BatteryChargeMode::Auto,
+            _ => BatteryChargeMode::Unknown,
         },
     }
 }
@@ -105,12 +108,12 @@ impl WindowsBatteryBackend {
         let res = HpWmiBios::with_cached(|bios| {
             let resp = bios.execute(0x00001, 0x2B, &[0u8; 4], OutputSize::Size4)?;
             if resp.return_code != 0 || resp.data.len() < 2 {
-                return Ok((BatteryChargeMode::Auto, None));
+                return Ok((BatteryChargeMode::Unknown, None));
             }
             let mode = decode_charge_mode(&resp.data);
             Ok((mode, Some(format_hex(&resp.data))))
         });
-        res.unwrap_or((BatteryChargeMode::Auto, None))
+        res.unwrap_or((BatteryChargeMode::Unknown, None))
     }
 }
 
@@ -180,6 +183,11 @@ impl BatteryLimitBackend for WindowsBatteryBackend {
             BatteryChargeMode::Auto => [0x00, 0x00, 0x00, 0x00],
             BatteryChargeMode::Hold => [0x00, 0x03, 0x00, 0x00],
             BatteryChargeMode::Inhibit => [0x00, 0x05, 0x00, 0x00],
+            BatteryChargeMode::Unknown => {
+                return Err(OmvixError::Config(
+                    "Cannot apply BatteryChargeMode::Unknown to firmware".to_string(),
+                ));
+            }
         };
 
         HpWmiBios::with_cached(|bios| {
@@ -225,5 +233,25 @@ mod tests {
             decode_charge_mode(&[0x00, 0x00, 0x00, 0x00]),
             BatteryChargeMode::Auto
         );
+    }
+
+    #[test]
+    fn decode_charge_mode_returns_unknown_for_short_or_unrecognized_bytes() {
+        assert_eq!(decode_charge_mode(&[]), BatteryChargeMode::Unknown);
+        assert_eq!(decode_charge_mode(&[0x00]), BatteryChargeMode::Unknown);
+        assert_eq!(
+            decode_charge_mode(&[0xAA, 0xBB, 0x00, 0x00]),
+            BatteryChargeMode::Unknown
+        );
+        assert_eq!(
+            decode_charge_mode(&[0xFF, 0xFF, 0xFF, 0xFF]),
+            BatteryChargeMode::Unknown
+        );
+    }
+
+    #[test]
+    fn set_charge_mode_rejects_unknown_variant() {
+        let res = WindowsBatteryBackend::new().set_charge_mode(BatteryChargeMode::Unknown);
+        assert!(matches!(res, Err(OmvixError::Config(_))));
     }
 }

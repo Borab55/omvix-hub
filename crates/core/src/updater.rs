@@ -5,10 +5,10 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub const GITHUB_OWNER: &str = "Borab55";
-pub const GITHUB_REPO: &str = "hp-omen-hub-lite";
+pub const GITHUB_REPO: &str = "omvix-hub";
 pub const GITHUB_RELEASES_LATEST_API: &str =
-    "https://api.github.com/repos/Borab55/hp-omen-hub-lite/releases/latest";
-pub const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/Borab55/hp-omen-hub-lite/releases";
+    "https://api.github.com/repos/Borab55/omvix-hub/releases/latest";
+pub const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/Borab55/omvix-hub/releases";
 
 pub const MAX_API_JSON_BYTES: usize = 1024 * 1024;
 pub const MAX_CHECKSUM_BYTES: usize = 256 * 1024;
@@ -631,13 +631,18 @@ mod tests {
         let v050_rc2 = SemVer::parse("V0.5.0-rc.2+build99").unwrap();
         let v050 = SemVer::parse("v0.5.0").unwrap();
         let v051 = SemVer::parse("0.5.1").unwrap();
+        let v060_beta1 = SemVer::parse("0.6.0-beta.1").unwrap();
+        let v060 = SemVer::parse("0.6.0").unwrap();
 
         assert!(v045 < v050_rc1);
         assert!(v050_rc1 < v050_rc2);
         assert!(v050_rc2 < v050);
         assert!(v050 < v051);
+        assert!(v051 < v060_beta1);
+        assert!(v060_beta1 < v060);
         assert_eq!(v050.to_string(), "0.5.0");
         assert_eq!(v050_rc2.to_string(), "0.5.0-rc.2");
+        assert_eq!(v060_beta1.to_string(), "0.6.0-beta.1");
 
         assert!(SemVer::parse("0.5").is_none());
         assert!(SemVer::parse("v0.5.0-").is_none());
@@ -649,7 +654,7 @@ mod tests {
         assert!(validate_github_release_url(GITHUB_RELEASES_LATEST_API).is_ok());
         assert!(validate_github_release_url(GITHUB_RELEASES_PAGE_URL).is_ok());
         assert!(validate_github_release_url(
-            "https://github.com/Borab55/hp-omen-hub-lite/releases/download/v0.5.0/omvix-hub.exe"
+            "https://github.com/Borab55/omvix-hub/releases/download/v0.5.0/omvix-hub.exe"
         )
         .is_ok());
         assert!(validate_github_release_url(
@@ -661,23 +666,25 @@ mod tests {
         )
         .is_ok());
 
-        assert!(
-            validate_github_release_url("http://github.com/Borab55/hp-omen-hub-lite/releases")
-                .is_err()
-        );
         assert!(validate_github_release_url(
-            "https://github.com/OtherUser/hp-omen-hub-lite/releases"
+            "https://github.com/Borab55/hp-omen-hub-lite/releases"
         )
         .is_err());
+        assert!(
+            validate_github_release_url("http://github.com/Borab55/omvix-hub/releases").is_err()
+        );
+        assert!(
+            validate_github_release_url("https://github.com/OtherUser/omvix-hub/releases").is_err()
+        );
         assert!(validate_github_release_url("https://evil.example.com/omvix-hub.exe").is_err());
         assert!(validate_github_release_url(
-            "https://github.com/Borab55/hp-omen-hub-lite/releases;calc.exe"
+            "https://github.com/Borab55/omvix-hub/releases;calc.exe"
         )
         .is_err());
-        assert!(validate_github_release_url(
-            "https://user@github.com/Borab55/hp-omen-hub-lite/releases"
-        )
-        .is_err());
+        assert!(
+            validate_github_release_url("https://user@github.com/Borab55/omvix-hub/releases")
+                .is_err()
+        );
     }
 
     #[test]
@@ -687,22 +694,22 @@ mod tests {
             "name": "Omvix Hub v0.5.0",
             "draft": false,
             "published_at": "2026-11-22T00:00:00Z",
-            "html_url": "https://github.com/Borab55/hp-omen-hub-lite/releases/tag/v0.5.0",
+            "html_url": "https://github.com/Borab55/omvix-hub/releases/tag/v0.5.0",
             "body": "Release notes here",
             "assets": [
                 {
                     "name": "omvix-cli.exe",
-                    "browser_download_url": "https://github.com/Borab55/hp-omen-hub-lite/releases/download/v0.5.0/omvix-cli.exe",
+                    "browser_download_url": "https://github.com/Borab55/omvix-hub/releases/download/v0.5.0/omvix-cli.exe",
                     "size": 100000
                 },
                 {
                     "name": "omvix-hub.exe",
-                    "browser_download_url": "https://github.com/Borab55/hp-omen-hub-lite/releases/download/v0.5.0/omvix-hub.exe",
+                    "browser_download_url": "https://github.com/Borab55/omvix-hub/releases/download/v0.5.0/omvix-hub.exe",
                     "size": 4500000
                 },
                 {
                     "name": "SHA256SUMS.txt",
-                    "browser_download_url": "https://github.com/Borab55/hp-omen-hub-lite/releases/download/v0.5.0/SHA256SUMS.txt",
+                    "browser_download_url": "https://github.com/Borab55/omvix-hub/releases/download/v0.5.0/SHA256SUMS.txt",
                     "size": 256
                 }
             ]

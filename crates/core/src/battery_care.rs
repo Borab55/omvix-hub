@@ -19,21 +19,40 @@ impl BatteryCareEngine {
     }
 
     /// Evaluates the target firmware `BatteryChargeMode` given current charge percentage and AC state.
-    /// Automatically clears `cfg.one_time_full_charge` once battery reaches >=99% or AC is unplugged.
+    /// Automatically clears travel charge once expired, battery reaches >=99%, or AC is unplugged.
     pub fn evaluate(
         &mut self,
         cfg: &mut BatteryConfig,
         charge_pct: u8,
         ac_connected: bool,
     ) -> BatteryChargeMode {
+        self.evaluate_at(
+            cfg,
+            charge_pct,
+            ac_connected,
+            chrono::Utc::now().timestamp(),
+        )
+    }
+
+    /// Deterministic version of `evaluate` using caller-supplied `now_utc` Unix seconds.
+    pub fn evaluate_at(
+        &mut self,
+        cfg: &mut BatteryConfig,
+        charge_pct: u8,
+        ac_connected: bool,
+        now_utc: i64,
+    ) -> BatteryChargeMode {
         if !cfg.enabled {
             self.last_applied_mode = BatteryChargeMode::Auto;
             return BatteryChargeMode::Auto;
         }
 
-        if cfg.one_time_full_charge {
-            if charge_pct >= 99 || !ac_connected {
-                cfg.one_time_full_charge = false;
+        if cfg.one_time_full_charge || cfg.travel_charge_until_utc.is_some() {
+            let expired = cfg
+                .travel_charge_until_utc
+                .is_some_and(|until| now_utc >= until);
+            if expired || charge_pct >= 99 || !ac_connected {
+                cfg.clear_travel_charge();
             } else {
                 self.last_applied_mode = BatteryChargeMode::Auto;
                 return BatteryChargeMode::Auto;
@@ -46,7 +65,9 @@ impl BatteryCareEngine {
         let target = if charge_pct >= stop {
             match cfg.mode {
                 BatteryChargeMode::Hold => BatteryChargeMode::Hold,
-                BatteryChargeMode::Inhibit | BatteryChargeMode::Auto => BatteryChargeMode::Inhibit,
+                BatteryChargeMode::Inhibit
+                | BatteryChargeMode::Auto
+                | BatteryChargeMode::Unknown => BatteryChargeMode::Inhibit,
             }
         } else if charge_pct <= start {
             BatteryChargeMode::Auto
@@ -144,11 +165,42 @@ mod tests {
         assert!(!cfg.one_time_full_charge);
 
         // Unplugging also cancels travel mode
-        cfg.one_time_full_charge = true;
+        cfg.enable_travel_charge(1_800_000_000);
         assert_eq!(
-            engine.evaluate(&mut cfg, 85, false),
+            engine.evaluate_at(&mut cfg, 85, false, 1_800_000_010),
             BatteryChargeMode::Inhibit
         );
         assert!(!cfg.one_time_full_charge);
+        assert!(cfg.travel_charge_until_utc.is_none());
+    }
+
+    #[test]
+    fn travel_charge_expires_after_deadline_and_clears_flag() {
+        let mut engine = BatteryCareEngine::new();
+        let mut cfg = BatteryConfig {
+            enabled: true,
+            mode: BatteryChargeMode::Inhibit,
+            stop_threshold_pct: 80,
+            start_threshold_pct: 75,
+            ..BatteryConfig::default()
+        };
+        let t0 = 1_800_000_000i64;
+        cfg.enable_travel_charge(t0);
+        let until = cfg.travel_charge_until_utc.unwrap();
+
+        // Before expiry -> Auto
+        assert_eq!(
+            engine.evaluate_at(&mut cfg, 85, true, until - 1),
+            BatteryChargeMode::Auto
+        );
+        assert!(cfg.one_time_full_charge);
+
+        // At/after expiry -> clears travel mode and reverts to Inhibit
+        assert_eq!(
+            engine.evaluate_at(&mut cfg, 85, true, until),
+            BatteryChargeMode::Inhibit
+        );
+        assert!(!cfg.one_time_full_charge);
+        assert!(cfg.travel_charge_until_utc.is_none());
     }
 }

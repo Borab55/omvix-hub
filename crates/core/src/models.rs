@@ -452,6 +452,7 @@ pub enum BatteryChargeMode {
     Auto,
     Inhibit,
     Hold,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -28,7 +28,7 @@ Bu rapor, **Omvix Hub**'ın user-mode Windows ikilileri (`omvix-hub.exe`, `omvix
 ## 3. Omvix Hub İçin Önerilen Karar Yolu
 
 - **1. Tercih (Maliyetsiz / CI Otomatik):** **SignPath Foundation OSS** başvurusu  
-  - Omvix Hub `MIT OR Apache-2.0` lisansına ve herkese açık `Borab55/hp-omen-hub-lite` deposuna sahip olduğu için uygundur.
+  - Omvix Hub `MIT OR Apache-2.0` lisansına ve herkese açık `Borab55/omvix-hub` deposuna sahip olduğu için uygundur.
   - Başvuru kabul edildiğinde release workflow imzalamayı bulut HSM üzerinden otomatikleştirir; yerel sertifika/token yönetimi gerekmez.
 - **2. Tercih (Düşük Maliyetli / Kişisel Yayıncı Adı):** **Certum Open Source Code Signing (SimplySign Bulut)** (~€49 / \$58 yıllık)  
   - SignPath beklemeden kendi adına (`Open Source Developer`) imzalamak istersen Türkiye'den bireysel olarak başvurabileceğin en ekonomik bulut HSM seçeneğidir.

@@ -3,22 +3,85 @@ use crate::security_fs::is_reparse_point;
 use crate::system_info::is_process_elevated;
 use omvix_core::{InstalledCopyStatus, OmvixError, Result};
 use std::fs;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
-use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::core::{BSTR, HSTRING, PCWSTR, VARIANT};
+use windows::Win32::Foundation::{ERROR_SUCCESS, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+};
+use windows::Win32::System::TaskScheduler::{
+    ITaskFolder, ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_LOGON_GROUP,
 };
 
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "OmvixHub";
 const TASK_NAME: &str = "OmvixHub";
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+struct ComApartmentGuard {
+    should_uninit: bool,
+}
+
+impl Drop for ComApartmentGuard {
+    fn drop(&mut self) {
+        if self.should_uninit {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+/// Safe Windows Task Scheduler COM session.
+/// Field order guarantees COM interfaces drop before `_com` calls `CoUninitialize`.
+struct TaskSchedulerSession {
+    root: ITaskFolder,
+    _service: ITaskService,
+    _com: ComApartmentGuard,
+}
+
+impl TaskSchedulerSession {
+    fn connect() -> Result<Self> {
+        unsafe {
+            let init_hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let should_uninit = if init_hr == S_OK || init_hr == S_FALSE {
+                true
+            } else if init_hr == RPC_E_CHANGED_MODE {
+                false
+            } else {
+                return Err(OmvixError::PermissionDenied(format!(
+                    "CoInitializeEx failed: 0x{:08X}",
+                    init_hr.0 as u32
+                )));
+            };
+            let com = ComApartmentGuard { should_uninit };
+
+            let service: ITaskService =
+                CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER).map_err(|e| {
+                    OmvixError::PermissionDenied(format!("Failed to create ITaskService: {e}"))
+                })?;
+
+            let empty = VARIANT::default();
+            service
+                .Connect(&empty, &empty, &empty, &empty)
+                .map_err(|e| {
+                    OmvixError::PermissionDenied(format!("ITaskService::Connect failed: {e}"))
+                })?;
+
+            let root = service.GetFolder(&BSTR::from(r"\")).map_err(|e| {
+                OmvixError::PermissionDenied(format!("ITaskService::GetFolder(\\) failed: {e}"))
+            })?;
+
+            Ok(Self {
+                root,
+                _service: service,
+                _com: com,
+            })
+        }
+    }
+}
 
 fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -61,6 +124,7 @@ fn xml_unescape(s: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn decode_task_xml_bytes(raw: &[u8]) -> String {
     if raw.starts_with(&[0xFF, 0xFE]) && raw.len() >= 2 {
         let units: Vec<u16> = raw[2..]
@@ -106,15 +170,9 @@ pub fn extract_task_command_from_xml(xml: &str) -> Option<String> {
 }
 
 pub fn query_elevated_task_command() -> Option<String> {
-    let out = Command::new("schtasks.exe")
-        .args(["/Query", "/TN", TASK_NAME, "/XML"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let xml = decode_task_xml_bytes(&out.stdout);
+    let session = TaskSchedulerSession::connect().ok()?;
+    let task = unsafe { session.root.GetTask(&BSTR::from(TASK_NAME)) }.ok()?;
+    let xml = unsafe { task.Xml() }.ok()?.to_string();
     extract_task_command_from_xml(&xml)
 }
 
@@ -150,9 +208,8 @@ fn schedule_delete_on_reboot(path: &Path) {
     }
 }
 
-/// Builds a Task Scheduler 1.2 UTF-16LE XML definition (with BOM) that starts Omvix Hub
-/// elevated (`HighestAvailable`, zero UAC prompt) at logon on both AC and battery power.
-pub fn build_elevated_task_xml(exe_path: &Path) -> Vec<u8> {
+/// Builds the Task Scheduler 1.2 XML string passed to `ITaskFolder::RegisterTask`.
+pub fn build_elevated_task_xml_string(exe_path: &Path) -> String {
     let cmd_escaped = xml_escape(&exe_path.to_string_lossy());
     let workdir_xml = exe_path
         .parent()
@@ -164,7 +221,7 @@ pub fn build_elevated_task_xml(exe_path: &Path) -> Vec<u8> {
         })
         .unwrap_or_default();
 
-    let xml = format!(
+    format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -180,7 +237,7 @@ pub fn build_elevated_task_xml(exe_path: &Path) -> Vec<u8> {
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>false</AllowHardTerminate>
+    <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
     <AllowStartOnDemand>true</AllowStartOnDemand>
@@ -203,7 +260,13 @@ pub fn build_elevated_task_xml(exe_path: &Path) -> Vec<u8> {
   </Actions>
 </Task>
 "#
-    );
+    )
+}
+
+/// Builds a Task Scheduler 1.2 UTF-16LE XML definition (with BOM) that starts Omvix Hub
+/// elevated (`HighestAvailable`, zero UAC prompt) at logon on both AC and battery power.
+pub fn build_elevated_task_xml(exe_path: &Path) -> Vec<u8> {
+    let xml = build_elevated_task_xml_string(exe_path);
 
     let mut bytes = Vec::with_capacity(2 + xml.len() * 2);
     bytes.extend_from_slice(&[0xFF, 0xFE]);
@@ -315,12 +378,9 @@ pub fn query_installed_copy_status() -> InstalledCopyStatus {
 
 /// Returns `true` if the elevated Windows Task Scheduler startup task (`OmvixHub`) exists.
 pub fn is_elevated_task_autostart_enabled() -> bool {
-    Command::new("schtasks.exe")
-        .args(["/Query", "/TN", TASK_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    TaskSchedulerSession::connect()
+        .ok()
+        .is_some_and(|session| unsafe { session.root.GetTask(&BSTR::from(TASK_NAME)) }.is_ok())
 }
 
 fn is_registry_autostart_enabled() -> bool {
@@ -385,47 +445,28 @@ fn set_registry_autostart(enabled: bool, exe_path: &Path) -> Result<()> {
 }
 
 pub fn create_elevated_task(exe_path: &Path) -> Result<()> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp_path = std::env::temp_dir().join(format!(
-        "omvix_autostart_{}_{}.xml",
-        std::process::id(),
-        nanos
-    ));
-    let xml_bytes = build_elevated_task_xml(exe_path);
-    fs::write(&tmp_path, xml_bytes)?;
-
-    let out = Command::new("schtasks.exe")
-        .args(["/Create", "/TN", TASK_NAME, "/XML"])
-        .arg(&tmp_path)
-        .arg("/F")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    let _ = fs::remove_file(&tmp_path);
-
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            let detail = if !stderr.is_empty() { stderr } else { stdout };
-            Err(OmvixError::PermissionDenied(format!(
-                "schtasks /Create failed ({}): {detail}",
-                o.status
-            )))
-        }
-        Err(err) => Err(OmvixError::Io(err)),
+    let session = TaskSchedulerSession::connect()?;
+    let xml = build_elevated_task_xml_string(exe_path);
+    let empty = VARIANT::default();
+    unsafe {
+        session.root.RegisterTask(
+            &BSTR::from(TASK_NAME),
+            &BSTR::from(xml.as_str()),
+            TASK_CREATE_OR_UPDATE.0,
+            &empty,
+            &empty,
+            TASK_LOGON_GROUP,
+            &empty,
+        )
     }
+    .map_err(|e| OmvixError::PermissionDenied(format!("ITaskFolder::RegisterTask failed: {e}")))?;
+    Ok(())
 }
 
 fn delete_elevated_task() {
-    let _ = Command::new("schtasks.exe")
-        .args(["/Delete", "/TN", TASK_NAME, "/F"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    if let Ok(session) = TaskSchedulerSession::connect() {
+        let _ = unsafe { session.root.DeleteTask(&BSTR::from(TASK_NAME), 0) };
+    }
 }
 
 /// Verifies on startup that any enabled elevated Scheduled Task points ONLY to the admin-protected
@@ -547,7 +588,7 @@ mod tests {
         assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
         assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
         assert!(xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"));
-        assert!(xml.contains("<AllowHardTerminate>false</AllowHardTerminate>"));
+        assert!(xml.contains("<AllowHardTerminate>true</AllowHardTerminate>"));
         assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         assert!(xml.contains("<StartWhenAvailable>true</StartWhenAvailable>"));
@@ -567,5 +608,20 @@ mod tests {
         let xml = decode_task_xml_bytes(&bytes);
         let parsed = extract_task_command_from_xml(&xml).expect("command tag extracted");
         assert_eq!(parsed, r"C:\Program Files\Omvix & Hub\omvix-hub.exe");
+    }
+
+    #[test]
+    fn in_memory_task_xml_string_matches_bom_and_connects_com() {
+        let exe = Path::new(r#"C:\Program Files\OmvixHub\omvix-hub.exe"#);
+        let xml_str = build_elevated_task_xml_string(exe);
+        assert!(xml_str.contains("<AllowHardTerminate>true</AllowHardTerminate>"));
+        assert_eq!(
+            extract_task_command_from_xml(&xml_str).as_deref(),
+            Some(r"C:\Program Files\OmvixHub\omvix-hub.exe")
+        );
+        assert!(
+            TaskSchedulerSession::connect().is_ok(),
+            "ITaskService COM session should connect to root folder"
+        );
     }
 }
