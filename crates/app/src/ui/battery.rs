@@ -304,7 +304,11 @@ pub fn render(
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("battery.profile_name"));
-            ui.text_edit_singleline(&mut draft.profile_name);
+            ui.add(
+                egui::TextEdit::singleline(&mut draft.profile_name)
+                    .desired_width(200.0)
+                    .clip_text(true),
+            );
         });
         ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("battery.stop_threshold"));
