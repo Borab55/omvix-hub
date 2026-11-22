@@ -460,20 +460,29 @@ pub fn render(
 
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            let travel_btn_label = if cfg.battery.one_time_full_charge {
+            let now_utc = chrono::Utc::now().timestamp();
+            let travel_active = cfg.battery.is_travel_charge_active(now_utc);
+            let travel_btn_label = if travel_active {
                 format!("✓ {}", i18n.t("battery.one_time_full_charge"))
             } else {
                 i18n.t("battery.one_time_full_charge")
             };
-            if pill_button(ui, &travel_btn_label, cfg.battery.one_time_full_charge, t).clicked() {
-                cfg.battery.one_time_full_charge = !cfg.battery.one_time_full_charge;
+            if pill_button(ui, &travel_btn_label, travel_active, t).clicked() {
+                if travel_active {
+                    cfg.battery.clear_travel_charge();
+                } else {
+                    cfg.battery.enable_travel_charge(now_utc);
+                }
                 on_save();
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 on_cmd(WorkerCommand::ApplyBatteryNow);
             }
         });
 
-        if cfg.battery.one_time_full_charge {
+        if cfg
+            .battery
+            .is_travel_charge_active(chrono::Utc::now().timestamp())
+        {
             ui.add_space(4.0);
             ui.colored_label(STATUS_WARN, i18n.t("battery.one_time_active"));
         } else {
@@ -655,7 +664,7 @@ pub fn render(
                             cfg.battery.enabled = false;
                             cfg.battery.mode = BatteryChargeMode::Auto;
                             cfg.battery.active_profile_id = None;
-                            cfg.battery.one_time_full_charge = false;
+                            cfg.battery.clear_travel_charge();
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::UninstallBatteryServiceZeroTrace);

@@ -714,10 +714,15 @@ pub fn render(
                         on_cmd(WorkerCommand::ApplyBatteryNow);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let travel_active = cfg.battery.one_time_full_charge;
+                        let now_utc = chrono::Utc::now().timestamp();
+                        let travel_active = cfg.battery.is_travel_charge_active(now_utc);
                         let t_label = i18n.t("cockpit.travel_short");
                         if pill_button(ui, &t_label, travel_active, t).clicked() {
-                            cfg.battery.one_time_full_charge = !cfg.battery.one_time_full_charge;
+                            if travel_active {
+                                cfg.battery.clear_travel_charge();
+                            } else {
+                                cfg.battery.enable_travel_charge(now_utc);
+                            }
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::ApplyBatteryNow);

@@ -34,6 +34,7 @@ struct MockHardwareState {
     running_exes_lower: HashSet<String>,
     user_running_exes: Vec<String>,
     battery_service_running: bool,
+    battery_service_cfg: Option<BatteryConfig>,
     fast_battery_pct: Option<u8>,
     event_log: Vec<String>,
 }
@@ -118,6 +119,7 @@ impl Default for MockHardwareState {
             running_exes_lower: HashSet::new(),
             user_running_exes: vec!["notepad.exe".to_string()],
             battery_service_running: false,
+            battery_service_cfg: None,
             fast_battery_pct: Some(82),
             event_log: Vec::new(),
         }
@@ -369,7 +371,12 @@ impl WorkerOsHooks for MockRig {
         self.inner.lock().unwrap().battery_service_running
     }
 
-    fn sync_battery_service_config(&self, _cfg: &BatteryConfig) -> Result<()> {
+    fn read_battery_service_config(&self) -> Option<BatteryConfig> {
+        self.inner.lock().unwrap().battery_service_cfg.clone()
+    }
+
+    fn sync_battery_service_config(&self, cfg: &BatteryConfig) -> Result<()> {
+        self.inner.lock().unwrap().battery_service_cfg = Some(cfg.clone());
         Ok(())
     }
 
@@ -977,4 +984,35 @@ fn integration_telemetry_csv_export_and_battery_health_history_logging() {
     assert_eq!(st.last_csv_export_path.as_ref(), Some(&csv_path));
     assert_eq!(st.battery_health_history.len(), 1);
     assert!(dir.path().join("battery_history.json").is_file());
+}
+
+#[test]
+fn integration_service_cleared_travel_charge_syncs_and_stays_cleared() {
+    let dir = TempDirGuard::create("svc_travel_sync");
+    let mut cfg = AppConfig::default();
+    cfg.battery.enabled = true;
+    cfg.battery.mode = BatteryChargeMode::Inhibit;
+    cfg.battery.enable_travel_charge(Utc::now().timestamp());
+
+    // Simulate background service having completed 1x travel charge and persisted cleared flag
+    let mut cleared_svc_bat = cfg.battery.clone();
+    cleared_svc_bat.clear_travel_charge();
+    let mock = MockHardwareState {
+        battery_service_running: true,
+        battery_service_cfg: Some(cleared_svc_bat),
+        ..Default::default()
+    };
+
+    let rig = MockRig::new(mock);
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+
+    assert!(engine.poll_battery_step());
+    assert!(!engine.cfg.battery.one_time_full_charge);
+    assert!(engine.cfg.battery.travel_charge_until_utc.is_none());
+
+    let st = state.lock().unwrap();
+    assert_eq!(st.synced_config_rev, 1);
+    let synced = st.synced_config.as_ref().expect("synced config published");
+    assert!(!synced.battery.one_time_full_charge);
+    assert!(synced.battery.travel_charge_until_utc.is_none());
 }

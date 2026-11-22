@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 4;
+pub const CURRENT_CONFIG_VERSION: u32 = 5;
+pub const DEFAULT_TRAVEL_CHARGE_DURATION_SECS: i64 = 12 * 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -382,6 +383,7 @@ pub struct BatteryConfig {
     pub start_threshold_pct: u8,
     pub hold_when_shutdown: bool,
     pub one_time_full_charge: bool,
+    pub travel_charge_until_utc: Option<i64>,
     pub active_profile_id: Option<String>,
     pub custom_profiles: Vec<BatteryProfile>,
 }
@@ -395,8 +397,29 @@ impl Default for BatteryConfig {
             start_threshold_pct: 75,
             hold_when_shutdown: true,
             one_time_full_charge: false,
+            travel_charge_until_utc: None,
             active_profile_id: None,
             custom_profiles: Vec::new(),
+        }
+    }
+}
+
+impl BatteryConfig {
+    pub fn enable_travel_charge(&mut self, now_utc: i64) {
+        self.one_time_full_charge = true;
+        self.travel_charge_until_utc =
+            Some(now_utc.saturating_add(DEFAULT_TRAVEL_CHARGE_DURATION_SECS));
+    }
+
+    pub fn clear_travel_charge(&mut self) {
+        self.one_time_full_charge = false;
+        self.travel_charge_until_utc = None;
+    }
+
+    pub fn is_travel_charge_active(&self, now_utc: i64) -> bool {
+        match self.travel_charge_until_utc {
+            Some(until) => self.one_time_full_charge && now_utc < until,
+            None => self.one_time_full_charge,
         }
     }
 }
@@ -718,6 +741,13 @@ impl AppConfig {
             // Existing pre-v0.5 users already configured Omvix Hub; keep wizard accessible from Settings.
             cfg.general.first_run_completed = true;
         }
+        if cfg.config_version < 5
+            && cfg.battery.one_time_full_charge
+            && cfg.battery.travel_charge_until_utc.is_none()
+        {
+            // Migrate legacy unbounded `one_time_full_charge = true` so restarts never re-arm 100% travel charge.
+            cfg.battery.clear_travel_charge();
+        }
         cfg.config_version = CURRENT_CONFIG_VERSION;
         let warnings = cfg.sanitize();
         Ok((cfg, warnings))
@@ -757,6 +787,14 @@ impl AppConfig {
         self.battery.stop_threshold_pct = self.battery.stop_threshold_pct.clamp(50, 100);
         let max_start = self.battery.stop_threshold_pct.saturating_sub(2).max(40);
         self.battery.start_threshold_pct = self.battery.start_threshold_pct.clamp(40, max_start);
+        if !self.battery.one_time_full_charge
+            || self
+                .battery
+                .travel_charge_until_utc
+                .is_some_and(|ts| ts <= 0)
+        {
+            self.battery.clear_travel_charge();
+        }
         for prof in &mut self.battery.custom_profiles {
             prof.stop_threshold_pct = prof.stop_threshold_pct.clamp(50, 100);
             let p_max_start = prof.stop_threshold_pct.saturating_sub(2).max(40);
@@ -1294,5 +1332,46 @@ mod tests {
         assert!(!dir.join("config.toml.bad-20261122-151500").exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v4_migration_clears_legacy_unbounded_one_time_full_charge() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_v4_mig_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let legacy =
+            "config_version = 4\n\n[battery]\nenabled = true\none_time_full_charge = true\n";
+        fs::write(&path, legacy).unwrap();
+
+        let loaded = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
+        assert!(!loaded.battery.one_time_full_charge);
+        assert!(loaded.battery.travel_charge_until_utc.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn travel_charge_until_utc_roundtrip() {
+        let mut cfg = AppConfig::default();
+        let now = 1_800_000_000i64;
+        cfg.battery.enable_travel_charge(now);
+        assert!(cfg.battery.is_travel_charge_active(now + 60));
+        assert!(!cfg
+            .battery
+            .is_travel_charge_active(now + DEFAULT_TRAVEL_CHARGE_DURATION_SECS));
+
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        let parsed: AppConfig = toml::from_str(&serialized).unwrap();
+        assert!(parsed.battery.one_time_full_charge);
+        assert_eq!(
+            parsed.battery.travel_charge_until_utc,
+            Some(now + DEFAULT_TRAVEL_CHARGE_DURATION_SECS)
+        );
     }
 }

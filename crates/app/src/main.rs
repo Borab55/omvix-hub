@@ -1219,7 +1219,7 @@ impl OmvixApp {
                         self.cfg.battery.enabled = enabled;
                         self.cfg.battery.stop_threshold_pct = stop_pct;
                         self.cfg.battery.start_threshold_pct = start_pct;
-                        self.cfg.battery.one_time_full_charge = false;
+                        self.cfg.battery.clear_travel_charge();
                         self.cfg.battery.mode = if enabled {
                             omvix_core::BatteryChargeMode::Inhibit
                         } else {

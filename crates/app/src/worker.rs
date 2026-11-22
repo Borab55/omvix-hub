@@ -598,6 +598,7 @@ trait WorkerOsHooks: Send + Sync {
     fn running_process_names_lower(&self) -> std::collections::HashSet<String>;
     fn list_user_running_exes(&self) -> Vec<String>;
     fn is_battery_service_running(&self) -> bool;
+    fn read_battery_service_config(&self) -> Option<BatteryConfig>;
     fn sync_battery_service_config(&self, cfg: &BatteryConfig) -> Result<()>;
     fn read_fast_battery_pct(&self) -> Option<u8>;
 }
@@ -697,6 +698,10 @@ impl WorkerOsHooks for WindowsOsHooks {
 
     fn is_battery_service_running(&self) -> bool {
         omvix_windows::battery_service::is_service_running()
+    }
+
+    fn read_battery_service_config(&self) -> Option<BatteryConfig> {
+        omvix_windows::battery_service::read_service_config().map(|c| c.to_battery_config())
     }
 
     fn sync_battery_service_config(&self, cfg: &BatteryConfig) -> Result<()> {
@@ -1567,17 +1572,55 @@ impl WorkerEngine {
             .map(|s| s.hp_charge_service_running)
             .unwrap_or(false);
         let own_svc_running = self.backends.os.is_battery_service_running();
+        let mut travel_state_synced = false;
+        if own_svc_running {
+            if let Some(svc_bat) = self.backends.os.read_battery_service_config() {
+                if (
+                    svc_bat.one_time_full_charge,
+                    svc_bat.travel_charge_until_utc,
+                ) != (
+                    self.cfg.battery.one_time_full_charge,
+                    self.cfg.battery.travel_charge_until_utc,
+                ) {
+                    self.cfg.battery.one_time_full_charge = svc_bat.one_time_full_charge;
+                    self.cfg.battery.travel_charge_until_utc = svc_bat.travel_charge_until_utc;
+                    self.last_committed_battery.one_time_full_charge = svc_bat.one_time_full_charge;
+                    self.last_committed_battery.travel_charge_until_utc =
+                        svc_bat.travel_charge_until_utc;
+                    travel_state_synced = true;
+                }
+            }
+        }
         if self.safe_mode.is_none()
             && self.bios_writes_allowed
             && self.cfg.battery.enabled
             && !conflict_active
             && !own_svc_running
         {
+            let prev_travel = (
+                self.cfg.battery.one_time_full_charge,
+                self.cfg.battery.travel_charge_until_utc,
+            );
             let target = self.battery_engine.evaluate(
                 &mut self.cfg.battery,
                 bat.charge_percent,
                 bat.ac_connected,
             );
+            if (
+                self.cfg.battery.one_time_full_charge,
+                self.cfg.battery.travel_charge_until_utc,
+            ) != prev_travel
+            {
+                self.last_committed_battery.one_time_full_charge =
+                    self.cfg.battery.one_time_full_charge;
+                self.last_committed_battery.travel_charge_until_utc =
+                    self.cfg.battery.travel_charge_until_utc;
+                let _ = self
+                    .backends
+                    .os
+                    .sync_battery_service_config(&self.cfg.battery);
+                travel_state_synced = true;
+            }
             if self.last_applied_bat_mode != Some(target) {
                 record_hw_write_attempt(
                     &self.crash_guard,
@@ -1591,8 +1634,12 @@ impl WorkerEngine {
                 }
             }
         }
+        let travel_active = self
+            .cfg
+            .battery
+            .is_travel_charge_active(chrono::Utc::now().timestamp());
         if self.cfg.battery.enabled
-            && !self.cfg.battery.one_time_full_charge
+            && !travel_active
             && bat.ac_connected
             && bat.charge_percent >= self.cfg.battery.stop_threshold_pct
         {
@@ -1615,6 +1662,10 @@ impl WorkerEngine {
         }
         if let Ok(mut st) = self.state.lock() {
             st.battery_status = Some(bat);
+            if travel_state_synced {
+                st.synced_config_rev = st.synced_config_rev.wrapping_add(1);
+                st.synced_config = Some(self.cfg.clone());
+            }
         }
         true
     }
@@ -1767,7 +1818,9 @@ impl WorkerEngine {
                     || self.cfg.battery.start_threshold_pct != new_cfg.battery.start_threshold_pct
                     || self.cfg.battery.hold_when_shutdown != new_cfg.battery.hold_when_shutdown
                     || self.cfg.battery.one_time_full_charge
-                        != new_cfg.battery.one_time_full_charge;
+                        != new_cfg.battery.one_time_full_charge
+                    || self.cfg.battery.travel_charge_until_utc
+                        != new_cfg.battery.travel_charge_until_utc;
                 let was_allowed = self.bios_writes_allowed;
                 self.cfg = new_cfg;
                 self.bios_writes_allowed = is_bios_write_allowed(
@@ -1971,11 +2024,29 @@ impl WorkerEngine {
                     .sync_battery_service_config(&self.cfg.battery);
                 if let Ok(bat) = self.backends.battery.get_battery_status() {
                     let prev_bat = self.last_committed_battery.clone();
+                    let prev_travel = (
+                        self.cfg.battery.one_time_full_charge,
+                        self.cfg.battery.travel_charge_until_utc,
+                    );
                     let target = self.battery_engine.evaluate(
                         &mut self.cfg.battery,
                         bat.charge_percent,
                         bat.ac_connected,
                     );
+                    if (
+                        self.cfg.battery.one_time_full_charge,
+                        self.cfg.battery.travel_charge_until_utc,
+                    ) != prev_travel
+                    {
+                        let _ = self
+                            .backends
+                            .os
+                            .sync_battery_service_config(&self.cfg.battery);
+                        if let Ok(mut st) = self.state.lock() {
+                            st.synced_config_rev = st.synced_config_rev.wrapping_add(1);
+                            st.synced_config = Some(self.cfg.clone());
+                        }
+                    }
                     if bat.current_mode == target && self.last_applied_bat_mode == Some(target) {
                         record_history_entry(
                             &mut self.change_history,
@@ -1990,6 +2061,7 @@ impl WorkerEngine {
                                 start_threshold_pct: prev_bat.start_threshold_pct,
                                 hold_when_shutdown: prev_bat.hold_when_shutdown,
                                 one_time_full_charge: prev_bat.one_time_full_charge,
+                                travel_charge_until_utc: prev_bat.travel_charge_until_utc,
                                 active_profile_id: prev_bat.active_profile_id,
                             },
                         );
@@ -2020,6 +2092,7 @@ impl WorkerEngine {
                                     start_threshold_pct: prev_bat.start_threshold_pct,
                                     hold_when_shutdown: prev_bat.hold_when_shutdown,
                                     one_time_full_charge: prev_bat.one_time_full_charge,
+                                    travel_charge_until_utc: prev_bat.travel_charge_until_utc,
                                     active_profile_id: prev_bat.active_profile_id,
                                 },
                             );
@@ -2955,7 +3028,11 @@ impl WorkerEngine {
                 } else {
                     tracing::info!(%reason, "Restored normal battery charging (0x2B Auto)");
                 }
-            } else if !self.cfg.battery.one_time_full_charge {
+            } else if !self
+                .cfg
+                .battery
+                .is_travel_charge_active(chrono::Utc::now().timestamp())
+            {
                 let fast_pct = self.backends.os.read_fast_battery_pct().or_else(|| {
                     self.state.lock().ok().and_then(|s| {
                         s.telemetry
@@ -3359,6 +3436,7 @@ impl WorkerEngine {
                 start_threshold_pct,
                 hold_when_shutdown,
                 one_time_full_charge,
+                travel_charge_until_utc,
                 active_profile_id,
             } => {
                 self.cfg.battery.enabled = enabled;
@@ -3367,6 +3445,7 @@ impl WorkerEngine {
                 self.cfg.battery.start_threshold_pct = start_threshold_pct;
                 self.cfg.battery.hold_when_shutdown = hold_when_shutdown;
                 self.cfg.battery.one_time_full_charge = one_time_full_charge;
+                self.cfg.battery.travel_charge_until_utc = travel_charge_until_utc;
                 self.cfg.battery.active_profile_id = active_profile_id;
                 let _ = self
                     .backends
@@ -3565,7 +3644,7 @@ fn format_fan_summary(mode: FanMode, manual_pct: u8) -> String {
 fn format_battery_summary(bat: &BatteryConfig) -> String {
     if !bat.enabled || bat.mode == BatteryChargeMode::Auto {
         "Auto (100%)".to_string()
-    } else if bat.one_time_full_charge {
+    } else if bat.is_travel_charge_active(chrono::Utc::now().timestamp()) {
         format!("{:?} [1x 100%]", bat.mode)
     } else {
         format!(
