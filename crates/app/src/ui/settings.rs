@@ -53,6 +53,9 @@ pub fn render(
 
     // General, Language, Refresh Rate, Tray, Autostart
     card_frame(&theme_snapshot).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("settings.general"), &theme_snapshot);
         ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("common.language"));
@@ -209,6 +212,9 @@ pub fn render(
 
     // Accessibility Card
     card_frame(&theme_snapshot).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("settings.accessibility"), &theme_snapshot);
         ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("settings.font_scale"));
@@ -259,6 +265,9 @@ pub fn render(
 
     // Custom Theme Colors & Copy/Paste Profile Sharing Card
     card_frame(&theme_snapshot).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("settings.custom_theme"), &theme_snapshot);
         ui.add_space(4.0);
 
@@ -283,27 +292,14 @@ pub fn render(
         ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("settings.theme_name"));
             if ui
-                .text_edit_singleline(&mut cfg.general.custom_theme.name)
+                .add(
+                    egui::TextEdit::singleline(&mut cfg.general.custom_theme.name)
+                        .desired_width((card_w * 0.34).clamp(130.0, 180.0))
+                        .clip_text(true),
+                )
                 .changed()
             {
                 on_save();
-            }
-            if feature_toggle_button(
-                ui,
-                &i18n.t("settings.theme_dark_base"),
-                &mut cfg.general.custom_theme.dark_base,
-                &i18n.t("common.enabled"),
-                &theme_snapshot,
-            )
-            .changed()
-            {
-                cfg.general.theme = if cfg.general.custom_theme.dark_base {
-                    "dark".to_string()
-                } else {
-                    "light".to_string()
-                };
-                on_save();
-                actions.theme_changed = true;
             }
             if pill_button(
                 ui,
@@ -334,11 +330,33 @@ pub fn render(
                 draft.status_msg = Some((i18n.t("settings.theme_saved"), false));
             }
         });
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if feature_toggle_button(
+                ui,
+                &i18n.t("settings.theme_dark_base"),
+                &mut cfg.general.custom_theme.dark_base,
+                &i18n.t("common.enabled"),
+                &theme_snapshot,
+            )
+            .changed()
+            {
+                cfg.general.theme = if cfg.general.custom_theme.dark_base {
+                    "dark".to_string()
+                } else {
+                    "light".to_string()
+                };
+                on_save();
+                actions.theme_changed = true;
+            }
+        });
 
         ui.add_space(4.0);
         egui::Grid::new("custom_theme_pickers_grid")
             .num_columns(4)
-            .spacing([12.0, 6.0])
+            .min_col_width(0.0)
+            .max_col_width(((card_w - 110.0) * 0.5).max(90.0))
+            .spacing([10.0, 6.0])
             .show(ui, |ui| {
                 let swatch_style = ColorButtonStyle::Swatch {
                     size: egui::vec2(34.0, 20.0),
@@ -462,17 +480,12 @@ pub fn render(
 
         ui.separator();
 
-        let code_w = (ui.available_width() - 180.0).clamp(180.0, 280.0);
+        let full_input_w = (card_w - 8.0).max(160.0);
         let share_code = cfg.general.custom_theme.encode_share_code();
         ui.horizontal_wrapped(|ui| {
             ui.label(i18n.t("settings.share_code"));
-            let mut preview = share_code.clone();
-            ui.add_enabled(
-                false,
-                egui::TextEdit::singleline(&mut preview).desired_width(code_w),
-            );
             if ui.button(i18n.t("settings.copy_theme")).clicked() {
-                ui.ctx().copy_text(share_code);
+                ui.ctx().copy_text(share_code.clone());
                 draft.status_msg = Some((i18n.t("settings.theme_copied"), false));
             }
             if ui.button(i18n.t("settings.copy_theme_json")).clicked() {
@@ -482,13 +495,22 @@ pub fn render(
                 }
             }
         });
+        let mut preview = share_code;
+        ui.add_enabled(
+            false,
+            egui::TextEdit::singleline(&mut preview)
+                .desired_width(full_input_w)
+                .clip_text(true),
+        );
 
+        ui.add_space(4.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut draft.import_input)
+                .hint_text(i18n.t("settings.import_placeholder"))
+                .desired_width(full_input_w)
+                .clip_text(true),
+        );
         ui.horizontal_wrapped(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut draft.import_input)
-                    .hint_text(i18n.t("settings.import_placeholder"))
-                    .desired_width(code_w),
-            );
             if ui
                 .button(RichText::new(i18n.t("settings.import_theme")).strong())
                 .clicked()
@@ -522,6 +544,9 @@ pub fn render(
 
     // Diagnostic Rotating Logging Card
     card_frame(&theme_snapshot).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("logs.title"), &theme_snapshot);
         let log_dir = cfg.logging.resolved_dir();
         let bytes = total_log_bytes(&log_dir);
@@ -588,11 +613,17 @@ pub fn render(
 
         if let Some(ref zip_path) = st.last_support_bundle_path {
             ui.horizontal_wrapped(|ui| {
-                ui.weak(format!(
-                    "{}: {}",
-                    i18n.t("support_bundle.saved_label"),
-                    zip_path.display()
-                ));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "{}: {}",
+                            i18n.t("support_bundle.saved_label"),
+                            zip_path.display()
+                        ))
+                        .weak(),
+                    )
+                    .wrap(),
+                );
                 if ui
                     .small_button(i18n.t("support_bundle.show_in_folder"))
                     .clicked()
@@ -621,6 +652,9 @@ pub fn render(
 
     // Software Updates Card
     card_frame(&theme_snapshot).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         ui.horizontal_wrapped(|ui| {
             section_title(ui, i18n.t("updates.title"), &theme_snapshot);
             status_badge(
@@ -771,7 +805,14 @@ pub fn render(
             }
             UpdateUiStatus::ReadyToInstall(staged) => {
                 ui.add_space(6.0);
-                ui.monospace(format!("SHA-256: {}", staged.verified_sha256));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("SHA-256: {}", staged.verified_sha256))
+                            .monospace()
+                            .size(11.5),
+                    )
+                    .wrap(),
+                );
                 ui.horizontal_wrapped(|ui| match &staged.signature {
                     UpdateSignatureStatus::AuthenticodeValid {
                         subject,
@@ -810,7 +851,7 @@ pub fn render(
             }
             UpdateUiStatus::Error(msg) => {
                 ui.add_space(4.0);
-                ui.colored_label(err_c, msg);
+                ui.add(egui::Label::new(RichText::new(msg).color(err_c)).wrap());
             }
             UpdateUiStatus::Idle
             | UpdateUiStatus::Checking
@@ -823,6 +864,9 @@ pub fn render(
 
     // PawnIO CPU Die Temperature Sensor Card
     card_frame(&theme_snapshot).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         ui.horizontal_wrapped(|ui| {
             section_title(ui, i18n.t("settings.pawnio_section"), &theme_snapshot);
             if st.pawnio_cpu_active {
@@ -854,6 +898,9 @@ pub fn render(
 
     // Safety & Factory Defaults Reset Card
     card_frame(&theme_snapshot).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("settings.reset_section"), &theme_snapshot);
         ui.add_space(4.0);
         ui.weak(i18n.t("settings.reset_desc"));

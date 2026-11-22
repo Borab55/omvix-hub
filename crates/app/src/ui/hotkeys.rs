@@ -226,7 +226,11 @@ pub fn render(
                 ui.horizontal_wrapped(|ui| {
                     ui.label(i18n.t("hotkeys.custom_command"));
                     if ui
-                        .text_edit_singleline(&mut cfg.hotkeys.custom_command)
+                        .add(
+                            egui::TextEdit::singleline(&mut cfg.hotkeys.custom_command)
+                                .desired_width(210.0)
+                                .clip_text(true),
+                        )
                         .changed()
                     {
                         on_save();
@@ -255,7 +259,11 @@ pub fn render(
                 ui.horizontal_wrapped(|ui| {
                     ui.label(i18n.t("hotkeys.custom_args"));
                     if ui
-                        .text_edit_singleline(&mut cfg.hotkeys.custom_args)
+                        .add(
+                            egui::TextEdit::singleline(&mut cfg.hotkeys.custom_args)
+                                .desired_width(210.0)
+                                .clip_text(true),
+                        )
                         .changed()
                     {
                         cfg.hotkeys

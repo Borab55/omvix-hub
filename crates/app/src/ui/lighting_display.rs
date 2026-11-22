@@ -177,7 +177,11 @@ pub fn render(
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(i18n.t("lighting.profile_name"));
-                ui.text_edit_singleline(&mut draft.profile_name);
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.profile_name)
+                        .desired_width(175.0)
+                        .clip_text(true),
+                );
                 if ui
                     .button(RichText::new(i18n.t("lighting.save_profile")).strong())
                     .clicked()
