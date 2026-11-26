@@ -189,12 +189,22 @@ fn main() -> ExitCode {
 
     let cli = Cli::parse();
     let cfg_path = AppConfig::default_config_path();
-    let mut cfg = AppConfig::load_from_path(&cfg_path).unwrap_or_default();
+    let cfg = match AppConfig::load_from_path(&cfg_path) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!(
+                "Warning: could not parse {} ({err}); using defaults.",
+                cfg_path.display()
+            );
+            AppConfig::default()
+        }
+    };
+    let mut log_cfg = cfg.logging.clone();
     if cli.verbose {
-        cfg.logging.level = LogLevel::Debug;
+        log_cfg.level = LogLevel::Debug;
     }
 
-    let log_handle = match init_logging(&cfg.logging, cli.verbose) {
+    let log_handle = match init_logging(&log_cfg, cli.verbose) {
         Ok(handle) => Some(handle),
         Err(err) => {
             eprintln!("Warning: could not initialize rotating file logger: {err}");
@@ -217,6 +227,12 @@ fn main() -> ExitCode {
         Commands::ExportDiagnostics { out } => match run_diagnostics() {
             Ok(report) => match serde_json::to_string_pretty(&report) {
                 Ok(json) => {
+                    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+                        if let Err(err) = fs::create_dir_all(parent) {
+                            eprintln!("Failed to create directory {}: {err}", parent.display());
+                            return ExitCode::FAILURE;
+                        }
+                    }
                     if let Err(err) = fs::write(&out, json) {
                         eprintln!("Failed to write {}: {err}", out.display());
                         ExitCode::FAILURE
@@ -292,7 +308,10 @@ fn main() -> ExitCode {
         Commands::Fan { action } => match action {
             FanAction::Set { mode, speed } => {
                 let target: FanMode = mode.into();
-                if target == FanMode::Manual && speed.is_none() {
+                if target != FanMode::Manual && speed.is_some() {
+                    eprintln!("Error: --speed is only valid when mode is `manual`.");
+                    ExitCode::FAILURE
+                } else if target == FanMode::Manual && speed.is_none() {
                     eprintln!("Error: --speed <0..=100> is required when mode is `manual`.");
                     ExitCode::FAILURE
                 } else if let Err(msg) = if target == FanMode::Auto {

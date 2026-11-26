@@ -83,6 +83,13 @@ pub fn normalize_exe_name(raw: &str) -> Option<String> {
     }
 
     let mut lower = basename.to_ascii_lowercase();
+    if lower.ends_with(' ')
+        || lower
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
+        return None;
+    }
     if !lower.contains('.') {
         lower.push_str(".exe");
     }
@@ -243,6 +250,9 @@ mod tests {
         assert_eq!(normalize_exe_name("bad."), None);
         assert_eq!(normalize_exe_name("game\n.exe"), None);
         assert_eq!(normalize_exe_name("game\0.exe"), None);
+        assert_eq!(normalize_exe_name("bad:name.exe"), None);
+        assert_eq!(normalize_exe_name("bad*.exe"), None);
+        assert_eq!(normalize_exe_name("bad?.exe"), None);
     }
 
     #[test]

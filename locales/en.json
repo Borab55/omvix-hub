@@ -1,6 +1,5 @@
 {
   "app.title": "Omvix Hub",
-  "app.subtitle": "HP Victus & OMEN Control Center",
   "app.tray.show": "Open Omvix Hub",
   "app.tray.hide": "Hide to Tray",
   "app.tray.quit": "Quit Omvix Hub",
@@ -323,8 +322,6 @@
   "diagnostics.probe_table": "Read-Only WMI Hardware Probes ({count})",
 
   "settings.general": "General Settings",
-  "settings.theme": "Theme",
-  "settings.theme_dark": "Dark Graphite",
   "settings.dock_bottom_right": "Pin window to bottom-right corner",
   "settings.hide_on_focus_loss": "Auto-hide to tray when clicking outside",
   "settings.custom_theme": "Theme & Color Customization",
@@ -333,7 +330,6 @@
   "settings.no_saved_themes": "No saved custom themes yet.",
   "settings.save_theme_btn": "Save Theme",
   "settings.theme_saved": "Custom theme saved.",
-  "settings.delete_theme": "Delete",
   "settings.delete_theme_tooltip": "Delete saved theme",
   "settings.theme_name": "Theme Name",
   "settings.theme_dark_base": "Dark UI Base",
@@ -443,7 +439,6 @@
   "profiles.rules_priority_heading": "Configured Rules (Top = Highest Priority)",
   "profiles.no_rules": "No application rules added yet.",
   "profiles.rule_running_badge": "Running",
-  "profiles.cockpit_active_badge": "App: {name}",
   "profiles.cockpit_auto_badge": "Auto AC/DC",
 
   "history.title": "Recent Changes (Last 10)",

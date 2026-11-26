@@ -278,6 +278,11 @@ impl ThermalSafetyGuard {
         fan_rpms: &[u32],
         now_secs: f64,
     ) -> ThermalGuardDecision {
+        let cpu_c = cpu_c.filter(|t| t.is_finite());
+        let gpu_c = gpu_c.filter(|t| t.is_finite());
+        let chassis_c = chassis_c.filter(|t| t.is_finite());
+        let cpu_power_w = cpu_power_w.filter(|w| w.is_finite());
+
         let cpu_thresh = cfg
             .cpu_threshold_c
             .clamp(MIN_GUARD_CPU_TEMP_C, MAX_GUARD_CPU_TEMP_C) as f32;
@@ -313,13 +318,20 @@ impl ThermalSafetyGuard {
                 || (cpu_c.is_none() && cpu_power_w.is_some_and(|w| w >= 70.0));
             (all_fans_low && heavy_thermal_load, 5.0)
         } else {
-            let any_fan_low =
-                !fan_rpms.is_empty() && fan_rpms.iter().any(|&r| r < MIN_GUARD_FAN_RPM);
-            let warm_under_load = cpu_c.is_some_and(|t| t >= 78.0)
-                || gpu_c.is_some_and(|t| t >= 74.0)
+            let cpu_warm = cpu_c.is_some_and(|t| t >= 78.0)
                 || chassis_c.is_some_and(|t| t >= 48.0)
                 || (cpu_c.is_none() && cpu_power_w.is_some_and(|w| w >= 55.0));
-            (any_fan_low && warm_under_load, 3.0)
+            let gpu_warm = gpu_c.is_some_and(|t| t >= 74.0);
+            let channel_stalled = match fan_rpms {
+                [] => false,
+                [only] => *only < MIN_GUARD_FAN_RPM && (cpu_warm || gpu_warm),
+                [cpu_rpm, gpu_rpm, extra @ ..] => {
+                    (*cpu_rpm < MIN_GUARD_FAN_RPM && cpu_warm)
+                        || (*gpu_rpm < MIN_GUARD_FAN_RPM && gpu_warm)
+                        || ((cpu_warm || gpu_warm) && extra.iter().any(|&r| r < MIN_GUARD_FAN_RPM))
+                }
+            };
+            (channel_stalled, 3.0)
         };
 
         let low_rpm_sustained = track_sustained(
@@ -355,14 +367,26 @@ impl ThermalSafetyGuard {
 
         if self.active {
             let release_cpu_max = (cpu_thresh - 12.0).min(78.0);
-            let fans_low_any =
-                !fan_rpms.is_empty() && fan_rpms.iter().any(|&r| r < MIN_GUARD_FAN_RPM);
+            let cpu_needs_airflow = cpu_c.is_some_and(|t| t > 65.0)
+                || chassis_c.is_some_and(|t| t > 44.0)
+                || (cpu_c.is_none() && cpu_power_w.is_some_and(|w| w >= 45.0));
+            let gpu_needs_airflow = gpu_c.is_some_and(|t| t > 60.0);
+            let relevant_fan_stalled = match fan_rpms {
+                [] => false,
+                [only] => *only < MIN_GUARD_FAN_RPM && (cpu_needs_airflow || gpu_needs_airflow),
+                [cpu_rpm, gpu_rpm, extra @ ..] => {
+                    (*cpu_rpm < MIN_GUARD_FAN_RPM && cpu_needs_airflow)
+                        || (*gpu_rpm < MIN_GUARD_FAN_RPM && gpu_needs_airflow)
+                        || ((cpu_needs_airflow || gpu_needs_airflow)
+                            && extra.iter().any(|&r| r < MIN_GUARD_FAN_RPM))
+                }
+            };
             let has_any_temp = cpu_c.is_some() || gpu_c.is_some() || chassis_c.is_some();
             let cooled = has_any_temp
                 && cpu_c.is_none_or(|t| t <= release_cpu_max)
                 && gpu_c.is_none_or(|t| t <= 74.0)
                 && chassis_c.is_none_or(|t| t <= 46.0)
-                && (fan_mode == FanMode::Auto || !fans_low_any);
+                && (fan_mode == FanMode::Auto || !relevant_fan_stalled);
 
             if track_sustained(&mut self.cooled_since_secs, cooled, now_secs, 5.0) {
                 self.active = false;
@@ -987,5 +1011,45 @@ mod tests {
             );
         }
         assert!(g.is_active());
+    }
+
+    #[test]
+    fn thermal_safety_guard_ignores_idle_gpu_fan_and_nan_temps() {
+        let mut g = ThermalSafetyGuard::new();
+        let cfg = ThermalGuardConfig::default();
+
+        // CPU is warm (82C) with CPU fan spinning well (4300 RPM), while GPU is cool/sleeping
+        // and GPU fan sits at 400 RPM in CustomCurve: must NOT engage emergency Max Fan.
+        for t in [0.0, 2.0, 5.0, 10.0] {
+            assert_eq!(
+                g.evaluate(
+                    cfg,
+                    FanMode::CustomCurve,
+                    Some(82.0),
+                    None,
+                    Some(40.0),
+                    Some(65.0),
+                    &[4300, 400],
+                    t,
+                ),
+                ThermalGuardDecision::NoChange
+            );
+        }
+        assert!(!g.is_active());
+
+        // Non-finite temperatures are ignored safely.
+        assert_eq!(
+            g.evaluate(
+                cfg,
+                FanMode::Manual,
+                Some(f32::NAN),
+                Some(f32::INFINITY),
+                None,
+                None,
+                &[400, 400],
+                20.0,
+            ),
+            ThermalGuardDecision::NoChange
+        );
     }
 }

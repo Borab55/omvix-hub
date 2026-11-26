@@ -96,7 +96,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn en_and_tr_locales_have_exact_key_parity() {
+    fn en_and_tr_locales_have_exact_key_parity_and_placeholders() {
         let en: HashMap<String, String> = serde_json::from_str(EN_JSON).expect("valid en.json");
         let tr: HashMap<String, String> = serde_json::from_str(TR_JSON).expect("valid tr.json");
 
@@ -114,6 +114,30 @@ mod tests {
             extra_in_tr.is_empty(),
             "Extra keys in tr.json: {extra_in_tr:?}"
         );
+
+        let extract_placeholders = |s: &str| -> BTreeSet<String> {
+            let mut out = BTreeSet::new();
+            let mut rest = s;
+            while let Some(start) = rest.find('{') {
+                let after = &rest[start + 1..];
+                if let Some(end) = after.find('}') {
+                    out.insert(after[..end].to_string());
+                    rest = &after[end + 1..];
+                } else {
+                    break;
+                }
+            }
+            out
+        };
+
+        for (key, en_val) in &en {
+            let tr_val = &tr[key];
+            assert_eq!(
+                extract_placeholders(en_val),
+                extract_placeholders(tr_val),
+                "Placeholder mismatch for key `{key}`: en={en_val:?}, tr={tr_val:?}"
+            );
+        }
     }
 
     #[test]

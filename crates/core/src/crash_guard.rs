@@ -95,13 +95,7 @@ impl CrashGuardState {
     }
 
     pub fn record_launch_start(&mut self, now_unix: u64) {
-        self.launches.push(LaunchRecord {
-            started_at_unix: now_unix,
-            hw_applied_at_unix: None,
-            stabilized_at_unix: None,
-            clean_exit_at_unix: None,
-        });
-        while self.launches.len() > MAX_STORED_LAUNCHES {
+        while self.launches.len() >= MAX_STORED_LAUNCHES {
             if let Some(pos) = self
                 .launches
                 .iter()
@@ -112,6 +106,12 @@ impl CrashGuardState {
                 self.launches.remove(0);
             }
         }
+        self.launches.push(LaunchRecord {
+            started_at_unix: now_unix,
+            hw_applied_at_unix: None,
+            stabilized_at_unix: None,
+            clean_exit_at_unix: None,
+        });
     }
 
     pub fn record_hw_applied(&mut self, now_unix: u64) -> bool {
@@ -269,6 +269,26 @@ mod tests {
 
         for i in 0..10u64 {
             g.record_launch_start(400 + i * 10);
+        }
+        assert!(g.is_crash_loop_triggered());
+    }
+
+    #[test]
+    fn crash_loop_still_triggers_after_many_healthy_launches() {
+        let mut g = CrashGuardState::default();
+        for i in 0..12u64 {
+            let t = 1000 + i * 100;
+            g.record_launch_start(t);
+            assert!(g.record_hw_applied(t + 1));
+            assert!(g.check_and_mark_stabilized(t + 65));
+            g.mark_clean_exit(t + 80);
+        }
+        assert!(!g.is_crash_loop_triggered());
+
+        for i in 0..3u64 {
+            let t = 5000 + i * 20;
+            g.record_launch_start(t);
+            assert!(g.record_hw_applied(t + 1));
         }
         assert!(g.is_crash_loop_triggered());
     }

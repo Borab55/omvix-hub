@@ -374,6 +374,12 @@ impl CustomThemeConfig {
                     decoded.apply_legacy_extended_migration();
                 }
             }
+            let trimmed_name = decoded.name.trim();
+            decoded.name = if trimmed_name.is_empty() {
+                "Imported Theme".to_string()
+            } else {
+                trimmed_name.to_string()
+            };
             decoded.card_radius = decoded.card_radius.clamp(0, 14);
             decoded.control_radius = decoded.control_radius.clamp(0, 12);
             decoded.border_width_x10 = decoded.border_width_x10.clamp(5, 25);
@@ -1021,6 +1027,18 @@ impl AppConfig {
                 load_failed: false,
                 load_error: None,
             },
+            Err(OmvixError::Io(io_err)) => {
+                let err_msg = OmvixError::Io(io_err).to_string();
+                ConfigLoadOutcome {
+                    config: Self::default(),
+                    warnings: vec![format!(
+                        "Could not read config.toml due to I/O error ({err_msg}); keeping file untouched and using defaults."
+                    )],
+                    corrupt_backup: None,
+                    load_failed: true,
+                    load_error: Some(err_msg),
+                }
+            }
             Err(err) => {
                 let err_msg = err.to_string();
                 if path.exists() {
@@ -1196,20 +1214,24 @@ impl AppConfig {
 
         self.lighting.brightness_pct = self.lighting.brightness_pct.clamp(0, 100);
         fn sanitize_theme_geometry(theme: &mut CustomThemeConfig) {
-            theme.card_radius = theme.card_radius.clamp(0, 14);
-            theme.control_radius = theme.control_radius.clamp(0, 12);
-            theme.border_width_x10 = theme.border_width_x10.clamp(5, 25);
-        }
-        sanitize_theme_geometry(&mut self.general.custom_theme);
-        for theme in &mut self.general.custom_themes {
             let trimmed = theme.name.trim();
             theme.name = if trimmed.is_empty() {
                 "Custom Theme".to_string()
             } else {
                 trimmed.to_string()
             };
+            theme.card_radius = theme.card_radius.clamp(0, 14);
+            theme.control_radius = theme.control_radius.clamp(0, 12);
+            theme.border_width_x10 = theme.border_width_x10.clamp(5, 25);
+        }
+        sanitize_theme_geometry(&mut self.general.custom_theme);
+        for theme in &mut self.general.custom_themes {
             sanitize_theme_geometry(theme);
         }
+        let mut seen_theme_names = std::collections::HashSet::new();
+        self.general
+            .custom_themes
+            .retain(|t| seen_theme_names.insert(t.name.to_ascii_lowercase()));
         self.general.custom_themes.truncate(24);
 
         self.lighting
@@ -1234,11 +1256,26 @@ impl AppConfig {
         if let Some(ref mut pl2) = self.tuning.pl2_watts {
             *pl2 = (*pl2).clamp(15, 200);
         }
+        if let (Some(pl1), Some(pl2)) = (self.tuning.pl1_watts, self.tuning.pl2_watts) {
+            if pl1 > pl2 {
+                self.tuning.pl2_watts = Some(pl1);
+                warnings.push(format!(
+                    "Raised tuning.pl2_watts from {pl2}W to {pl1}W to stay >= pl1_watts."
+                ));
+            }
+        }
         if let Some(ref mut tcc) = self.tuning.tcc_temp_limit_c {
             *tcc = (*tcc).clamp(70, 100);
         }
         if let Some(ref mut uv) = self.tuning.core_undervolt_mv {
             *uv = (*uv).clamp(-150, 0);
+        }
+
+        if self.auto_profile.ac_refresh_hz == Some(0) {
+            self.auto_profile.ac_refresh_hz = None;
+        }
+        if self.auto_profile.dc_refresh_hz == Some(0) {
+            self.auto_profile.dc_refresh_hz = None;
         }
 
         if self.hotkeys.custom_command.trim().is_empty() {
@@ -1283,6 +1320,9 @@ impl AppConfig {
             match normalize_exe_name(&rule.exe_name) {
                 Some(norm) => {
                     rule.exe_name = norm;
+                    if rule.refresh_hz == Some(0) {
+                        rule.refresh_hz = None;
+                    }
                     if rule.id.trim().is_empty() {
                         rule.id = format!("rule-{}", idx + 1);
                     }
@@ -2109,5 +2149,45 @@ border_width_x10 = 1
         assert!(code.starts_with("OMVIX2|"));
         let decoded = CustomThemeConfig::decode_share_code(&code).unwrap();
         assert_eq!(decoded, t);
+    }
+
+    #[test]
+    fn sanitize_enforces_pl1_le_pl2_clears_zero_hz_and_dedups_themes() {
+        let mut cfg = AppConfig::default();
+        cfg.general.custom_theme.name = "   ".to_string();
+        let mut t1 = CustomThemeConfig::preset_dark_slate();
+        t1.name = "  Neon ".to_string();
+        let mut t2 = CustomThemeConfig::preset_omen_crimson();
+        t2.name = "neon".to_string();
+        cfg.general.custom_themes = vec![t1, t2];
+        cfg.tuning.pl1_watts = Some(90);
+        cfg.tuning.pl2_watts = Some(60);
+        cfg.auto_profile.ac_refresh_hz = Some(0);
+        cfg.auto_profile.dc_refresh_hz = Some(0);
+
+        let warnings = cfg.sanitize();
+        assert_eq!(cfg.general.custom_theme.name, "Custom Theme");
+        assert_eq!(cfg.general.custom_themes.len(), 1);
+        assert_eq!(cfg.general.custom_themes[0].name, "Neon");
+        assert_eq!(cfg.tuning.pl2_watts, Some(90));
+        assert_eq!(cfg.auto_profile.ac_refresh_hz, None);
+        assert_eq!(cfg.auto_profile.dc_refresh_hz, None);
+        assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn quarantine_does_not_rename_on_io_error_directory() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_io_err_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        // Passing a directory path causes fs::read_to_string to return OmvixError::Io.
+        let outcome = AppConfig::load_or_quarantine_corrupt_with_stamp(&dir, "test");
+        assert!(outcome.load_failed);
+        assert!(outcome.corrupt_backup.is_none());
+        assert!(dir.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

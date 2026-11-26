@@ -1,6 +1,5 @@
 {
   "app.title": "Omvix Hub",
-  "app.subtitle": "HP Victus & OMEN Kontrol Merkezi",
   "app.tray.show": "Omvix Hub'ı Aç",
   "app.tray.hide": "Tepsiye Gizle",
   "app.tray.quit": "Omvix Hub'dan Çık",
@@ -323,8 +322,6 @@
   "diagnostics.probe_table": "Salt-Okunur WMI Donanım Kontrolleri ({count})",
 
   "settings.general": "Genel Ayarlar",
-  "settings.theme": "Tema",
-  "settings.theme_dark": "Koyu Grafit",
   "settings.dock_bottom_right": "Pencereyi sağ alt köşeye sabitle",
   "settings.hide_on_focus_loss": "Dışarı tıklayınca otomatik tepsiye gizle",
   "settings.custom_theme": "Tema & Renk Özelleştirme",
@@ -333,7 +330,6 @@
   "settings.no_saved_themes": "Henüz kayıtlı özel tema yok.",
   "settings.save_theme_btn": "Temayı Kaydet",
   "settings.theme_saved": "Özel tema kaydedildi.",
-  "settings.delete_theme": "Sil",
   "settings.delete_theme_tooltip": "Kayıtlı temayı sil",
   "settings.theme_name": "Tema Adı",
   "settings.theme_dark_base": "Koyu Arayüz Tabanı",
@@ -443,7 +439,6 @@
   "profiles.rules_priority_heading": "Kayıtlı Kurallar (Üstteki Öncelikli)",
   "profiles.no_rules": "Henüz uygulama kuralı eklenmedi.",
   "profiles.rule_running_badge": "Çalışıyor",
-  "profiles.cockpit_active_badge": "Uyg: {name}",
   "profiles.cockpit_auto_badge": "Oto AC/DC",
 
   "history.title": "Son Değişiklikler (Son 10)",

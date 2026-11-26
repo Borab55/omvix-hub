@@ -154,8 +154,19 @@ impl FanCurve {
             pt.temp_c = pt.temp_c.clamp(30, 100);
             pt.speed_pct = pt.speed_pct.clamp(0, 100);
         }
-        self.points.sort_by_key(|p| (p.temp_c, p.speed_pct));
-        self.points.truncate(8);
+        self.points
+            .sort_by_key(|p| (p.temp_c, std::cmp::Reverse(p.speed_pct)));
+        self.points.dedup_by_key(|p| p.temp_c);
+        if self.points.len() < 2 {
+            self.points = Self::default().points;
+            return self.points != prev_points || self.hysteresis_c != prev_hyst;
+        }
+        if self.points.len() > 8 {
+            if let Some(hottest) = self.points.pop() {
+                self.points.truncate(7);
+                self.points.push(hottest);
+            }
+        }
 
         let mut running_max = 0u8;
         for pt in &mut self.points {
@@ -173,8 +184,15 @@ impl FanCurve {
 
     /// Evaluates target fan speed percentage with linear interpolation and downward hysteresis.
     /// When temperature drops within `hysteresis_c` of `prev_temp_c`, keeps `prev_speed_pct`
-    /// to avoid rapid fan oscillation. Enforces high-temp safety floor at `>= 80°C`.
+    /// (unless the curve demands an even higher speed) to avoid rapid fan oscillation.
+    /// Enforces high-temp safety floor at `>= 80°C`.
     pub fn evaluate(&self, current_temp_c: f32, prev_temp_c: f32, prev_speed_pct: u8) -> u8 {
+        if !current_temp_c.is_finite() {
+            return prev_speed_pct
+                .clamp(0, 100)
+                .max(FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+        }
+
         let floor_if_hot = |pct: u8| -> u8 {
             if current_temp_c >= FAN_CURVE_SAFETY_FLOOR_TEMP_C as f32 {
                 pct.max(FAN_CURVE_SAFETY_FLOOR_SPEED_PCT)
@@ -190,38 +208,43 @@ impl FanCurve {
         let mut sorted = self.points.clone();
         sorted.sort_by_key(|p| p.temp_c);
 
-        // Downward hysteresis guard: ignore minor cooling jitter.
-        if current_temp_c < prev_temp_c && (prev_temp_c - current_temp_c) < self.hysteresis_c as f32
-        {
-            return floor_if_hot(prev_speed_pct.clamp(0, 100));
-        }
-
         let first = sorted[0];
-        if current_temp_c <= first.temp_c as f32 {
-            return floor_if_hot(first.speed_pct.clamp(0, 100));
-        }
-
         let last = sorted[sorted.len() - 1];
-        if current_temp_c >= last.temp_c as f32 {
-            return floor_if_hot(last.speed_pct.clamp(0, 100));
-        }
-
-        for pair in sorted.windows(2) {
-            let low = pair[0];
-            let high = pair[1];
-            if current_temp_c >= low.temp_c as f32 && current_temp_c <= high.temp_c as f32 {
-                let span = (high.temp_c - low.temp_c) as f32;
-                if span <= f32::EPSILON {
-                    return floor_if_hot(high.speed_pct.clamp(0, 100));
+        let curve_pct = if current_temp_c <= first.temp_c as f32 {
+            first.speed_pct.clamp(0, 100)
+        } else if current_temp_c >= last.temp_c as f32 {
+            last.speed_pct.clamp(0, 100)
+        } else {
+            let mut resolved = prev_speed_pct.clamp(0, 100);
+            for pair in sorted.windows(2) {
+                let low = pair[0];
+                let high = pair[1];
+                if current_temp_c >= low.temp_c as f32 && current_temp_c <= high.temp_c as f32 {
+                    let span = (high.temp_c - low.temp_c) as f32;
+                    if span <= f32::EPSILON {
+                        resolved = high.speed_pct.clamp(0, 100);
+                    } else {
+                        let ratio = (current_temp_c - low.temp_c as f32) / span;
+                        let interp = low.speed_pct as f32
+                            + ratio * (high.speed_pct as f32 - low.speed_pct as f32);
+                        resolved = interp.round().clamp(0.0, 100.0) as u8;
+                    }
+                    break;
                 }
-                let ratio = (current_temp_c - low.temp_c as f32) / span;
-                let interp =
-                    low.speed_pct as f32 + ratio * (high.speed_pct as f32 - low.speed_pct as f32);
-                return floor_if_hot(interp.round().clamp(0.0, 100.0) as u8);
             }
+            resolved
+        };
+
+        // Downward hysteresis guard: hold previous higher speed against minor cooling jitter,
+        // without blocking upward ramps if the curve itself demands more airflow.
+        if prev_temp_c.is_finite()
+            && current_temp_c < prev_temp_c
+            && (prev_temp_c - current_temp_c) < self.hysteresis_c as f32
+        {
+            return floor_if_hot(prev_speed_pct.clamp(0, 100).max(curve_pct));
         }
 
-        floor_if_hot(prev_speed_pct.clamp(0, 100))
+        floor_if_hot(curve_pct)
     }
 
     pub fn preset_quiet() -> Self {
@@ -667,6 +690,10 @@ mod tests {
         assert_eq!(curve.evaluate(60.0, 50.0, 40), 60);
         // Minor drop of 2C (< hysteresis 4C) -> stays at 60%
         assert_eq!(curve.evaluate(58.0, 60.0, 60), 60);
+        // Minor drop when previous speed was artificially lower -> still honors curve demand (56% > 20%)
+        assert_eq!(curve.evaluate(58.0, 60.0, 20), 56);
+        // NaN temp stays safe
+        assert!(curve.evaluate(f32::NAN, 60.0, 30) >= FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
         // Drop of 5C (>= hysteresis 4C) -> interpolates down to 50%
         assert_eq!(curve.evaluate(55.0, 60.0, 60), 50);
         // Clamped above maximum
