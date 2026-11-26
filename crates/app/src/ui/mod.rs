@@ -1,3 +1,4 @@
+pub mod appearance;
 pub mod battery;
 pub mod charts;
 pub mod cockpit;
@@ -69,6 +70,7 @@ impl FansPowerSubTab {
 pub enum ExtraSubTab {
     #[default]
     LightingDisplay,
+    Appearance,
     Hotkeys,
     Diagnostics,
     Settings,
@@ -77,7 +79,8 @@ pub enum ExtraSubTab {
 impl ExtraSubTab {
     pub fn next(self) -> Self {
         match self {
-            Self::LightingDisplay => Self::Hotkeys,
+            Self::LightingDisplay => Self::Appearance,
+            Self::Appearance => Self::Hotkeys,
             Self::Hotkeys => Self::Diagnostics,
             Self::Diagnostics => Self::Settings,
             Self::Settings => Self::LightingDisplay,
@@ -87,7 +90,8 @@ impl ExtraSubTab {
     pub fn prev(self) -> Self {
         match self {
             Self::LightingDisplay => Self::Settings,
-            Self::Hotkeys => Self::LightingDisplay,
+            Self::Appearance => Self::LightingDisplay,
+            Self::Hotkeys => Self::Appearance,
             Self::Diagnostics => Self::Hotkeys,
             Self::Settings => Self::Diagnostics,
         }
@@ -218,8 +222,10 @@ mod tests {
         assert_eq!(FansPowerSubTab::Profiles.next(), FansPowerSubTab::Cpu);
         assert_eq!(FansPowerSubTab::Cpu.prev(), FansPowerSubTab::Profiles);
 
-        assert_eq!(ExtraSubTab::LightingDisplay.next(), ExtraSubTab::Hotkeys);
+        assert_eq!(ExtraSubTab::LightingDisplay.next(), ExtraSubTab::Appearance);
+        assert_eq!(ExtraSubTab::Appearance.next(), ExtraSubTab::Hotkeys);
         assert_eq!(ExtraSubTab::Settings.next(), ExtraSubTab::LightingDisplay);
         assert_eq!(ExtraSubTab::LightingDisplay.prev(), ExtraSubTab::Settings);
+        assert_eq!(ExtraSubTab::Appearance.prev(), ExtraSubTab::LightingDisplay);
     }
 }

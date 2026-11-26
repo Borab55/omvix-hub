@@ -453,6 +453,11 @@ fn make_test_engine(
         },
         effective_performance_mode: cfg.thermal_fan.performance_mode,
         effective_fan_mode: cfg.thermal_fan.fan_mode,
+        effective_gpu_fan_mode: if cfg.thermal_fan.link_cpu_gpu_fans {
+            cfg.thermal_fan.fan_mode
+        } else {
+            cfg.thermal_fan.gpu_fan_mode
+        },
         ..SharedState::default()
     };
     let state = Arc::new(Mutex::new(initial_state));
@@ -505,6 +510,7 @@ fn integration_safe_mode_blocks_all_hw_writes_until_exited() {
     ));
     worker.send(WorkerCommand::SetFanMode {
         mode: FanMode::Max,
+        gpu_mode: Some(FanMode::Max),
         manual_speed_pct: None,
         gpu_manual_speed_pct: None,
     });
@@ -529,6 +535,7 @@ fn integration_safe_mode_blocks_all_hw_writes_until_exited() {
     ));
     worker.send(WorkerCommand::SetFanMode {
         mode: FanMode::Manual,
+        gpu_mode: Some(FanMode::Manual),
         manual_speed_pct: Some(70),
         gpu_manual_speed_pct: Some(55),
     });
@@ -562,6 +569,7 @@ fn integration_unknown_board_blocks_bios_writes_until_experimental_approved() {
     engine.handle_command(
         WorkerCommand::SetFanMode {
             mode: FanMode::Max,
+            gpu_mode: Some(FanMode::Max),
             manual_speed_pct: None,
             gpu_manual_speed_pct: None,
         },
@@ -596,6 +604,7 @@ fn integration_unknown_board_blocks_bios_writes_until_experimental_approved() {
     engine.handle_command(
         WorkerCommand::SetFanMode {
             mode: FanMode::Max,
+            gpu_mode: Some(FanMode::Max),
             manual_speed_pct: None,
             gpu_manual_speed_pct: None,
         },
@@ -658,6 +667,7 @@ fn integration_thermal_guard_sustains_engages_max_retries_and_falls_back_to_auto
     // Normal guard engage with physical RPM acceleration, followed by cool release back to CustomCurve
     let mut cfg = AppConfig::default();
     cfg.thermal_fan.fan_mode = FanMode::CustomCurve;
+    cfg.thermal_fan.gpu_fan_mode = FanMode::CustomCurve;
     let healthy_hot = MockHardwareState {
         fail_max_fan: false,
         telemetry_snap: TelemetrySnapshot {
@@ -699,6 +709,7 @@ fn integration_sensor_loss_engages_auto_pauses_keepalive_and_restores_curve() {
     let dir = TempDirGuard::create("sensor_loss");
     let mut cfg = AppConfig::default();
     cfg.thermal_fan.fan_mode = FanMode::CustomCurve;
+    cfg.thermal_fan.gpu_fan_mode = FanMode::CustomCurve;
     cfg.thermal_fan.keep_alive_enabled = true;
 
     let mut mock = MockHardwareState {
@@ -761,6 +772,7 @@ fn integration_change_history_and_undo_reverts_hardware_and_syncs_config() {
     engine.handle_command(
         WorkerCommand::SetFanMode {
             mode: FanMode::Manual,
+            gpu_mode: Some(FanMode::Manual),
             manual_speed_pct: Some(75),
             gpu_manual_speed_pct: Some(55),
         },
@@ -1139,6 +1151,7 @@ fn integration_thermal_guard_release_resolves_custom_curve_target() {
     let dir = TempDirGuard::create("guard_release_curve");
     let mut cfg = AppConfig::default();
     cfg.thermal_fan.fan_mode = FanMode::CustomCurve;
+    cfg.thermal_fan.gpu_fan_mode = FanMode::CustomCurve;
     cfg.thermal_fan.manual_speed_pct = 12;
     cfg.thermal_fan.custom_curve = FanCurvePreset::Aggressive.to_curve();
     cfg.thermal_fan.guard_cpu_temp_c = 85;
@@ -1228,6 +1241,7 @@ fn integration_blocked_and_failed_undo_preserve_config_and_history() {
     let dir = TempDirGuard::create("blocked_failed_undo");
     let mut cfg = AppConfig::default();
     cfg.thermal_fan.fan_mode = FanMode::Max;
+    cfg.thermal_fan.gpu_fan_mode = FanMode::Max;
     cfg.thermal_fan.manual_speed_pct = 50;
 
     let rig = MockRig::new(MockHardwareState::default());
@@ -1239,6 +1253,7 @@ fn integration_blocked_and_failed_undo_preserve_config_and_history() {
     engine.handle_command(
         WorkerCommand::SetFanMode {
             mode: FanMode::Manual,
+            gpu_mode: Some(FanMode::Manual),
             manual_speed_pct: Some(65),
             gpu_manual_speed_pct: Some(45),
         },
@@ -1298,6 +1313,7 @@ fn integration_independent_cpu_and_gpu_fans_manual_and_curves() {
     engine.handle_command(
         WorkerCommand::SetFanMode {
             mode: FanMode::Manual,
+            gpu_mode: Some(FanMode::Manual),
             manual_speed_pct: Some(40),
             gpu_manual_speed_pct: Some(75),
         },
@@ -1319,6 +1335,7 @@ fn integration_independent_cpu_and_gpu_fans_manual_and_curves() {
     engine.handle_command(
         WorkerCommand::SetFanMode {
             mode: FanMode::CustomCurve,
+            gpu_mode: Some(FanMode::CustomCurve),
             manual_speed_pct: None,
             gpu_manual_speed_pct: None,
         },
@@ -1366,4 +1383,96 @@ fn integration_independent_cpu_and_gpu_fans_manual_and_curves() {
     assert_eq!(last.0, FanMode::CustomCurve);
     assert_eq!(last.1, Some(expected_cpu));
     assert_eq!(last.2, Some(expected_gpu_sleep));
+}
+
+#[test]
+fn integration_independent_cpu_and_gpu_fan_modes_mixed_and_auto() {
+    let dir = TempDirGuard::create("mixed_fan_modes");
+    let mut cfg = AppConfig::default();
+    cfg.thermal_fan.link_cpu_gpu_fans = false;
+    cfg.thermal_fan.custom_curve = FanCurvePreset::Quiet.to_curve();
+
+    let mut mock = MockHardwareState::default();
+    mock.telemetry_snap.cpu_temp_c = Some(46.0);
+    mock.telemetry_snap.gpu_temp_c = Some(60.0);
+    mock.telemetry_snap.chassis_temp_c = Some(38.0);
+    let rig = MockRig::new(mock);
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+
+    // Populate telemetry first
+    engine.poll_telemetry_step(1.0, true, false, false);
+
+    // 1. CPU = Auto, GPU = Manual 75% -> dual write uses smart auto curve for CPU and 75% for GPU
+    engine.handle_command(
+        WorkerCommand::SetFanMode {
+            mode: FanMode::Auto,
+            gpu_mode: Some(FanMode::Manual),
+            manual_speed_pct: None,
+            gpu_manual_speed_pct: Some(75),
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    let expected_auto_cpu = FanCurve::preset_ogh_like().evaluate(46.0, 46.0, 0);
+    assert_ne!(expected_auto_cpu, 75);
+    {
+        let st = state.lock().unwrap();
+        assert_eq!(st.effective_fan_mode, FanMode::Auto);
+        assert_eq!(st.effective_gpu_fan_mode, FanMode::Manual);
+    }
+    {
+        let g = rig.inner.lock().unwrap();
+        assert_eq!(
+            g.dual_fan_writes.last().copied(),
+            Some((
+                FanMode::CustomCurve,
+                Some(expected_auto_cpu),
+                Some(75),
+                false
+            ))
+        );
+    }
+
+    // 2. CPU = CustomCurve, GPU = Max -> CPU from curve, GPU = 100%
+    engine.handle_command(
+        WorkerCommand::SetFanMode {
+            mode: FanMode::CustomCurve,
+            gpu_mode: Some(FanMode::Max),
+            manual_speed_pct: None,
+            gpu_manual_speed_pct: None,
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    let expected_curve_cpu = FanCurvePreset::Quiet.to_curve().evaluate(46.0, 46.0, 0);
+    assert_eq!(
+        rig.inner.lock().unwrap().dual_fan_writes.last().copied(),
+        Some((
+            FanMode::CustomCurve,
+            Some(expected_curve_cpu),
+            Some(100),
+            false
+        ))
+    );
+
+    // 3. Reverting both to Auto restores native BIOS Auto (None, None)
+    engine.handle_command(
+        WorkerCommand::SetFanMode {
+            mode: FanMode::Auto,
+            gpu_mode: Some(FanMode::Auto),
+            manual_speed_pct: None,
+            gpu_manual_speed_pct: None,
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    assert_eq!(
+        rig.inner.lock().unwrap().dual_fan_writes.last().copied(),
+        Some((FanMode::Auto, None, None, false))
+    );
 }

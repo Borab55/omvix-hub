@@ -25,10 +25,12 @@ pub struct PerformanceDraftState {
     pub gpu_reboot_dismissed: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_fan_mode_selector(
     ui: &mut Ui,
     cfg: &mut AppConfig,
-    effective_fan: FanMode,
+    effective_mode: FanMode,
+    is_gpu: bool,
     i18n: &I18n,
     t: &CustomThemeConfig,
     on_cmd: &mut dyn FnMut(WorkerCommand),
@@ -41,9 +43,16 @@ pub(crate) fn render_fan_mode_selector(
             (FanMode::Manual, "fan.mode_manual"),
             (FanMode::CustomCurve, "fan.mode_curve"),
         ] {
-            let selected = effective_fan == mode;
+            let selected = effective_mode == mode;
             if pill_button(ui, &i18n.t(key), selected, t).clicked() {
-                cfg.thermal_fan.fan_mode = mode;
+                if cfg.thermal_fan.link_cpu_gpu_fans {
+                    cfg.thermal_fan.fan_mode = mode;
+                    cfg.thermal_fan.gpu_fan_mode = mode;
+                } else if is_gpu {
+                    cfg.thermal_fan.gpu_fan_mode = mode;
+                } else {
+                    cfg.thermal_fan.fan_mode = mode;
+                }
                 on_save();
                 let cpu_pct = cfg.thermal_fan.manual_speed_pct;
                 let gpu_pct = if cfg.thermal_fan.link_cpu_gpu_fans {
@@ -52,7 +61,12 @@ pub(crate) fn render_fan_mode_selector(
                     cfg.thermal_fan.gpu_manual_speed_pct
                 };
                 on_cmd(WorkerCommand::SetFanMode {
-                    mode,
+                    mode: cfg.thermal_fan.fan_mode,
+                    gpu_mode: Some(if cfg.thermal_fan.link_cpu_gpu_fans {
+                        cfg.thermal_fan.fan_mode
+                    } else {
+                        cfg.thermal_fan.gpu_fan_mode
+                    }),
                     manual_speed_pct: Some(cpu_pct),
                     gpu_manual_speed_pct: Some(gpu_pct),
                 });
@@ -483,17 +497,34 @@ pub fn render(
                 .changed()
                 {
                     if cfg.thermal_fan.link_cpu_gpu_fans {
+                        cfg.thermal_fan.gpu_fan_mode = cfg.thermal_fan.fan_mode;
                         cfg.thermal_fan.gpu_manual_speed_pct = cfg.thermal_fan.manual_speed_pct;
                     }
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    if cfg.thermal_fan.link_cpu_gpu_fans {
+                        on_cmd(WorkerCommand::SetFanMode {
+                            mode: cfg.thermal_fan.fan_mode,
+                            gpu_mode: Some(cfg.thermal_fan.fan_mode),
+                            manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                            gpu_manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                        });
+                    }
                 }
             });
         });
         ui.add_space(4.0);
 
-        render_fan_mode_selector(ui, cfg, effective_fan, i18n, t, on_cmd, on_save);
+        render_fan_mode_selector(ui, cfg, effective_fan, false, i18n, t, on_cmd, on_save);
         ui.add_space(6.0);
+
+        if cfg.thermal_fan.fan_mode == FanMode::Auto
+            && !cfg.thermal_fan.link_cpu_gpu_fans
+            && cfg.thermal_fan.gpu_fan_mode != FanMode::Auto
+        {
+            ui.weak(RichText::new(i18n.t("fan.mixed_auto_note")).size(11.0));
+            ui.add_space(4.0);
+        }
 
         if cfg.thermal_fan.fan_mode == FanMode::Manual {
             ui.horizontal_wrapped(|ui| {
@@ -511,6 +542,11 @@ pub fn render(
                     on_save();
                     on_cmd(WorkerCommand::SetFanMode {
                         mode: FanMode::Manual,
+                        gpu_mode: Some(if cfg.thermal_fan.link_cpu_gpu_fans {
+                            FanMode::Manual
+                        } else {
+                            cfg.thermal_fan.gpu_fan_mode
+                        }),
                         manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
                         gpu_manual_speed_pct: Some(if cfg.thermal_fan.link_cpu_gpu_fans {
                             cfg.thermal_fan.manual_speed_pct

@@ -41,6 +41,7 @@ pub enum RevertPayload {
     PerformanceMode(PerformanceMode),
     FanMode {
         mode: FanMode,
+        gpu_mode: FanMode,
         manual_speed_pct: u8,
         gpu_manual_speed_pct: u8,
         custom_curve: FanCurve,
@@ -167,6 +168,7 @@ mod tests {
                 format!("Manual {i}%"),
                 RevertPayload::FanMode {
                     mode: FanMode::Manual,
+                    gpu_mode: FanMode::Auto,
                     manual_speed_pct: i - 1,
                     gpu_manual_speed_pct: i - 1,
                     custom_curve: FanCurve::default(),

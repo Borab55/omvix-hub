@@ -525,48 +525,64 @@ pub fn render(
             .as_deref()
             .unwrap_or(&svc.installed_exe_path);
 
-        egui::Grid::new("battery_service_paths_grid")
-            .num_columns(2)
-            .spacing([14.0, 4.0])
-            .show(ui, |ui| {
-                ui.label(i18n.t("battery.service_name_label"));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("{}  (LocalSystem · AutoStart)", svc.service_name))
-                            .monospace(),
-                    )
-                    .wrap(),
-                );
-                ui.end_row();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(i18n.t("battery.service_name_label")).strong());
+            ui.monospace(format!("{}  (LocalSystem · AutoStart)", svc.service_name));
+        });
 
-                ui.label(i18n.t("battery.service_exe_path"));
-                ui.horizontal_wrapped(|ui| {
-                    ui.add(egui::Label::new(RichText::new(exe_display).monospace()).wrap());
-                    if svc.exe_exists
-                        && ui
-                            .small_button(i18n.t("battery.service_open_folder"))
-                            .clicked()
-                    {
-                        if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
-                            open_folder_in_explorer(dir);
-                        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(i18n.t("battery.service_exe_path")).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if svc.exe_exists
+                    && ui
+                        .push_id("open_svc_exe_dir", |ui| {
+                            ui.small_button(i18n.t("battery.service_open_folder"))
+                        })
+                        .inner
+                        .clicked()
+                {
+                    if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
+                        open_folder_in_explorer(dir);
                     }
-                });
-                ui.end_row();
-
-                ui.label(i18n.t("battery.service_data_path"));
-                ui.horizontal_wrapped(|ui| {
-                    ui.add(egui::Label::new(RichText::new(&svc.data_dir_path).monospace()).wrap());
-                    if svc.data_dir_exists
-                        && ui
-                            .small_button(i18n.t("battery.service_open_folder"))
-                            .clicked()
-                    {
-                        open_folder_in_explorer(Path::new(&svc.data_dir_path));
-                    }
-                });
-                ui.end_row();
+                }
             });
+        });
+        ui.add(
+            egui::Label::new(
+                RichText::new(exe_display)
+                    .monospace()
+                    .size(11.5)
+                    .color(muted_text(t)),
+            )
+            .wrap(),
+        );
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(i18n.t("battery.service_data_path")).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if svc.data_dir_exists
+                    && ui
+                        .push_id("open_svc_data_dir", |ui| {
+                            ui.small_button(i18n.t("battery.service_open_folder"))
+                        })
+                        .inner
+                        .clicked()
+                {
+                    open_folder_in_explorer(Path::new(&svc.data_dir_path));
+                }
+            });
+        });
+        ui.add(
+            egui::Label::new(
+                RichText::new(&svc.data_dir_path)
+                    .monospace()
+                    .size(11.5)
+                    .color(muted_text(t)),
+            )
+            .wrap(),
+        );
 
         ui.add_space(8.0);
         if cfg.battery.enabled

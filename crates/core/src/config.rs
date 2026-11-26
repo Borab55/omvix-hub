@@ -12,8 +12,20 @@ use std::path::{Path, PathBuf};
 
 use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 8;
+pub const CURRENT_CONFIG_VERSION: u32 = 9;
 pub const DEFAULT_TRAVEL_CHARGE_DURATION_SECS: i64 = 12 * 3600;
+
+const fn default_card_radius() -> u8 {
+    6
+}
+
+const fn default_control_radius() -> u8 {
+    5
+}
+
+const fn default_border_width_x10() -> u8 {
+    10
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -32,6 +44,12 @@ pub struct CustomThemeConfig {
     pub status_ok: [u8; 3],
     pub status_warn: [u8; 3],
     pub status_err: [u8; 3],
+    #[serde(default = "default_card_radius")]
+    pub card_radius: u8,
+    #[serde(default = "default_control_radius")]
+    pub control_radius: u8,
+    #[serde(default = "default_border_width_x10")]
+    pub border_width_x10: u8,
 }
 
 impl Default for CustomThemeConfig {
@@ -101,6 +119,9 @@ impl CustomThemeConfig {
             status_ok: [34, 197, 94],
             status_warn: [245, 158, 11],
             status_err: [239, 68, 68],
+            card_radius: default_card_radius(),
+            control_radius: default_control_radius(),
+            border_width_x10: default_border_width_x10(),
         }
     }
 
@@ -128,6 +149,9 @@ impl CustomThemeConfig {
             status_ok: [22, 163, 74],
             status_warn: [217, 119, 6],
             status_err: [220, 38, 38],
+            card_radius: default_card_radius(),
+            control_radius: default_control_radius(),
+            border_width_x10: default_border_width_x10(),
         }
     }
 
@@ -147,6 +171,9 @@ impl CustomThemeConfig {
             status_ok: [34, 197, 94],
             status_warn: [245, 158, 11],
             status_err: [248, 81, 92],
+            card_radius: default_card_radius(),
+            control_radius: default_control_radius(),
+            border_width_x10: default_border_width_x10(),
         }
     }
 
@@ -166,6 +193,9 @@ impl CustomThemeConfig {
             status_ok: [52, 211, 153],
             status_warn: [245, 158, 11],
             status_err: [239, 68, 68],
+            card_radius: default_card_radius(),
+            control_radius: default_control_radius(),
+            border_width_x10: default_border_width_x10(),
         }
     }
 
@@ -185,6 +215,9 @@ impl CustomThemeConfig {
             status_ok: [34, 197, 94],
             status_warn: [245, 158, 11],
             status_err: [244, 63, 94],
+            card_radius: default_card_radius(),
+            control_radius: default_control_radius(),
+            border_width_x10: default_border_width_x10(),
         }
     }
 
@@ -204,6 +237,9 @@ impl CustomThemeConfig {
             status_ok: [74, 222, 128],
             status_warn: [250, 204, 21],
             status_err: [248, 113, 113],
+            card_radius: default_card_radius(),
+            control_radius: default_control_radius(),
+            border_width_x10: 15,
         }
     }
 
@@ -273,23 +309,52 @@ impl CustomThemeConfig {
         } else {
             clean_name
         };
-        format!(
-            "OMVIX2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            mode,
-            rgb_to_hex(self.accent),
-            rgb_to_hex(self.canvas_bg),
-            rgb_to_hex(self.sidebar_bg),
-            rgb_to_hex(self.card_bg),
-            rgb_to_hex(self.card_border),
-            rgb_to_hex(self.text_primary),
-            rgb_to_hex(self.text_muted),
-            rgb_to_hex(self.control_bg),
-            rgb_to_hex(self.control_hover_bg),
-            rgb_to_hex(self.status_ok),
-            rgb_to_hex(self.status_warn),
-            rgb_to_hex(self.status_err),
-            display_name
-        )
+        let card_r = self.card_radius.clamp(0, 14);
+        let ctrl_r = self.control_radius.clamp(0, 12);
+        let border_w = self.border_width_x10.clamp(5, 25);
+        let has_custom_shape = card_r != default_card_radius()
+            || ctrl_r != default_control_radius()
+            || border_w != default_border_width_x10();
+        if has_custom_shape {
+            format!(
+                "OMVIX2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|shape={},{},{}|{}",
+                mode,
+                rgb_to_hex(self.accent),
+                rgb_to_hex(self.canvas_bg),
+                rgb_to_hex(self.sidebar_bg),
+                rgb_to_hex(self.card_bg),
+                rgb_to_hex(self.card_border),
+                rgb_to_hex(self.text_primary),
+                rgb_to_hex(self.text_muted),
+                rgb_to_hex(self.control_bg),
+                rgb_to_hex(self.control_hover_bg),
+                rgb_to_hex(self.status_ok),
+                rgb_to_hex(self.status_warn),
+                rgb_to_hex(self.status_err),
+                card_r,
+                ctrl_r,
+                border_w,
+                display_name
+            )
+        } else {
+            format!(
+                "OMVIX2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                mode,
+                rgb_to_hex(self.accent),
+                rgb_to_hex(self.canvas_bg),
+                rgb_to_hex(self.sidebar_bg),
+                rgb_to_hex(self.card_bg),
+                rgb_to_hex(self.card_border),
+                rgb_to_hex(self.text_primary),
+                rgb_to_hex(self.text_muted),
+                rgb_to_hex(self.control_bg),
+                rgb_to_hex(self.control_hover_bg),
+                rgb_to_hex(self.status_ok),
+                rgb_to_hex(self.status_warn),
+                rgb_to_hex(self.status_err),
+                display_name
+            )
+        }
     }
 
     /// Decodes an `OMVIX2|...`, legacy `OMVIX1|...`, or raw JSON `CustomThemeConfig`.
@@ -309,6 +374,9 @@ impl CustomThemeConfig {
                     decoded.apply_legacy_extended_migration();
                 }
             }
+            decoded.card_radius = decoded.card_radius.clamp(0, 14);
+            decoded.control_radius = decoded.control_radius.clamp(0, 12);
+            decoded.border_width_x10 = decoded.border_width_x10.clamp(5, 25);
             return Ok(decoded);
         }
 
@@ -348,7 +416,29 @@ impl CustomThemeConfig {
             let status_ok = hex_to_rgb(parts[11])?;
             let status_warn = hex_to_rgb(parts[12])?;
             let status_err = hex_to_rgb(parts[13])?;
-            let name = parts[14..].join("|").trim().to_string();
+            let (card_radius, control_radius, border_width_x10, name_start) =
+                if parts.len() >= 16 && parts[14].starts_with("shape=") {
+                    let mut nums = parts[14].trim_start_matches("shape=").split(',');
+                    let parse_u8 = |s: Option<&str>, dflt: u8, lo: u8, hi: u8| -> u8 {
+                        s.and_then(|v| v.parse::<u8>().ok())
+                            .unwrap_or(dflt)
+                            .clamp(lo, hi)
+                    };
+                    (
+                        parse_u8(nums.next(), default_card_radius(), 0, 14),
+                        parse_u8(nums.next(), default_control_radius(), 0, 12),
+                        parse_u8(nums.next(), default_border_width_x10(), 5, 25),
+                        15usize,
+                    )
+                } else {
+                    (
+                        default_card_radius(),
+                        default_control_radius(),
+                        default_border_width_x10(),
+                        14usize,
+                    )
+                };
+            let name = parts[name_start..].join("|").trim().to_string();
             let final_name = if name.is_empty() {
                 "Imported Theme".to_string()
             } else {
@@ -369,6 +459,9 @@ impl CustomThemeConfig {
                 status_ok,
                 status_warn,
                 status_err,
+                card_radius,
+                control_radius,
+                border_width_x10,
             });
         }
 
@@ -408,6 +501,9 @@ impl CustomThemeConfig {
             status_ok,
             status_warn,
             status_err,
+            card_radius: default_card_radius(),
+            control_radius: default_control_radius(),
+            border_width_x10: default_border_width_x10(),
         };
         theme.apply_legacy_extended_migration();
         Ok(theme)
@@ -552,6 +648,7 @@ impl Default for GeneralConfig {
 pub struct ThermalFanConfig {
     pub performance_mode: PerformanceMode,
     pub fan_mode: FanMode,
+    pub gpu_fan_mode: FanMode,
     pub manual_speed_pct: u8,
     pub gpu_manual_speed_pct: u8,
     pub custom_curve: FanCurve,
@@ -569,6 +666,7 @@ impl Default for ThermalFanConfig {
         Self {
             performance_mode: PerformanceMode::Balanced,
             fan_mode: FanMode::Auto,
+            gpu_fan_mode: FanMode::Auto,
             manual_speed_pct: 50,
             gpu_manual_speed_pct: 50,
             custom_curve: FanCurve::default(),
@@ -1000,6 +1098,9 @@ impl AppConfig {
             cfg.thermal_fan.gpu_custom_curve = cfg.thermal_fan.custom_curve.clone();
             cfg.thermal_fan.link_cpu_gpu_fans = false;
         }
+        if cfg.config_version < 9 {
+            cfg.thermal_fan.gpu_fan_mode = cfg.thermal_fan.fan_mode;
+        }
         cfg.config_version = CURRENT_CONFIG_VERSION;
         let warnings = cfg.sanitize();
         Ok((cfg, warnings))
@@ -1094,6 +1195,12 @@ impl AppConfig {
         self.battery.custom_profiles.truncate(24);
 
         self.lighting.brightness_pct = self.lighting.brightness_pct.clamp(0, 100);
+        fn sanitize_theme_geometry(theme: &mut CustomThemeConfig) {
+            theme.card_radius = theme.card_radius.clamp(0, 14);
+            theme.control_radius = theme.control_radius.clamp(0, 12);
+            theme.border_width_x10 = theme.border_width_x10.clamp(5, 25);
+        }
+        sanitize_theme_geometry(&mut self.general.custom_theme);
         for theme in &mut self.general.custom_themes {
             let trimmed = theme.name.trim();
             theme.name = if trimmed.is_empty() {
@@ -1101,6 +1208,7 @@ impl AppConfig {
             } else {
                 trimmed.to_string()
             };
+            sanitize_theme_geometry(theme);
         }
         self.general.custom_themes.truncate(24);
 
@@ -1953,5 +2061,53 @@ points = [
         assert!(!warnings.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v8_to_v9_migration_copies_gpu_fan_mode_and_clamps_theme_shape() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_v8_mig_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let v8 = r#"
+config_version = 8
+
+[thermal_fan]
+fan_mode = "CustomCurve"
+
+[general.custom_theme]
+name = "Wide Shape"
+card_radius = 99
+control_radius = 88
+border_width_x10 = 1
+"#;
+        fs::write(&path, v8).unwrap();
+
+        let (loaded, _warnings) = AppConfig::load_from_path_with_warnings(&path).unwrap();
+        assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(loaded.thermal_fan.fan_mode, FanMode::CustomCurve);
+        assert_eq!(loaded.thermal_fan.gpu_fan_mode, FanMode::CustomCurve);
+        assert_eq!(loaded.general.custom_theme.card_radius, 14);
+        assert_eq!(loaded.general.custom_theme.control_radius, 12);
+        assert_eq!(loaded.general.custom_theme.border_width_x10, 5);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_share_code_roundtrips_custom_radius_and_border() {
+        let mut t = CustomThemeConfig::preset_dark_slate();
+        t.name = "Sharp Neon".to_string();
+        t.card_radius = 2;
+        t.control_radius = 0;
+        t.border_width_x10 = 18;
+        let code = t.encode_share_code();
+        assert!(code.starts_with("OMVIX2|"));
+        let decoded = CustomThemeConfig::decode_share_code(&code).unwrap();
+        assert_eq!(decoded, t);
     }
 }

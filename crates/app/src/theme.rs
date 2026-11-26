@@ -36,6 +36,27 @@ pub fn muted_text(t: &CustomThemeConfig) -> Color32 {
     rgb(t.text_muted)
 }
 
+pub fn card_corner_radius(t: &CustomThemeConfig) -> CornerRadius {
+    CornerRadius::same(t.card_radius.clamp(0, 14))
+}
+
+pub fn compact_card_corner_radius(t: &CustomThemeConfig) -> CornerRadius {
+    CornerRadius::same(t.card_radius.clamp(0, 14).saturating_sub(1))
+}
+
+pub fn control_corner_radius(t: &CustomThemeConfig) -> CornerRadius {
+    CornerRadius::same(t.control_radius.clamp(0, 12))
+}
+
+pub fn border_stroke_width(t: &CustomThemeConfig) -> f32 {
+    let w = f32::from(t.border_width_x10.clamp(5, 25)) / 10.0;
+    if t.is_high_contrast() {
+        w.max(1.5)
+    } else {
+        w
+    }
+}
+
 fn shift_color(c: [u8; 3], delta: i16) -> Color32 {
     let clamp = |v: u8| -> u8 { (v as i16 + delta).clamp(0, 255) as u8 };
     Color32::from_rgb(clamp(c[0]), clamp(c[1]), clamp(c[2]))
@@ -111,11 +132,7 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u
     let muted = rgb(t.text_muted);
     let ctrl_bg = rgb(t.control_bg);
     let ctrl_hover = rgb(t.control_hover_bg);
-    let border_w = if t.is_high_contrast() {
-        1.5_f32
-    } else {
-        1.0_f32
-    };
+    let border_w = border_stroke_width(t);
 
     visuals.panel_fill = canvas;
     visuals.window_fill = canvas;
@@ -170,7 +187,7 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u
     );
     visuals.selection.stroke = Stroke::new(border_w.max(1.2), accent);
 
-    let r = CornerRadius::same(8);
+    let r = control_corner_radius(t);
     visuals.widgets.noninteractive.corner_radius = r;
     visuals.widgets.inactive.corner_radius = r;
     visuals.widgets.hovered.corner_radius = r;
@@ -182,28 +199,20 @@ pub fn apply_theme(ctx: &egui::Context, t: &CustomThemeConfig, font_scale_pct: u
 }
 
 pub fn card_frame(t: &CustomThemeConfig) -> egui::Frame {
-    let border_w = if t.is_high_contrast() {
-        1.5_f32
-    } else {
-        1.0_f32
-    };
+    let border_w = border_stroke_width(t);
     egui::Frame::NONE
         .fill(rgb(t.card_bg))
         .stroke(Stroke::new(border_w, rgb(t.card_border)))
-        .corner_radius(CornerRadius::same(10))
+        .corner_radius(card_corner_radius(t))
         .inner_margin(Margin::same(14))
 }
 
 pub fn compact_card(t: &CustomThemeConfig) -> egui::Frame {
-    let border_w = if t.is_high_contrast() {
-        1.5_f32
-    } else {
-        1.0_f32
-    };
+    let border_w = border_stroke_width(t);
     egui::Frame::NONE
         .fill(rgb(t.card_bg))
         .stroke(Stroke::new(border_w, rgb(t.card_border)))
-        .corner_radius(CornerRadius::same(9))
+        .corner_radius(compact_card_corner_radius(t))
         .inner_margin(Margin::symmetric(10, 6))
 }
 
@@ -217,11 +226,7 @@ pub fn section_title(ui: &mut egui::Ui, text: impl Into<String>, t: &CustomTheme
 
 fn button_palette(selected: bool, t: &CustomThemeConfig) -> (Color32, Stroke, Color32) {
     let accent = accent_color(t);
-    let border_w = if t.is_high_contrast() {
-        1.5_f32
-    } else {
-        1.0_f32
-    };
+    let border_w = border_stroke_width(t);
     if selected {
         if t.is_high_contrast() {
             let fg = if is_bright_color(accent) {
@@ -229,7 +234,11 @@ fn button_palette(selected: bool, t: &CustomThemeConfig) -> (Color32, Stroke, Co
             } else {
                 Color32::WHITE
             };
-            (accent, Stroke::new(2.0_f32, Color32::WHITE), fg)
+            (
+                accent,
+                Stroke::new((border_w + 0.5).max(2.0), Color32::WHITE),
+                fg,
+            )
         } else {
             (
                 Color32::from_rgba_unmultiplied(
@@ -238,7 +247,7 @@ fn button_palette(selected: bool, t: &CustomThemeConfig) -> (Color32, Stroke, Co
                     accent.b(),
                     if t.dark_base { 54 } else { 38 },
                 ),
-                Stroke::new(1.3_f32, accent),
+                Stroke::new((border_w + 0.3).max(1.3), accent),
                 if t.dark_base { Color32::WHITE } else { accent },
             )
         }
@@ -276,7 +285,7 @@ pub fn tile_button(
     let btn = egui::Button::new(rt)
         .fill(fill)
         .stroke(stroke)
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(control_corner_radius(t))
         .truncate();
     ui.scope(|ui| {
         ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
@@ -461,9 +470,10 @@ pub fn mode_tile_button(
         } else {
             rgb(t.control_bg)
         };
+        let border_w = border_stroke_width(t);
         let stroke = if selected {
             Stroke::new(
-                1.8_f32,
+                (border_w + 0.8).max(1.8),
                 if t.is_high_contrast() {
                     Color32::WHITE
                 } else {
@@ -471,9 +481,9 @@ pub fn mode_tile_button(
                 },
             )
         } else if resp.hovered() {
-            Stroke::new(1.1_f32, accent)
+            Stroke::new((border_w + 0.1).max(1.1), accent)
         } else {
-            Stroke::new(1.0_f32, rgb(t.card_border))
+            Stroke::new(border_w, rgb(t.card_border))
         };
         let fg = if selected {
             if t.is_high_contrast() {
@@ -500,13 +510,9 @@ pub fn mode_tile_button(
             rgb(t.text_primary)
         };
 
-        p.rect_filled(rect, CornerRadius::same(7), fill);
-        p.rect_stroke(
-            rect.shrink(0.5),
-            CornerRadius::same(7),
-            stroke,
-            StrokeKind::Inside,
-        );
+        let r = control_corner_radius(t);
+        p.rect_filled(rect, r, fill);
+        p.rect_stroke(rect.shrink(0.5), r, stroke, StrokeKind::Inside);
 
         let icon_c = pos2(
             rect.center().x,
@@ -572,7 +578,7 @@ pub fn pill_button_enabled(
     let btn = egui::Button::new(rt)
         .fill(fill)
         .stroke(stroke)
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(control_corner_radius(t))
         .wrap_mode(TextWrapMode::Extend);
     let prev_pad = ui.spacing().button_padding;
     ui.spacing_mut().button_padding = vec2(10.0, 4.0);
@@ -710,6 +716,7 @@ fn render_toggle_button(
     }
 
     if ui.is_rect_visible(outer_rect) {
+        let border_w = border_stroke_width(t);
         let (fill, stroke) = if was_active {
             let bg = if t.is_high_contrast() {
                 accent
@@ -721,16 +728,20 @@ fn render_toggle_button(
                     if t.dark_base { 52 } else { 36 },
                 )
             };
-            (bg, Stroke::new(1.3_f32, accent))
+            (bg, Stroke::new((border_w + 0.3).max(1.3), accent))
         } else if resp.hovered() {
-            (rgb(t.control_hover_bg), Stroke::new(1.1_f32, accent))
+            (
+                rgb(t.control_hover_bg),
+                Stroke::new((border_w + 0.1).max(1.1), accent),
+            )
         } else {
-            (rgb(t.control_bg), Stroke::new(1.0_f32, rgb(t.card_border)))
+            (rgb(t.control_bg), Stroke::new(border_w, rgb(t.card_border)))
         };
 
         let p = ui.painter_at(outer_rect);
-        p.rect_filled(btn_rect, CornerRadius::same(8), fill);
-        p.rect_stroke(btn_rect, CornerRadius::same(8), stroke, StrokeKind::Inside);
+        let r = control_corner_radius(t);
+        p.rect_filled(btn_rect, r, fill);
+        p.rect_stroke(btn_rect, r, stroke, StrokeKind::Inside);
 
         let btn_text_pos = pos2(
             btn_rect.left() + (btn_rect.width() - btn_galley.size().x) * 0.5,
@@ -747,10 +758,11 @@ fn render_toggle_button(
                 tag_size,
             );
             let tag_bg = Color32::from_rgba_unmultiplied(ok.r(), ok.g(), ok.b(), 26);
-            p.rect_filled(tag_rect, CornerRadius::same(9), tag_bg);
+            let tag_cr = CornerRadius::same(t.control_radius.clamp(2, 10));
+            p.rect_filled(tag_rect, tag_cr, tag_bg);
             p.rect_stroke(
                 tag_rect,
-                CornerRadius::same(9),
+                tag_cr,
                 Stroke::new(0.8_f32, ok),
                 StrokeKind::Inside,
             );
@@ -836,15 +848,17 @@ pub fn detail_dial_button(
             rgb(t.text_primary)
         };
 
-        p.rect_filled(rect, CornerRadius::same(6), fill);
+        let r = control_corner_radius(t);
+        let border_w = border_stroke_width(t);
+        p.rect_filled(rect, r, fill);
         p.rect_stroke(
             rect.shrink(0.5),
-            CornerRadius::same(6),
+            r,
             Stroke::new(
                 if active || resp.hovered() {
-                    1.3_f32
+                    (border_w + 0.3).max(1.3)
                 } else {
-                    1.0_f32
+                    border_w
                 },
                 stroke_color,
             ),
@@ -888,10 +902,12 @@ pub fn lighting_swatch_button(
     if ui.is_rect_visible(rect) {
         let p = ui.painter_at(rect);
         let inner = rect.shrink(2.2);
+        let inner_r_val = t.control_radius.clamp(0, 12).saturating_sub(1);
+        let inner_r = CornerRadius::same(inner_r_val);
         let solid = zones.iter().all(|z| *z == zones[0]);
         if solid {
             let c = Color32::from_rgb(zones[0].r, zones[0].g, zones[0].b);
-            p.rect_filled(inner, CornerRadius::same(4), c);
+            p.rect_filled(inner, inner_r, c);
         } else {
             let strip_w = inner.width() / 4.0;
             for (idx, z) in zones.iter().enumerate() {
@@ -905,16 +921,16 @@ pub fn lighting_swatch_button(
                     egui::Rect::from_min_max(pos2(x0, inner.top()), pos2(x1, inner.bottom()));
                 let cr = match idx {
                     0 => CornerRadius {
-                        nw: 4,
-                        sw: 4,
+                        nw: inner_r_val,
+                        sw: inner_r_val,
                         ne: 0,
                         se: 0,
                     },
                     3 => CornerRadius {
                         nw: 0,
                         sw: 0,
-                        ne: 4,
-                        se: 4,
+                        ne: inner_r_val,
+                        se: inner_r_val,
                     },
                     _ => CornerRadius::ZERO,
                 };
@@ -930,24 +946,21 @@ pub fn lighting_swatch_button(
         };
         p.rect_stroke(
             inner,
-            CornerRadius::same(4),
+            inner_r,
             Stroke::new(1.0_f32, inner_ring),
             StrokeKind::Inside,
         );
 
+        let border_w = border_stroke_width(t);
         let outer_stroke = if selected {
-            Stroke::new(2.0_f32, accent)
+            Stroke::new((border_w + 1.0).max(2.0), accent)
         } else if resp.hovered() {
-            Stroke::new(1.4_f32, accent)
+            Stroke::new((border_w + 0.4).max(1.4), accent)
         } else {
-            Stroke::new(1.0_f32, rgb(t.card_border))
+            Stroke::new(border_w, rgb(t.card_border))
         };
-        p.rect_stroke(
-            rect.shrink(0.5),
-            CornerRadius::same(6),
-            outer_stroke,
-            StrokeKind::Inside,
-        );
+        let outer_r = control_corner_radius(t);
+        p.rect_stroke(rect.shrink(0.5), outer_r, outer_stroke, StrokeKind::Inside);
     }
 
     resp.on_hover_text(tooltip)
@@ -1008,15 +1021,17 @@ pub fn lighting_profile_button(
         } else {
             rgb(t.control_bg)
         };
-        p.rect_filled(rect, CornerRadius::same(7), fill);
+        let outer_r = control_corner_radius(t);
+        let cap_r_val = t.control_radius.clamp(0, 12).saturating_sub(1);
+        p.rect_filled(rect, outer_r, fill);
 
         let cap_rect = egui::Rect::from_min_max(
             pos2(rect.left() + 1.5, rect.top() + 1.5),
             pos2(rect.right() - 1.5, rect.top() + 1.5 + cap_h),
         );
         let cap_radius = CornerRadius {
-            nw: 5,
-            ne: 5,
+            nw: cap_r_val,
+            ne: cap_r_val,
             sw: 0,
             se: 0,
         };
@@ -1037,14 +1052,14 @@ pub fn lighting_profile_button(
                     egui::Rect::from_min_max(pos2(x0, cap_rect.top()), pos2(x1, cap_rect.bottom()));
                 let cr = match idx {
                     0 => CornerRadius {
-                        nw: 5,
+                        nw: cap_r_val,
                         ne: 0,
                         sw: 0,
                         se: 0,
                     },
                     3 => CornerRadius {
                         nw: 0,
-                        ne: 5,
+                        ne: cap_r_val,
                         sw: 0,
                         se: 0,
                     },
@@ -1063,19 +1078,15 @@ pub fn lighting_profile_button(
             Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0, 0, 0, sep_alpha)),
         );
 
+        let border_w = border_stroke_width(t);
         let outer_stroke = if selected {
-            Stroke::new(1.8_f32, accent)
+            Stroke::new((border_w + 0.8).max(1.8), accent)
         } else if resp.hovered() {
-            Stroke::new(1.3_f32, accent)
+            Stroke::new((border_w + 0.3).max(1.3), accent)
         } else {
-            Stroke::new(1.0_f32, rgb(t.card_border))
+            Stroke::new(border_w, rgb(t.card_border))
         };
-        p.rect_stroke(
-            rect.shrink(0.5),
-            CornerRadius::same(7),
-            outer_stroke,
-            StrokeKind::Inside,
-        );
+        p.rect_stroke(rect.shrink(0.5), outer_r, outer_stroke, StrokeKind::Inside);
 
         let text_center_y = ((cap_rect.bottom() + 0.5) + (rect.bottom() - 2.5)) * 0.5;
         let text_pos = pos2(
@@ -1576,6 +1587,7 @@ pub fn compact_toggle_pill(
 ) -> Response {
     let accent = accent_color(t);
     let muted = muted_text(t);
+    let border_w = border_stroke_width(t);
     let (fill, stroke, text_c) = if active {
         let bg = if t.is_high_contrast() {
             accent
@@ -1598,11 +1610,11 @@ pub fn compact_toggle_pill(
         } else {
             accent
         };
-        (bg, Stroke::new(1.1_f32, accent), fg)
+        (bg, Stroke::new((border_w + 0.1).max(1.1), accent), fg)
     } else {
         (
             rgb(t.control_bg),
-            Stroke::new(0.9_f32, rgb(t.card_border)),
+            Stroke::new((border_w * 0.9).max(0.5), rgb(t.card_border)),
             muted,
         )
     };
@@ -1616,7 +1628,9 @@ pub fn compact_toggle_pill(
         egui::Button::new(rt)
             .fill(fill)
             .stroke(stroke)
-            .corner_radius(CornerRadius::same(10))
+            .corner_radius(CornerRadius::same(
+                t.control_radius.clamp(0, 12).saturating_add(2).min(12),
+            ))
             .wrap_mode(TextWrapMode::Extend),
     );
     ui.spacing_mut().button_padding = prev_pad;
@@ -1626,23 +1640,84 @@ pub fn compact_toggle_pill(
     resp
 }
 
-/// Compact footer button with a custom vector curved undo arrow + label (immune to font glyph gaps).
-pub fn undo_button(ui: &mut Ui, label: &str, t: &CustomThemeConfig) -> Response {
-    let accent = accent_color(t);
-    let text_c = rgb(t.text_primary);
-    let galley = egui::WidgetText::from(egui::RichText::new(label).size(11.5).color(text_c))
-        .into_galley(
-            ui,
-            Some(TextWrapMode::Extend),
-            f32::INFINITY,
-            egui::TextStyle::Button,
-        );
+/// Borderless text link button for the compact cockpit footer (no outer box/border).
+pub fn footer_text_button(
+    ui: &mut Ui,
+    label: &str,
+    font_size: f32,
+    base_color: Color32,
+    hover_color: Color32,
+) -> Response {
+    let galley =
+        egui::WidgetText::from(egui::RichText::new(label).size(font_size).color(base_color))
+            .into_galley(
+                ui,
+                Some(TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Button,
+            );
 
-    let pad_x = 8.0_f32;
+    let pad = vec2(4.0, 2.0);
+    let size = vec2(
+        (galley.size().x + pad.x * 2.0).ceil(),
+        (galley.size().y + pad.y * 2.0).ceil().max(20.0),
+    );
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter_at(rect);
+        let fg = if resp.hovered() {
+            hover_color
+        } else {
+            base_color
+        };
+        let paint_galley = if resp.hovered() {
+            egui::WidgetText::from(egui::RichText::new(label).size(font_size).color(fg))
+                .into_galley(
+                    ui,
+                    Some(TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                )
+        } else {
+            galley
+        };
+        let text_pos = pos2(
+            rect.left() + pad.x,
+            rect.center().y - paint_galley.size().y * 0.5,
+        );
+        p.galley(text_pos, paint_galley, fg);
+    }
+
+    resp
+}
+
+/// Borderless footer undo button with a custom vector curved undo arrow + label (no outer box/border).
+pub fn undo_text_button(
+    ui: &mut Ui,
+    label: &str,
+    font_size: f32,
+    base_color: Color32,
+    t: &CustomThemeConfig,
+) -> Response {
+    let accent = accent_color(t);
+    let probe_galley =
+        egui::WidgetText::from(egui::RichText::new(label).size(font_size).color(base_color))
+            .into_galley(
+                ui,
+                Some(TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Button,
+            );
+
+    let pad_x = 4.0_f32;
     let icon_w = 12.0_f32;
     let gap = 5.0_f32;
-    let width = (pad_x * 2.0 + icon_w + gap + galley.size().x).ceil();
-    let height = 22.0_f32;
+    let width = (pad_x * 2.0 + icon_w + gap + probe_galley.size().x).ceil();
+    let height = (probe_galley.size().y + 4.0).ceil().max(20.0);
 
     let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     if resp.hovered() {
@@ -1651,23 +1726,18 @@ pub fn undo_button(ui: &mut Ui, label: &str, t: &CustomThemeConfig) -> Response 
 
     if ui.is_rect_visible(rect) {
         let p = ui.painter_at(rect);
-        let fill = if resp.hovered() {
-            rgb(t.control_hover_bg)
+        let fg = if resp.hovered() { accent } else { base_color };
+        let galley = if resp.hovered() {
+            egui::WidgetText::from(egui::RichText::new(label).size(font_size).color(fg))
+                .into_galley(
+                    ui,
+                    Some(TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                )
         } else {
-            rgb(t.control_bg)
+            probe_galley
         };
-        let border_c = if resp.hovered() {
-            accent
-        } else {
-            rgb(t.card_border)
-        };
-        p.rect_filled(rect, CornerRadius::same(7), fill);
-        p.rect_stroke(
-            rect.shrink(0.5),
-            CornerRadius::same(7),
-            Stroke::new(if resp.hovered() { 1.2_f32 } else { 1.0_f32 }, border_c),
-            StrokeKind::Inside,
-        );
 
         let cx = rect.left() + pad_x + icon_w * 0.5 + 0.5;
         let cy = rect.center().y + 0.5;
@@ -1681,8 +1751,7 @@ pub fn undo_button(ui: &mut Ui, label: &str, t: &CustomThemeConfig) -> Response 
             let a = lerp(start..=end, f);
             pts.push(pos2(cx + r * a.cos(), cy + r * a.sin()));
         }
-        let icon_c = if resp.hovered() { accent } else { text_c };
-        let icon_stroke = Stroke::new(1.4_f32, icon_c);
+        let icon_stroke = Stroke::new(1.4_f32, fg);
         p.add(Shape::line(pts.clone(), icon_stroke));
         if let Some(&tip) = pts.last() {
             p.line_segment([tip, pos2(tip.x + 3.2, tip.y - 1.4)], icon_stroke);
@@ -1693,7 +1762,7 @@ pub fn undo_button(ui: &mut Ui, label: &str, t: &CustomThemeConfig) -> Response 
             rect.left() + pad_x + icon_w + gap,
             rect.center().y - galley.size().y * 0.5,
         );
-        p.galley(text_pos, galley, text_c);
+        p.galley(text_pos, galley, fg);
     }
 
     resp
@@ -1786,13 +1855,9 @@ pub fn saved_theme_chip(
             base_stroke
         };
 
-        p.rect_filled(pill_rect, CornerRadius::same(9), fill);
-        p.rect_stroke(
-            pill_rect.shrink(0.5),
-            CornerRadius::same(9),
-            stroke,
-            StrokeKind::Inside,
-        );
+        let cr = control_corner_radius(t);
+        p.rect_filled(pill_rect, cr, fill);
+        p.rect_stroke(pill_rect.shrink(0.5), cr, stroke, StrokeKind::Inside);
 
         let dot_center = pos2(pill_rect.left() + pad_l + dot_d * 0.5, pill_rect.center().y);
         p.circle_filled(dot_center, dot_d * 0.5, accent_dot);

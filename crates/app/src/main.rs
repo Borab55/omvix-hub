@@ -933,6 +933,7 @@ struct OmvixApp {
     drawer_dock_locked: Option<bool>,
     pending_dock_frames: u8,
     pending_hide_frames: u8,
+    last_applied_main_theme: Option<(CustomThemeConfig, u8)>,
     last_applied_drawer_theme: Option<(CustomThemeConfig, u8)>,
     last_shown_at: Instant,
     prev_focused: bool,
@@ -944,6 +945,7 @@ struct OmvixApp {
     profiles_draft: ui::profiles::ProfilesDraftState,
     battery_draft: ui::battery::BatteryDraftState,
     lighting_draft: ui::lighting_display::LightingDisplayDraftState,
+    appearance_draft: ui::appearance::AppearanceDraftState,
     hotkeys_draft: ui::hotkeys::HotkeysDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
     hotkey_bind_status: ui::hotkeys::HotkeyBindStatus,
@@ -1063,6 +1065,7 @@ impl OmvixApp {
                     TrayAction::SetFan(mode) => {
                         let _ = _worker_clone_for_tray.send(WorkerCommand::SetFanMode {
                             mode,
+                            gpu_mode: Some(mode),
                             manual_speed_pct: None,
                             gpu_manual_speed_pct: None,
                         });
@@ -1117,6 +1120,7 @@ impl OmvixApp {
         } else {
             0
         };
+        let initial_main_theme = (cfg.general.custom_theme.clone(), cfg.general.font_scale_pct);
         let mut app = Self {
             cfg,
             cfg_path,
@@ -1133,6 +1137,7 @@ impl OmvixApp {
             drawer_dock_locked: None,
             pending_dock_frames: dock_initial,
             pending_hide_frames: 0,
+            last_applied_main_theme: Some(initial_main_theme),
             last_applied_drawer_theme: None,
             last_shown_at: Instant::now(),
             prev_focused: true,
@@ -1144,6 +1149,7 @@ impl OmvixApp {
             profiles_draft: ui::profiles::ProfilesDraftState::default(),
             battery_draft: ui::battery::BatteryDraftState::default(),
             lighting_draft: ui::lighting_display::LightingDisplayDraftState::default(),
+            appearance_draft: ui::appearance::AppearanceDraftState::default(),
             hotkeys_draft: ui::hotkeys::HotkeysDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
             hotkey_bind_status: ui::hotkeys::HotkeyBindStatus::Disabled,
@@ -1611,6 +1617,7 @@ impl OmvixApp {
                 AppSignal::TrayFanChanged(mode) => {
                     if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
                         self.cfg.thermal_fan.fan_mode = mode;
+                        self.cfg.thermal_fan.gpu_fan_mode = mode;
                         self.save_config();
                         show_mode_change_osd(
                             &self.i18n.t("osd.fan_mode_title"),
@@ -1734,6 +1741,7 @@ fn worker_command_proxy(worker: &BackgroundWorker) -> Sender<WorkerCommand> {
 fn merge_worker_synced_config(dst: &mut AppConfig, synced: &AppConfig) {
     dst.thermal_fan.performance_mode = synced.thermal_fan.performance_mode;
     dst.thermal_fan.fan_mode = synced.thermal_fan.fan_mode;
+    dst.thermal_fan.gpu_fan_mode = synced.thermal_fan.gpu_fan_mode;
     dst.thermal_fan.manual_speed_pct = synced.thermal_fan.manual_speed_pct;
     dst.thermal_fan.gpu_manual_speed_pct = synced.thermal_fan.gpu_manual_speed_pct;
     dst.thermal_fan.custom_curve = synced.thermal_fan.custom_curve.clone();
@@ -1858,6 +1866,15 @@ impl eframe::App for OmvixApp {
             }
         }
 
+        let main_theme_key = (
+            self.cfg.general.custom_theme.clone(),
+            self.cfg.general.font_scale_pct,
+        );
+        if self.last_applied_main_theme.as_ref() != Some(&main_theme_key) {
+            theme::apply_theme(ctx, &main_theme_key.0, main_theme_key.1);
+            self.last_applied_main_theme = Some(main_theme_key);
+        }
+
         let mut pending_cmds: Vec<WorkerCommand> = Vec::new();
         let mut should_save = false;
         if snapshot_state.synced_config_rev != self.last_seen_config_sync_rev {
@@ -1873,6 +1890,7 @@ impl eframe::App for OmvixApp {
             if snapshot_state.active_app_profile.is_none() {
                 self.cfg.thermal_fan.performance_mode = snapshot_state.effective_performance_mode;
                 self.cfg.thermal_fan.fan_mode = snapshot_state.effective_fan_mode;
+                self.cfg.thermal_fan.gpu_fan_mode = snapshot_state.effective_gpu_fan_mode;
                 should_save = true;
             }
         }
@@ -2008,6 +2026,16 @@ impl eframe::App for OmvixApp {
                     open_extra = res.open_extra_subtab;
                     if res.open_profiles {
                         open_profiles = true;
+                    }
+                    if res.open_updates {
+                        open_extra = Some(ExtraSubTab::Settings);
+                        self.settings_draft.scroll_to_updates = true;
+                        if matches!(
+                            snapshot_state.update_status,
+                            omvix_core::UpdateUiStatus::Idle
+                        ) {
+                            pending_cmds.push(WorkerCommand::CheckForUpdates { silent: false });
+                        }
                     }
                     if res.restart_admin {
                         should_restart_admin = true;
@@ -2166,6 +2194,7 @@ impl eframe::App for OmvixApp {
                                                 ExtraSubTab::LightingDisplay,
                                                 "drawer.sub_lighting_display",
                                             ),
+                                            (ExtraSubTab::Appearance, "drawer.sub_appearance"),
                                             (ExtraSubTab::Hotkeys, "drawer.sub_hotkeys"),
                                             (ExtraSubTab::Diagnostics, "drawer.sub_diagnostics"),
                                             (ExtraSubTab::Settings, "drawer.sub_settings"),
@@ -2280,6 +2309,35 @@ impl eframe::App for OmvixApp {
                                                     &mut mark_save,
                                                 )
                                             }
+                                            ExtraSubTab::Appearance => {
+                                                let res = ui::appearance::render(
+                                                    ui,
+                                                    &mut self.cfg,
+                                                    &self.i18n,
+                                                    &mut self.appearance_draft,
+                                                    &mut mark_save,
+                                                );
+                                                if res.theme_changed {
+                                                    theme::apply_theme(
+                                                        drawer_ctx,
+                                                        &self.cfg.general.custom_theme,
+                                                        self.cfg.general.font_scale_pct,
+                                                    );
+                                                    self.last_applied_drawer_theme = Some((
+                                                        self.cfg.general.custom_theme.clone(),
+                                                        self.cfg.general.font_scale_pct,
+                                                    ));
+                                                    theme::apply_theme(
+                                                        ctx,
+                                                        &self.cfg.general.custom_theme,
+                                                        self.cfg.general.font_scale_pct,
+                                                    );
+                                                    self.last_applied_main_theme = Some((
+                                                        self.cfg.general.custom_theme.clone(),
+                                                        self.cfg.general.font_scale_pct,
+                                                    ));
+                                                }
+                                            }
                                             ExtraSubTab::Hotkeys => ui::hotkeys::render(
                                                 ui,
                                                 &mut self.cfg,
@@ -2316,17 +2374,6 @@ impl eframe::App for OmvixApp {
                                                                 .load(Ordering::Relaxed),
                                                         );
                                                     }
-                                                }
-                                                if res.theme_changed {
-                                                    theme::apply_theme(
-                                                        drawer_ctx,
-                                                        &self.cfg.general.custom_theme,
-                                                        self.cfg.general.font_scale_pct,
-                                                    );
-                                                    self.last_applied_drawer_theme = Some((
-                                                        self.cfg.general.custom_theme.clone(),
-                                                        self.cfg.general.font_scale_pct,
-                                                    ));
                                                 }
                                                 if res.dock_changed
                                                     && self.cfg.general.dock_bottom_right
@@ -2419,6 +2466,7 @@ impl eframe::App for OmvixApp {
             self.profiles_draft = ui::profiles::ProfilesDraftState::default();
             self.battery_draft = ui::battery::BatteryDraftState::default();
             self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();
+            self.appearance_draft = ui::appearance::AppearanceDraftState::default();
             self.hotkeys_draft = ui::hotkeys::HotkeysDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();
             self.last_seen_config_sync_rev = snapshot_state.synced_config_rev;
