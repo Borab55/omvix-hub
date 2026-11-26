@@ -14,6 +14,7 @@ struct ThermalFanState {
     performance_mode: PerformanceMode,
     fan_mode: FanMode,
     manual_speed_pct: u8,
+    gpu_manual_speed_pct: u8,
     allow_zero_rpm: bool,
     max_fan_levels: (u8, u8),
 }
@@ -71,33 +72,59 @@ impl WindowsThermalFanBackend {
                 performance_mode: PerformanceMode::Balanced,
                 fan_mode: FanMode::Auto,
                 manual_speed_pct: 50,
+                gpu_manual_speed_pct: 50,
                 allow_zero_rpm: false,
                 max_fan_levels: (DEFAULT_MAX_FAN_LEVEL, DEFAULT_MAX_FAN_LEVEL),
             }),
         }
     }
 
-    /// Sets the fan mode while passing whether current thermal conditions are cool enough
-    /// to allow 0 RPM / sub-1800 RPM silent manual/curve speeds.
+    /// Sets the fan mode using identical target speeds for CPU and GPU fans.
     pub fn set_fan_mode_with_cool_hint(
         &self,
         mode: FanMode,
         manual_speed_pct: Option<u8>,
         allow_zero_rpm: bool,
     ) -> Result<()> {
+        self.set_dual_fan_mode_with_cool_hint(
+            mode,
+            manual_speed_pct,
+            manual_speed_pct,
+            allow_zero_rpm,
+        )
+    }
+
+    /// Sets the fan mode with independent CPU (`0x2E[0]`) and GPU (`0x2E[1]`) fan speed targets
+    /// while passing whether current thermal conditions are cool enough for sub-1800 / 0 RPM speeds.
+    pub fn set_dual_fan_mode_with_cool_hint(
+        &self,
+        mode: FanMode,
+        cpu_speed_pct: Option<u8>,
+        gpu_speed_pct: Option<u8>,
+        allow_zero_rpm: bool,
+    ) -> Result<()> {
         let scheme = self.detect_scheme();
-        let perf_mode = self
+        let (perf_mode, fallback_cpu, fallback_gpu) = self
             .state
             .lock()
-            .map(|g| g.performance_mode)
-            .unwrap_or(PerformanceMode::Balanced);
+            .map(|g| {
+                (
+                    g.performance_mode,
+                    g.manual_speed_pct,
+                    g.gpu_manual_speed_pct,
+                )
+            })
+            .unwrap_or((PerformanceMode::Balanced, 50, 50));
+        let eff_cpu = cpu_speed_pct.or(Some(fallback_cpu));
+        let eff_gpu = gpu_speed_pct.or(Some(fallback_gpu));
 
         let max_levels = HpWmiBios::with_cached(|bios| {
             let max_levels = Self::query_max_fan_levels(bios);
             Self::apply_fan_commands(
                 bios,
                 mode,
-                manual_speed_pct,
+                eff_cpu,
+                eff_gpu,
                 allow_zero_rpm,
                 max_levels,
                 scheme,
@@ -110,13 +137,17 @@ impl WindowsThermalFanBackend {
             guard.fan_mode = mode;
             guard.max_fan_levels = max_levels;
             guard.allow_zero_rpm = allow_zero_rpm;
-            if let Some(pct) = manual_speed_pct {
+            if let Some(pct) = cpu_speed_pct {
                 guard.manual_speed_pct = pct.clamp(0, 100);
+            }
+            if let Some(pct) = gpu_speed_pct {
+                guard.gpu_manual_speed_pct = pct.clamp(0, 100);
             }
         }
         tracing::info!(
             ?mode,
-            ?manual_speed_pct,
+            ?cpu_speed_pct,
+            ?gpu_speed_pct,
             allow_zero_rpm,
             ?max_levels,
             "Applied fan mode"
@@ -127,7 +158,7 @@ impl WindowsThermalFanBackend {
     /// Refreshes the HP BIOS 120-second user-defined fan state timer with the latest cool hint.
     pub fn keep_alive_tick_with_cool_hint(&self, allow_zero_rpm: bool) -> Result<()> {
         let scheme = self.detect_scheme();
-        let (fan_mode, manual_speed_pct, max_levels, perf_mode) = {
+        let (fan_mode, manual_speed_pct, gpu_manual_speed_pct, max_levels, perf_mode) = {
             let mut guard = self
                 .state
                 .lock()
@@ -136,6 +167,7 @@ impl WindowsThermalFanBackend {
             (
                 guard.fan_mode,
                 guard.manual_speed_pct,
+                guard.gpu_manual_speed_pct,
                 guard.max_fan_levels,
                 guard.performance_mode,
             )
@@ -150,6 +182,7 @@ impl WindowsThermalFanBackend {
                     bios,
                     fan_mode,
                     Some(manual_speed_pct),
+                    Some(gpu_manual_speed_pct),
                     allow_zero_rpm,
                     max_levels,
                     scheme,
@@ -159,6 +192,7 @@ impl WindowsThermalFanBackend {
             tracing::debug!(
                 ?fan_mode,
                 manual_speed_pct,
+                gpu_manual_speed_pct,
                 allow_zero_rpm,
                 "Executed BIOS fan keep-alive tick"
             );
@@ -212,10 +246,12 @@ impl WindowsThermalFanBackend {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_fan_commands(
         bios: &HpWmiBios,
         mode: FanMode,
-        manual_speed_pct: Option<u8>,
+        cpu_speed_pct: Option<u8>,
+        gpu_speed_pct: Option<u8>,
         allow_zero_rpm: bool,
         max_levels: (u8, u8),
         scheme: ThermalProfileScheme,
@@ -235,9 +271,10 @@ impl WindowsThermalFanBackend {
                 Self::write_bios_checked(bios, 0x20008, 0x27, &[0x01, 0x00, 0x00, 0x00])?;
             }
             FanMode::Manual | FanMode::CustomCurve => {
-                let pct = manual_speed_pct.unwrap_or(50);
-                let l1 = smart_manual_wmi_level(pct, max_levels.0, allow_zero_rpm);
-                let l2 = smart_manual_wmi_level(pct, max_levels.1, allow_zero_rpm);
+                let cpu_pct = cpu_speed_pct.unwrap_or(50);
+                let gpu_pct = gpu_speed_pct.unwrap_or(cpu_pct);
+                let l1 = smart_manual_wmi_level(cpu_pct, max_levels.0, allow_zero_rpm);
+                let l2 = smart_manual_wmi_level(gpu_pct, max_levels.1, allow_zero_rpm);
                 let _ = bios.execute(0x20008, 0x10, &[0u8; 4], OutputSize::Size4);
                 Self::write_bios_checked(bios, 0x20008, 0x27, &[0x00, 0x00, 0x00, 0x00])?;
                 Self::write_bios_checked(bios, 0x20008, 0x2E, &[l1, l2, 0x00, 0x00])?;

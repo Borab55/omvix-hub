@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const COMPACT_SIZE: [f32; 2] = [468.0, 728.0];
-const DRAWER_SIZE: [f32; 2] = [632.0, 728.0];
+const COMPACT_SIZE: [f32; 2] = [458.0, 668.0];
+const DRAWER_SIZE: [f32; 2] = [632.0, 668.0];
 
 #[cfg(windows)]
 use omvix_windows::hotkeys::{
@@ -1064,6 +1064,7 @@ impl OmvixApp {
                         let _ = _worker_clone_for_tray.send(WorkerCommand::SetFanMode {
                             mode,
                             manual_speed_pct: None,
+                            gpu_manual_speed_pct: None,
                         });
                         let _ = tray_tx.send(AppSignal::TrayFanChanged(mode));
                         wake_ctx.request_repaint();
@@ -1734,7 +1735,10 @@ fn merge_worker_synced_config(dst: &mut AppConfig, synced: &AppConfig) {
     dst.thermal_fan.performance_mode = synced.thermal_fan.performance_mode;
     dst.thermal_fan.fan_mode = synced.thermal_fan.fan_mode;
     dst.thermal_fan.manual_speed_pct = synced.thermal_fan.manual_speed_pct;
+    dst.thermal_fan.gpu_manual_speed_pct = synced.thermal_fan.gpu_manual_speed_pct;
     dst.thermal_fan.custom_curve = synced.thermal_fan.custom_curve.clone();
+    dst.thermal_fan.gpu_custom_curve = synced.thermal_fan.gpu_custom_curve.clone();
+    dst.thermal_fan.link_cpu_gpu_fans = synced.thermal_fan.link_cpu_gpu_fans;
 
     dst.battery.enabled = synced.battery.enabled;
     dst.battery.mode = synced.battery.mode;
@@ -2128,12 +2132,9 @@ impl eframe::App for OmvixApp {
                                     }
                                     Drawer::FansPower => {
                                         for (sub, key) in [
-                                            (
-                                                FansPowerSubTab::PerformanceFans,
-                                                "drawer.sub_perf_fans",
-                                            ),
+                                            (FansPowerSubTab::Cpu, "drawer.sub_cpu"),
+                                            (FansPowerSubTab::Gpu, "drawer.sub_gpu"),
                                             (FansPowerSubTab::Profiles, "drawer.sub_profiles"),
-                                            (FansPowerSubTab::Tuning, "drawer.sub_cpu_power"),
                                         ] {
                                             if theme::pill_button(
                                                 ui,
@@ -2230,31 +2231,30 @@ impl eframe::App for OmvixApp {
                                             &mut mark_save,
                                         ),
                                         Drawer::FansPower => match self.fans_power_tab {
-                                            FansPowerSubTab::PerformanceFans => {
-                                                ui::performance::render(
-                                                    ui,
-                                                    &mut self.cfg,
-                                                    &snapshot_state,
-                                                    &self.i18n,
-                                                    &mut self.performance_draft,
-                                                    &mut push_cmd,
-                                                    &mut mark_save,
-                                                )
-                                            }
+                                            FansPowerSubTab::Cpu => ui::performance::render(
+                                                ui,
+                                                &mut self.cfg,
+                                                &snapshot_state,
+                                                &self.i18n,
+                                                &mut self.performance_draft,
+                                                &mut push_cmd,
+                                                &mut mark_save,
+                                            ),
+                                            FansPowerSubTab::Gpu => ui::tuning::render(
+                                                ui,
+                                                &mut self.cfg,
+                                                &snapshot_state,
+                                                &self.i18n,
+                                                &mut self.performance_draft,
+                                                &mut push_cmd,
+                                                &mut mark_save,
+                                            ),
                                             FansPowerSubTab::Profiles => ui::profiles::render(
                                                 ui,
                                                 &mut self.cfg,
                                                 &snapshot_state,
                                                 &self.i18n,
                                                 &mut self.profiles_draft,
-                                                &mut push_cmd,
-                                                &mut mark_save,
-                                            ),
-                                            FansPowerSubTab::Tuning => ui::tuning::render(
-                                                ui,
-                                                &mut self.cfg,
-                                                &snapshot_state,
-                                                &self.i18n,
                                                 &mut push_cmd,
                                                 &mut mark_save,
                                             ),

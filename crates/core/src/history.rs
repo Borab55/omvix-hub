@@ -42,7 +42,9 @@ pub enum RevertPayload {
     FanMode {
         mode: FanMode,
         manual_speed_pct: u8,
+        gpu_manual_speed_pct: u8,
         custom_curve: FanCurve,
+        gpu_custom_curve: FanCurve,
     },
     BatteryLimit {
         enabled: bool,
@@ -166,7 +168,9 @@ mod tests {
                 RevertPayload::FanMode {
                     mode: FanMode::Manual,
                     manual_speed_pct: i - 1,
+                    gpu_manual_speed_pct: i - 1,
                     custom_curve: FanCurve::default(),
+                    gpu_custom_curve: FanCurve::default(),
                 },
             );
             assert_eq!(id, Some(u64::from(i)));

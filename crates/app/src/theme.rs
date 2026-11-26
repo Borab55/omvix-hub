@@ -285,6 +285,259 @@ pub fn tile_button(
     .inner
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileIcon {
+    Leaf,
+    Feather,
+    Gauge,
+    Rocket,
+    FanAuto,
+    FanCurve,
+    FanSliders,
+    FanMax,
+}
+
+fn draw_tile_icon(p: &egui::Painter, c: egui::Pos2, icon: TileIcon, color: Color32) {
+    let s = Stroke::new(1.45_f32, color);
+    let thin = Stroke::new(1.15_f32, color);
+    match icon {
+        TileIcon::Leaf => {
+            // Simple leaf outline + midrib stem
+            let pts = vec![
+                pos2(c.x - 5.0, c.y + 4.5),
+                pos2(c.x - 4.5, c.y - 2.0),
+                pos2(c.x + 1.5, c.y - 6.0),
+                pos2(c.x + 5.5, c.y - 5.5),
+                pos2(c.x + 5.0, c.y + 0.5),
+                pos2(c.x + 0.5, c.y + 4.5),
+            ];
+            p.add(Shape::closed_line(pts, s));
+            p.line_segment(
+                [pos2(c.x - 5.8, c.y + 5.5), pos2(c.x + 3.2, c.y - 3.2)],
+                thin,
+            );
+        }
+        TileIcon::Feather => {
+            // Quiet / silent crescent moon + soft wave
+            let steps = 12usize;
+            let mut arc = Vec::with_capacity(steps + 1);
+            for i in 0..=steps {
+                let a = lerp(
+                    -0.35 * std::f32::consts::PI..=1.15 * std::f32::consts::PI,
+                    i as f32 / steps as f32,
+                );
+                arc.push(pos2(c.x + 5.5 * a.cos(), c.y + 5.5 * a.sin()));
+            }
+            p.add(Shape::line(arc, s));
+            p.line_segment(
+                [pos2(c.x + 2.0, c.y - 5.0), pos2(c.x + 4.5, c.y - 5.0)],
+                thin,
+            );
+            p.line_segment(
+                [pos2(c.x + 3.25, c.y - 6.2), pos2(c.x + 3.25, c.y - 3.8)],
+                thin,
+            );
+        }
+        TileIcon::Gauge => {
+            // Speedometer dial arc + needle
+            let steps = 14usize;
+            let mut arc = Vec::with_capacity(steps + 1);
+            for i in 0..=steps {
+                let a = lerp(std::f32::consts::PI..=0.0, i as f32 / steps as f32);
+                arc.push(pos2(c.x + 6.4 * a.cos(), (c.y + 2.2) - 6.4 * a.sin()));
+            }
+            p.add(Shape::line(arc, s));
+            p.line_segment([pos2(c.x, c.y + 2.4), pos2(c.x + 3.4, c.y - 2.6)], s);
+            p.circle_filled(pos2(c.x, c.y + 2.4), 1.5, color);
+        }
+        TileIcon::Rocket => {
+            // Sharp performance bolt / rocket nose
+            let bolt = vec![
+                pos2(c.x + 1.2, c.y - 6.5),
+                pos2(c.x - 4.2, c.y + 0.8),
+                pos2(c.x - 0.3, c.y + 0.8),
+                pos2(c.x - 1.4, c.y + 6.5),
+                pos2(c.x + 4.4, c.y - 0.8),
+                pos2(c.x + 0.4, c.y - 0.8),
+            ];
+            p.add(Shape::closed_line(bolt, s));
+        }
+        TileIcon::FanAuto => {
+            p.circle_stroke(c, 2.0, s);
+            for k in 0..3 {
+                let a = (k as f32) * (std::f32::consts::TAU / 3.0) - 0.5;
+                let b = a + 0.55;
+                p.line_segment(
+                    [
+                        pos2(c.x + 2.2 * a.cos(), c.y + 2.2 * a.sin()),
+                        pos2(c.x + 6.3 * b.cos(), c.y + 6.3 * b.sin()),
+                    ],
+                    s,
+                );
+            }
+        }
+        TileIcon::FanCurve => {
+            // Mini chart axes + rising curve
+            p.line_segment(
+                [pos2(c.x - 5.8, c.y - 5.2), pos2(c.x - 5.8, c.y + 4.8)],
+                thin,
+            );
+            p.line_segment(
+                [pos2(c.x - 5.8, c.y + 4.8), pos2(c.x + 6.0, c.y + 4.8)],
+                thin,
+            );
+            let curve = vec![
+                pos2(c.x - 4.5, c.y + 3.0),
+                pos2(c.x - 1.0, c.y + 1.4),
+                pos2(c.x + 2.2, c.y - 1.8),
+                pos2(c.x + 5.2, c.y - 4.4),
+            ];
+            p.add(Shape::line(curve, s));
+            p.circle_filled(pos2(c.x - 1.0, c.y + 1.4), 1.4, color);
+            p.circle_filled(pos2(c.x + 5.2, c.y - 4.4), 1.4, color);
+        }
+        TileIcon::FanSliders => {
+            p.line_segment(
+                [pos2(c.x - 5.6, c.y - 2.6), pos2(c.x + 5.6, c.y - 2.6)],
+                thin,
+            );
+            p.circle_filled(pos2(c.x + 1.8, c.y - 2.6), 1.9, color);
+            p.line_segment(
+                [pos2(c.x - 5.6, c.y + 2.6), pos2(c.x + 5.6, c.y + 2.6)],
+                thin,
+            );
+            p.circle_filled(pos2(c.x - 2.0, c.y + 2.6), 1.9, color);
+        }
+        TileIcon::FanMax => {
+            p.circle_stroke(c, 6.2, thin);
+            p.circle_filled(c, 1.5, color);
+            for k in 0..4 {
+                let a = (k as f32) * (std::f32::consts::FRAC_PI_2) + 0.3;
+                p.line_segment(
+                    [
+                        pos2(c.x + 1.8 * a.cos(), c.y + 1.8 * a.sin()),
+                        pos2(c.x + 4.8 * a.cos(), c.y + 4.8 * a.sin()),
+                    ],
+                    s,
+                );
+            }
+        }
+    }
+}
+
+/// G-Helper-style compact rounded tile with centered vector icon above the label and crisp active border.
+#[allow(clippy::too_many_arguments)]
+pub fn mode_tile_button(
+    ui: &mut Ui,
+    icon: TileIcon,
+    label: &str,
+    selected: bool,
+    active_border: Option<Color32>,
+    width: f32,
+    height: f32,
+    t: &CustomThemeConfig,
+) -> Response {
+    let accent = active_border.unwrap_or_else(|| accent_color(t));
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter_at(rect);
+        let fill = if selected {
+            if t.is_high_contrast() {
+                accent
+            } else {
+                Color32::from_rgba_unmultiplied(
+                    accent.r(),
+                    accent.g(),
+                    accent.b(),
+                    if t.dark_base { 28 } else { 24 },
+                )
+            }
+        } else if resp.hovered() {
+            rgb(t.control_hover_bg)
+        } else {
+            rgb(t.control_bg)
+        };
+        let stroke = if selected {
+            Stroke::new(
+                1.8_f32,
+                if t.is_high_contrast() {
+                    Color32::WHITE
+                } else {
+                    accent
+                },
+            )
+        } else if resp.hovered() {
+            Stroke::new(1.1_f32, accent)
+        } else {
+            Stroke::new(1.0_f32, rgb(t.card_border))
+        };
+        let fg = if selected {
+            if t.is_high_contrast() {
+                if is_bright_color(accent) {
+                    Color32::BLACK
+                } else {
+                    Color32::WHITE
+                }
+            } else if t.dark_base {
+                Color32::WHITE
+            } else {
+                accent
+            }
+        } else {
+            rgb(t.text_primary)
+        };
+        let icon_color = if selected {
+            if t.is_high_contrast() {
+                fg
+            } else {
+                accent
+            }
+        } else {
+            rgb(t.text_primary)
+        };
+
+        p.rect_filled(rect, CornerRadius::same(7), fill);
+        p.rect_stroke(
+            rect.shrink(0.5),
+            CornerRadius::same(7),
+            stroke,
+            StrokeKind::Inside,
+        );
+
+        let icon_c = pos2(
+            rect.center().x,
+            rect.top() + (height * 0.36).clamp(13.0, 19.0),
+        );
+        draw_tile_icon(&p, icon_c, icon, icon_color);
+
+        let font_sz = ui
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .map(|f| f.size * 0.88)
+            .unwrap_or(11.5);
+        let mut rt = egui::RichText::new(label).size(font_sz).color(fg);
+        if selected {
+            rt = rt.strong();
+        }
+        let galley = egui::WidgetText::from(rt).into_galley(
+            ui,
+            Some(TextWrapMode::Truncate),
+            (width - 8.0).max(24.0),
+            egui::TextStyle::Button,
+        );
+        let text_y = rect.bottom() - (height * 0.25).clamp(10.0, 15.0) - galley.size().y * 0.5;
+        let text_pos = pos2(rect.center().x - galley.size().x * 0.5, text_y);
+        p.galley(text_pos, galley, fg);
+    }
+
+    resp
+}
+
 /// Compact pill-shaped button with crisp border for profile chips and mode toggles.
 pub fn pill_button(
     ui: &mut egui::Ui,
@@ -626,7 +879,7 @@ pub fn lighting_swatch_button(
     t: &CustomThemeConfig,
 ) -> Response {
     let accent = accent_color(t);
-    let size = Vec2::splat(22.0);
+    let size = Vec2::splat(26.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -643,10 +896,13 @@ pub fn lighting_swatch_button(
             let strip_w = inner.width() / 4.0;
             for (idx, z) in zones.iter().enumerate() {
                 let x0 = inner.left() + idx as f32 * strip_w;
-                let strip = egui::Rect::from_min_max(
-                    pos2(x0, inner.top()),
-                    pos2(x0 + strip_w, inner.bottom()),
-                );
+                let x1 = if idx == 3 {
+                    inner.right()
+                } else {
+                    x0 + strip_w
+                };
+                let strip =
+                    egui::Rect::from_min_max(pos2(x0, inner.top()), pos2(x1, inner.bottom()));
                 let cr = match idx {
                     0 => CornerRadius {
                         nw: 4,
@@ -695,6 +951,141 @@ pub fn lighting_swatch_button(
     }
 
     resp.on_hover_text(tooltip)
+}
+
+/// Unified keyboard lighting profile button with a top color cap directly above the profile label.
+pub fn lighting_profile_button(
+    ui: &mut Ui,
+    label: &str,
+    zones: &[RgbColor; 4],
+    selected: bool,
+    four_zone: bool,
+    t: &CustomThemeConfig,
+) -> Response {
+    let accent = accent_color(t);
+    let text_c = rgb(t.text_primary);
+    let btn_size = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Button)
+        .map(|f| f.size * 0.92)
+        .unwrap_or(12.0);
+    let mut rt = egui::RichText::new(label).size(btn_size).color(text_c);
+    if selected {
+        rt = rt.strong();
+    }
+    let galley = egui::WidgetText::from(rt).into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+
+    let cap_h = 5.0_f32;
+    let width = (galley.size().x + 18.0).ceil().max(42.0);
+    let height = 26.0_f32.max((galley.size().y + 12.0).ceil());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter_at(rect);
+        let fill = if selected {
+            let w_accent = if t.is_high_contrast() { 0.28 } else { 0.20 };
+            let mix = |bg: u8, fg: u8| -> u8 {
+                (f32::from(bg) * (1.0 - w_accent) + f32::from(fg) * w_accent)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            Color32::from_rgb(
+                mix(t.control_bg[0], t.accent[0]),
+                mix(t.control_bg[1], t.accent[1]),
+                mix(t.control_bg[2], t.accent[2]),
+            )
+        } else if resp.hovered() {
+            rgb(t.control_hover_bg)
+        } else {
+            rgb(t.control_bg)
+        };
+        p.rect_filled(rect, CornerRadius::same(7), fill);
+
+        let cap_rect = egui::Rect::from_min_max(
+            pos2(rect.left() + 1.5, rect.top() + 1.5),
+            pos2(rect.right() - 1.5, rect.top() + 1.5 + cap_h),
+        );
+        let cap_radius = CornerRadius {
+            nw: 5,
+            ne: 5,
+            sw: 0,
+            se: 0,
+        };
+        let solid = !four_zone || zones.iter().all(|z| *z == zones[0]);
+        if solid {
+            let c = Color32::from_rgb(zones[0].r, zones[0].g, zones[0].b);
+            p.rect_filled(cap_rect, cap_radius, c);
+        } else {
+            let strip_w = cap_rect.width() / 4.0;
+            for (idx, z) in zones.iter().enumerate() {
+                let x0 = cap_rect.left() + idx as f32 * strip_w;
+                let x1 = if idx == 3 {
+                    cap_rect.right()
+                } else {
+                    x0 + strip_w
+                };
+                let seg =
+                    egui::Rect::from_min_max(pos2(x0, cap_rect.top()), pos2(x1, cap_rect.bottom()));
+                let cr = match idx {
+                    0 => CornerRadius {
+                        nw: 5,
+                        ne: 0,
+                        sw: 0,
+                        se: 0,
+                    },
+                    3 => CornerRadius {
+                        nw: 0,
+                        ne: 5,
+                        sw: 0,
+                        se: 0,
+                    },
+                    _ => CornerRadius::ZERO,
+                };
+                p.rect_filled(seg, cr, Color32::from_rgb(z.r, z.g, z.b));
+            }
+        }
+
+        let sep_alpha = if t.dark_base { 90 } else { 36 };
+        p.line_segment(
+            [
+                pos2(cap_rect.left(), cap_rect.bottom()),
+                pos2(cap_rect.right(), cap_rect.bottom()),
+            ],
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0, 0, 0, sep_alpha)),
+        );
+
+        let outer_stroke = if selected {
+            Stroke::new(1.8_f32, accent)
+        } else if resp.hovered() {
+            Stroke::new(1.3_f32, accent)
+        } else {
+            Stroke::new(1.0_f32, rgb(t.card_border))
+        };
+        p.rect_stroke(
+            rect.shrink(0.5),
+            CornerRadius::same(7),
+            outer_stroke,
+            StrokeKind::Inside,
+        );
+
+        let text_center_y = ((cap_rect.bottom() + 0.5) + (rect.bottom() - 2.5)) * 0.5;
+        let text_pos = pos2(
+            rect.center().x - galley.size().x * 0.5,
+            text_center_y - galley.size().y * 0.5,
+        );
+        p.galley(text_pos, galley, text_c);
+    }
+
+    resp.on_hover_text(label)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1098,11 +1489,6 @@ fn paint_pill_badge(
 
 pub fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
     paint_pill_badge(ui, text, color, 12.0, vec2(10.0, 4.0), 12, 1.0, 32)
-}
-
-/// Extra-compact pill badge for dense status strips in the 468px cockpit.
-pub fn compact_status_pill(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
-    paint_pill_badge(ui, text, color, 10.5, vec2(7.0, 2.0), 10, 0.9, 28)
 }
 
 pub fn clickable_status_badge(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {

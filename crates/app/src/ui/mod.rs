@@ -42,25 +42,25 @@ impl Drawer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FansPowerSubTab {
     #[default]
-    PerformanceFans,
+    Cpu,
+    Gpu,
     Profiles,
-    Tuning,
 }
 
 impl FansPowerSubTab {
     pub fn next(self) -> Self {
         match self {
-            Self::PerformanceFans => Self::Profiles,
-            Self::Profiles => Self::Tuning,
-            Self::Tuning => Self::PerformanceFans,
+            Self::Cpu => Self::Gpu,
+            Self::Gpu => Self::Profiles,
+            Self::Profiles => Self::Cpu,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::PerformanceFans => Self::Tuning,
-            Self::Profiles => Self::PerformanceFans,
-            Self::Tuning => Self::Profiles,
+            Self::Cpu => Self::Profiles,
+            Self::Gpu => Self::Cpu,
+            Self::Profiles => Self::Gpu,
         }
     }
 }
@@ -214,18 +214,9 @@ mod tests {
         assert_eq!(Drawer::Monitor.prev(), Drawer::Extra);
         assert_eq!(Drawer::FansPower.prev(), Drawer::Monitor);
 
-        assert_eq!(
-            FansPowerSubTab::PerformanceFans.next(),
-            FansPowerSubTab::Profiles
-        );
-        assert_eq!(
-            FansPowerSubTab::Tuning.next(),
-            FansPowerSubTab::PerformanceFans
-        );
-        assert_eq!(
-            FansPowerSubTab::PerformanceFans.prev(),
-            FansPowerSubTab::Tuning
-        );
+        assert_eq!(FansPowerSubTab::Cpu.next(), FansPowerSubTab::Gpu);
+        assert_eq!(FansPowerSubTab::Profiles.next(), FansPowerSubTab::Cpu);
+        assert_eq!(FansPowerSubTab::Cpu.prev(), FansPowerSubTab::Profiles);
 
         assert_eq!(ExtraSubTab::LightingDisplay.next(), ExtraSubTab::Hotkeys);
         assert_eq!(ExtraSubTab::Settings.next(), ExtraSubTab::LightingDisplay);

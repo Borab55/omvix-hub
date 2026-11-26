@@ -76,18 +76,15 @@ pub fn render(
                 } else {
                     i18n.t("dashboard.power_source_dc")
                 };
-                let hex_suffix = b
-                    .raw_mode_hex
-                    .as_deref()
-                    .map(|h| format!(" [{h}]"))
-                    .unwrap_or_default();
                 let mode_text = match b.current_mode {
+                    BatteryChargeMode::Auto => i18n.t("battery.mode_auto_short"),
+                    BatteryChargeMode::Inhibit => i18n.t("battery.mode_inhibit_short"),
+                    BatteryChargeMode::Hold => i18n.t("battery.mode_hold_short"),
                     BatteryChargeMode::Unknown => i18n.t("battery.mode_unknown"),
-                    other => format!("{other:?}"),
                 };
                 status_badge(
                     ui,
-                    &format!("{src} | {mode_text}{hex_suffix}"),
+                    &format!("{src} | {mode_text}"),
                     if b.charging || b.current_mode == BatteryChargeMode::Unknown {
                         warn_c
                     } else {

@@ -303,11 +303,15 @@ pub fn telemetry_area_chart(
 }
 
 /// Interactive 8-point drag-and-drop fan curve editor rendered cleanly with `egui::Painter`.
+#[allow(clippy::too_many_arguments)]
 pub fn interactive_fan_curve(
     ui: &mut Ui,
+    id_salt: impl std::hash::Hash,
     points: &mut [FanCurvePoint],
     live_temp_c: Option<f32>,
     max_fan_rpm: u32,
+    safety_label: &str,
+    quiet_label: &str,
     t: &CustomThemeConfig,
 ) -> FanCurveEditResult {
     let mut res = FanCurveEditResult::default();
@@ -384,7 +388,7 @@ pub fn interactive_fan_curve(
     painter.text(
         Pos2::new(plot_rect.right() - 4.0, safe_y - 3.0),
         Align2::RIGHT_BOTTOM,
-        "Min 50% @ >= 80°C",
+        safety_label,
         FontId::proportional(9.5),
         Color32::from_rgba_unmultiplied(239, 68, 68, 180),
     );
@@ -403,7 +407,7 @@ pub fn interactive_fan_curve(
     painter.text(
         Pos2::new(plot_rect.left() + 6.0, plot_rect.bottom() - 4.0),
         Align2::LEFT_BOTTOM,
-        "<1800 RPM (0 RPM allowed when cool; auto-guarded)",
+        quiet_label,
         FontId::proportional(10.0),
         Color32::from_rgba_unmultiplied(245, 158, 11, 175),
     );
@@ -447,7 +451,9 @@ pub fn interactive_fan_curve(
     }
 
     // Handle drag selection & point updates via context memory
-    let drag_id = egui::Id::new("omvix_fan_curve_drag_idx");
+    let drag_id = ui
+        .make_persistent_id(id_salt)
+        .with("omvix_fan_curve_drag_idx");
     let mut active_idx: Option<usize> = ui.ctx().data_mut(|d| d.get_temp(drag_id)).unwrap_or(None);
 
     if response.drag_started() {
