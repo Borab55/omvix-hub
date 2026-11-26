@@ -728,7 +728,7 @@ pub fn lighting_profile_button(
         egui::TextStyle::Button,
     );
 
-    let cap_h = 6.0_f32;
+    let cap_h = 5.0_f32;
     let width = (galley.size().x + 18.0).ceil().max(42.0);
     let height = 26.0_f32.max((galley.size().y + 12.0).ceil());
     let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
@@ -824,7 +824,7 @@ pub fn lighting_profile_button(
             StrokeKind::Inside,
         );
 
-        let text_center_y = ((cap_rect.bottom() + 1.0) + (rect.bottom() - 1.0)) * 0.5;
+        let text_center_y = ((cap_rect.bottom() + 0.5) + (rect.bottom() - 2.5)) * 0.5;
         let text_pos = pos2(
             rect.center().x - galley.size().x * 0.5,
             text_center_y - galley.size().y * 0.5,
