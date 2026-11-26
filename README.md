@@ -56,14 +56,14 @@ Ana kokpitin alt kısmındaki 4 sekme, kokpitin solunda açılan detay çekmeces
 
 | Bölüm / Sekme | Ne İşe Yarar? | Öne Çıkan Ayarlar |
 | :--- | :--- | :--- |
-| **Kokpit (Ana Pencere)** | Günlük tek bakışta kontrol | Performans Modu (Eco/Sessiz/Dengeli/Performans), CPU/GPU Sıcaklık & RPM, Fan & Şarj Hızlı Kutucukları, Klavye RGB & Parlaklık, Geri Al / Gizle / Çıkış, Versiyona tıklayınca Güncelleme Kontrolü |
+| **Kokpit (Ana Pencere)** | Günlük tek bakışta kontrol | Performans Modu (Sessiz / Dengeli / Performans), CPU/GPU Sıcaklık & RPM, Fan & Şarj Hızlı Kutucukları, Klavye RGB & Parlaklık (harici `Fn` tuşlarıyla yapılan değişiklikleri otomatik algılar), Geri Al / Gizle / Çıkış, Versiyona tıklayınca Güncelleme Kontrolü |
 | **Grafikler** | Canlı sistem izleme & kayıt | CPU/GPU yükü ve sıcaklığı, kasa sıcaklığı, paket/GPU gücü (EMI & NVML), RAM, Disk/Ağ I/O, CSV dışa aktarma |
 | **Fan + Güç -> CPU** | İşlemci gücü & fan eğrisi | Windows Güç Modu senkronizasyonu, CPU Turbo Boost, PL1 / PL2 Watt sınırları (BIOS varsayılanına sıfırlama dahil), CPU 8 noktalı fan eğrisi & histerezis |
 | **Fan + Güç -> GPU** | Ekran kartı & ikinci fan | RTX GPU saat hızları, VRAM & termal kısma durumu, bağımsız GPU 8 noktalı fan eğrisi, BIOS MUX Grafik Modu (Hybrid / Discrete / Optimus) |
 | **Fan + Güç -> Profiller** | Otomatik kural motoru | Priz/Pil (AC/DC) profilleri, çalışan `.exe` bazlı uygulama profilleri (çıkışta eski ayarları otomatik geri yükleme) |
 | **Batarya** | Pil sağlığı & servis kontrolü | `60%` / `80%` / `90%` / `100%` profilleri, özel batarya profili oluşturma, Tek Seferlik %100 Şarj, Pil Sağlığı geçmiş grafiği, `OmvixBatteryService` yönetimi |
 | **Ekstra -> Görünüm & Tema** | Arayüz kişiselleştirme | Hazır & kayıtlı özel temalar, 12 renk editörü, kart/buton köşe yuvarlaklığı & çerçeve kalınlığı, yazı tipi ölçeği (%85–%130), Yüksek Kontrast |
-| **Ekstra -> Aydınlatma & Ekran** | RGB & Panel yenileme | 4 bölgeli klavye RGB profil kütüphanesi ve desteklenen ekran yenileme hızı (`60Hz` / `144Hz` / `165Hz` vb.) |
+| **Ekstra -> Aydınlatma & Ekran** | RGB & Panel yenileme | 4 bölgeli klavye RGB profil kütüphanesi, harici `Fn` klavye/panel/güç modu senkronizasyonu ve desteklenen ekran yenileme hızı (`60Hz` / `144Hz` / `165Hz` vb.) |
 | **Ekstra -> Kısayollar** | Tuş atamaları | OMEN tuşu davranışı, Genel pencere kısayolu (`Ctrl+Shift+O` vb.) canlı tuş kombinasyonu yakalama, özel uygulama başlatma |
 | **Ekstra -> Tanılama & Geçmiş** | Sorun giderme & Geri Al | Son 10 donanım değişikliği ve tek tık **Geri Al (Undo)**, salt-okunur WMI donanım kontrolleri, JSON dışa aktarma, Destek Paketi (`.zip`) |
 | **Ekstra -> Ayarlar** | Sistem & Güncellemeler | Dil, başlangıç davranışı, log seviyesi & boyut limiti, GitHub release güncelleme kontrolü (SHA-256 doğrulamalı), PawnIO CPU sensör kurulumu |
@@ -121,6 +121,8 @@ flowchart TD
 - **Priz / Pil (AC/DC) Otomasyonu:** Şarj kablosu takıldığında veya çıkarıldığında performans modunu, fan modunu/eğrisini, ekran Hz değerini (`165Hz -> 60Hz`) ve klavye aydınlatmasını otomatik değiştirir.
 - **Uygulama (`.exe`) Profilleri:** Üstten alta öncelik sırasıyla çalışan oyun/uygulama `.exe` dosyalarını takip eder. Uygulama kapandığında **2 ardışık kontrol (debounce)** sonrasında önceki kullanıcı temel ayarlarını (CPU & GPU fan dahil) otomatik geri yükler.
 - **Genel Kısayol & OMEN Tuşu:** Ayarlar -> Kısayollar altından tek tuş kombinasyonuyla (`Ctrl+Shift+A` vb.) pencereyi aç/gizle veya özel `.exe`/kısayol çalıştır.
+- **Harici Donanım Değişikliği Algılama:** Dizüstünün kendi `Fn` ışık kısayollarıyla yapılan klavye arka aydınlatma kapatma/açma ve renk değişiklikleri (`0x20009` salt-okunur doğrulama + `hpqBEvnt` olayı / düşük maliyetli periyodik kontrol), ekran Hz, CPU Turbo Boost ve Windows Güç Modu değişiklikleri otomatik algılanıp arayüze ve ayarlara (`config.toml`) yansıtılır; uyku dönüşü veya priz profili geçişlerinde harici kapatılan ışık zorla geri açılmaz.
+- **Eski `Eco` Ayar Uyumluluğu:** `Eco` ve `Sessiz` (`Quiet`) tek **Sessiz** modunda birleştirilmiştir; eski `config.toml` dosyalarındaki `"Eco"` değerleri hata vermeden otomatik olarak `Quiet` olarak yüklenir.
 
 ---
 
@@ -140,7 +142,7 @@ omvix-cli.exe display list
 omvix-cli.exe tuning status
 
 # Yönetici yetkili donanım kontrolleri
-omvix-cli.exe thermal set balanced       # eco | quiet | balanced | performance
+omvix-cli.exe thermal set balanced       # quiet | balanced | performance
 omvix-cli.exe fan set max                # auto | max
 omvix-cli.exe fan set manual --speed 65  # 0..100 (sadece manual modunda)
 omvix-cli.exe battery status

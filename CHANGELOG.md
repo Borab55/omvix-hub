@@ -6,8 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **External Keyboard & Hardware State Sync (`omvix-core`, `omvix-windows`, `omvix-hub`):**
+  - Added read-only `KeyboardBackend::get_backlight` (`0x20009 / 0x04` power status + `0x20009 / 0x02` 4-zone RGB color table on supported HP firmware, falling back to `None` without guessing unrecognized BIOS response bytes).
+  - Generalized `spawn_hp_wmi_event_listener` on `root\WMI` `hpqBEvnt` notifications and added low-overhead worker synchronization (`PollExternalHardwareState` + periodic polling) for external `Fn` keyboard backlight toggles/colors as well as external display refresh rate, CPU Boost, and Windows Power Mode changes.
+  - Guarded `SystemResumed` and AC/DC Auto-Profile transitions (`keyboard_dimmed_by_auto_profile`) so lights turned off externally by the user remain off instead of being overridden.
 - **Theme Shape & Dedicated Appearance Tab (`omvix-core`, `omvix-hub`):** Moved theme, custom color palette, accessibility font scaling, and High Contrast controls into a dedicated **Extra -> Appearance & Theme** tab (`ExtraSubTab::Appearance`), added customizable **Card Corner Radius**, **Button/Control Radius**, and **Border Width** sliders (`CustomThemeConfig` shape fields, `CURRENT_CONFIG_VERSION = 9`), `OMVIX2|...|shape=...|` share-code roundtrip, and borderless compact cockpit footer actions (`vX.Y.Z` clickable update shortcut, `Undo`, `Hide`, `Exit`).
-- **Regression & Integration Tests (`omvix-core`, `omvix-windows`, `omvix-hub`):** Added tests for `CrashGuardState` eviction after >10 healthy launches, channel-aware `ThermalSafetyGuard` + non-finite temp filtering, `AppConfig::sanitize` PL1<=PL2 & duplicate theme deduplication, I/O error quarantine preservation, locale placeholder parity, duplicate hotkey token rejection, `SetFanMode` blocking during active Thermal Guard, partial `SetFanMode` command coalescing, and App Profile rule-to-rule baseline restoration (160 workspace tests passing).
+- **Regression & Integration Tests (`omvix-core`, `omvix-windows`, `omvix-hub`):** Added tests for `CrashGuardState` eviction after >10 healthy launches, channel-aware `ThermalSafetyGuard` + non-finite temp filtering, `AppConfig::sanitize` PL1<=PL2 & duplicate theme deduplication, I/O error quarantine preservation, locale placeholder parity, duplicate hotkey token rejection, `SetFanMode` blocking during active Thermal Guard, partial `SetFanMode` command coalescing, App Profile rule-to-rule baseline restoration, legacy `"Eco"` -> `Quiet` config deserialization, `0x20009` backlight response & color-table parsing, external keyboard OFF/resume & auto-profile dim preservation, and external OS state sync (166 workspace tests passing).
+
+### Changed
+- **Unified `Eco` + `Quiet` into Single `Quiet` Mode (`omvix-core`, `omvix-cli`, `omvix-hub`, `locales`):** Removed `PerformanceMode::Eco` (`CliPerfMode::Eco`, tray/cockpit/drawer controls, and `mode_eco` locale keys) while keeping `#[serde(alias = "Eco")]` on `PerformanceMode::Quiet` for seamless backwards-compatible loading of existing `config.toml` files without `.bad` quarantine, preserving HP BIOS (`0x50` / `0x02`) and `WindowsPowerOverlay::BestPowerEfficiency` mappings.
 
 ### Fixed
 - **Core & CLI (`omvix-core`, `omvix-cli`):**
