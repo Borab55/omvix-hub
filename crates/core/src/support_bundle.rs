@@ -3,7 +3,7 @@ use crate::error::Result;
 use crate::logging::list_log_files;
 use crate::models::DiagnosticReport;
 use chrono::{Datelike, Local, Timelike, Utc};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -166,8 +166,8 @@ pub fn sanitize_config_for_support(cfg: &AppConfig) -> AppConfig {
     clean
 }
 
-/// Replaces Windows user profile segments (`X:\Users\<name>` or `X:/Users/<name>`) with `<USER>`
-/// to prevent leaking local account names in logs, configs, and diagnostics.
+/// Replaces Windows user profile segments (`X:\Users\<name>`, `X:\\Users\\<name>`, or `X:/Users/<name>`)
+/// with `<USER>` to prevent leaking local account names in logs, TOML configs, and JSON diagnostics.
 pub fn redact_user_paths(input: &str) -> String {
     let bytes = input.as_bytes();
     if bytes.len() < 9 {
@@ -177,42 +177,70 @@ pub fn redact_user_paths(input: &str) -> String {
     let mut idx = 0usize;
 
     while idx < bytes.len() {
-        if idx + 9 <= bytes.len()
-            && bytes[idx].is_ascii_alphabetic()
-            && bytes[idx + 1] == b':'
-            && (bytes[idx + 2] == b'\\' || bytes[idx + 2] == b'/')
-            && bytes[idx + 3..idx + 8].eq_ignore_ascii_case(b"users")
-            && (bytes[idx + 8] == b'\\' || bytes[idx + 8] == b'/')
-        {
-            out.push_str(&input[idx..idx + 9]);
-            idx += 9;
-            let rest = &input[idx..];
-            let seg_len = rest
-                .char_indices()
-                .find(|&(_, ch)| {
-                    matches!(
-                        ch,
-                        '\\' | '/'
-                            | '"'
-                            | '\''
-                            | ','
-                            | ';'
-                            | ')'
-                            | ']'
-                            | '>'
-                            | '\r'
-                            | '\n'
-                            | '\t'
-                            | ' '
-                    )
-                })
-                .map(|(pos, _)| pos)
-                .unwrap_or(rest.len());
-            if seg_len > 0 {
-                out.push_str("<USER>");
-                idx += seg_len;
+        if idx + 2 < bytes.len() && bytes[idx].is_ascii_alphabetic() && bytes[idx + 1] == b':' {
+            let sep1_len = if bytes[idx + 2] == b'\\' {
+                if idx + 3 < bytes.len() && bytes[idx + 3] == b'\\' {
+                    2
+                } else {
+                    1
+                }
+            } else if bytes[idx + 2] == b'/' {
+                1
+            } else {
+                0
+            };
+
+            let users_start = idx + 2 + sep1_len;
+            if sep1_len > 0
+                && users_start + 5 < bytes.len()
+                && bytes[users_start..users_start + 5].eq_ignore_ascii_case(b"users")
+            {
+                let sep2_start = users_start + 5;
+                let sep2_len = if bytes[sep2_start] == b'\\' {
+                    if sep2_start + 1 < bytes.len() && bytes[sep2_start + 1] == b'\\' {
+                        2
+                    } else {
+                        1
+                    }
+                } else if bytes[sep2_start] == b'/' {
+                    1
+                } else {
+                    0
+                };
+
+                if sep2_len > 0 {
+                    let prefix_end = sep2_start + sep2_len;
+                    out.push_str(&input[idx..prefix_end]);
+                    idx = prefix_end;
+                    let rest = &input[idx..];
+                    let seg_len = rest
+                        .char_indices()
+                        .find(|&(_, ch)| {
+                            matches!(
+                                ch,
+                                '\\' | '/'
+                                    | '"'
+                                    | '\''
+                                    | ','
+                                    | ';'
+                                    | ')'
+                                    | ']'
+                                    | '>'
+                                    | '\r'
+                                    | '\n'
+                                    | '\t'
+                                    | ' '
+                            )
+                        })
+                        .map(|(pos, _)| pos)
+                        .unwrap_or(rest.len());
+                    if seg_len > 0 {
+                        out.push_str("<USER>");
+                        idx += seg_len;
+                    }
+                    continue;
+                }
             }
-            continue;
         }
 
         let ch = input[idx..].chars().next().unwrap();
@@ -310,6 +338,7 @@ pub fn build_support_bundle_zip(
         }
     }
 
+    let mut added_logs = false;
     for log_path in list_log_files(&inputs.log_dir)
         .into_iter()
         .take(MAX_ROTATED_LOG_FILES)
@@ -319,9 +348,12 @@ pub fn build_support_bundle_zip(
                 let redacted = redact_user_paths(&log_text);
                 let archive_name = format!("logs/{file_name}");
                 zip.add_file(&archive_name, redacted.as_bytes());
-                manifest.push("logs/*");
+                added_logs = true;
             }
         }
+    }
+    if added_logs {
+        manifest.push("logs/*");
     }
 
     for (archive_name, path, max_bytes) in &inputs.extra_text_files {
@@ -348,12 +380,7 @@ pub fn build_support_bundle_zip(
     let bytes = zip.finish();
     let total_bytes = bytes.len();
 
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp_path = out_path.with_extension("zip.tmp");
-    fs::write(&tmp_path, &bytes)?;
-    fs::rename(&tmp_path, out_path)?;
+    crate::write_bytes_atomically(out_path, &bytes)?;
 
     Ok(SupportBundleSummary {
         output_path: out_path.to_path_buf(),
@@ -365,6 +392,7 @@ pub fn build_support_bundle_zip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -441,9 +469,10 @@ mod tests {
         assert_eq!(clean.hotkeys.custom_args, "<redacted>");
         assert!(clean.logging.log_dir.is_none());
 
-        let msg = r#"Opened "C:\Users\borab\AppData\Roaming\OmvixHub\config.toml" and D:/Users/Ömer/logs/a.log"#;
+        let msg = r#"Opened "C:\Users\borab\AppData\Roaming\OmvixHub\config.toml", JSON "C:\\Users\\borab\\AppData\\Local\\OmvixHub\\log.txt", and D:/Users/Ömer/logs/a.log"#;
         let redacted = redact_user_paths(msg);
         assert!(redacted.contains(r"C:\Users\<USER>\AppData"));
+        assert!(redacted.contains(r"C:\\Users\\<USER>\\AppData\\Local\\OmvixHub"));
         assert!(redacted.contains("D:/Users/<USER>/logs"));
         assert!(!redacted.contains("borab"));
         assert!(!redacted.contains("Ömer"));
@@ -460,6 +489,11 @@ mod tests {
             "INFO | sample log line 0123456789abcdef\n".repeat(20_000)
         );
         fs::write(log_dir.join("omvix.log"), big_log).unwrap();
+        fs::write(
+            log_dir.join("omvix.1.log"),
+            "rotated log C:\\Users\\secretname\\x\n",
+        )
+        .unwrap();
 
         let extra_path = dir.join("svc.log");
         fs::write(&extra_path, "service ok\n").unwrap();
@@ -480,23 +514,25 @@ mod tests {
 
         assert!(out_zip.exists());
         assert!(!out_zip.with_extension("zip.tmp").exists());
-        assert_eq!(summary.file_count, 5); // config, diagnostics placeholder, omvix.log, svc.log, README
+        assert_eq!(summary.file_count, 6); // config, diagnostics placeholder, omvix.log, omvix.1.log, svc.log, README
 
         let raw_zip = fs::read(&out_zip).unwrap();
         let text_lossy = String::from_utf8_lossy(&raw_zip);
         assert!(text_lossy.contains("config_sanitized.toml"));
         assert!(text_lossy.contains("diagnostics.json"));
         assert!(text_lossy.contains("logs/omvix.log"));
+        assert!(text_lossy.contains("logs/omvix.1.log"));
         assert!(text_lossy.contains("logs/svc.log"));
         assert!(text_lossy.contains("README.txt"));
         assert!(text_lossy.contains("C:\\Users\\<USER>\\Desktop\\test"));
+        assert!(!text_lossy.contains("logs/*, logs/*"));
         assert!(!text_lossy.contains("secretname"));
 
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            let ps_script = "$z = [System.IO.Compression.ZipFile]::OpenRead($env:OMVIX_ZIP_TEST); try { if ($z.Entries.Count -ne 5) { throw ('bad count ' + $z.Entries.Count) }; foreach ($e in $z.Entries) { $sr = New-Object System.IO.StreamReader($e.Open()); $null = $sr.ReadToEnd(); $sr.Dispose() } } finally { $z.Dispose() }";
+            let ps_script = "$z = [System.IO.Compression.ZipFile]::OpenRead($env:OMVIX_ZIP_TEST); try { if ($z.Entries.Count -ne 6) { throw ('bad count ' + $z.Entries.Count) }; foreach ($e in $z.Entries) { $sr = New-Object System.IO.StreamReader($e.Open()); $null = $sr.ReadToEnd(); $sr.Dispose() } } finally { $z.Dispose() }";
             let out = std::process::Command::new(
                 r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
             )

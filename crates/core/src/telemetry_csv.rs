@@ -2,7 +2,6 @@ use crate::error::Result;
 use crate::models::TelemetrySnapshot;
 use chrono::{DateTime, Utc};
 use std::fmt::Write as _;
-use std::fs;
 use std::path::Path;
 
 pub const MAX_TELEMETRY_CSV_ROWS: usize = 600;
@@ -114,19 +113,15 @@ pub fn format_telemetry_csv(rows: &[TelemetryCsvRow]) -> String {
 }
 
 pub fn write_telemetry_csv(path: &Path, rows: &[TelemetryCsvRow]) -> Result<usize> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let csv = format_telemetry_csv(rows);
-    let tmp = path.with_extension("csv.tmp");
-    fs::write(&tmp, csv.as_bytes())?;
-    fs::rename(&tmp, path)?;
+    crate::write_bytes_atomically(path, csv.as_bytes())?;
     Ok(rows.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn formats_header_empty_none_cells_and_gpu_sleeping_flag() {

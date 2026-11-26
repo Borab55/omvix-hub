@@ -77,19 +77,6 @@ impl WindowsThermalFanBackend {
         }
     }
 
-    pub fn with_scheme(scheme: ThermalProfileScheme) -> Self {
-        Self {
-            state: Mutex::new(ThermalFanState {
-                scheme: Some(scheme),
-                performance_mode: PerformanceMode::Balanced,
-                fan_mode: FanMode::Auto,
-                manual_speed_pct: 50,
-                allow_zero_rpm: false,
-                max_fan_levels: (DEFAULT_MAX_FAN_LEVEL, DEFAULT_MAX_FAN_LEVEL),
-            }),
-        }
-    }
-
     /// Sets the fan mode while passing whether current thermal conditions are cool enough
     /// to allow 0 RPM / sub-1800 RPM silent manual/curve speeds.
     pub fn set_fan_mode_with_cool_hint(

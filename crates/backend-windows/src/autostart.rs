@@ -1,18 +1,17 @@
 use crate::paths;
-use crate::security_fs::is_reparse_point;
+use crate::security_fs::{is_reparse_point, same_file, schedule_delete_on_reboot};
 use crate::system_info::is_process_elevated;
 use omvix_core::{InstalledCopyStatus, OmvixError, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use windows::core::{BSTR, HSTRING, PCWSTR, VARIANT};
+use windows::core::{BSTR, HSTRING, VARIANT};
 use windows::Win32::Foundation::{ERROR_SUCCESS, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
-use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+    KEY_WRITE, REG_SZ,
 };
 use windows::Win32::System::TaskScheduler::{
     ITaskFolder, ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_LOGON_GROUP,
@@ -176,13 +175,6 @@ pub fn query_elevated_task_command() -> Option<String> {
     extract_task_command_from_xml(&xml)
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
-    matches!(
-        (fs::canonicalize(a), fs::canonicalize(b)),
-        (Ok(ca), Ok(cb)) if ca == cb
-    )
-}
-
 fn paths_equal_ci(a: &Path, b: &Path) -> bool {
     if same_file(a, b) {
         return true;
@@ -195,17 +187,6 @@ fn paths_equal_ci(a: &Path, b: &Path) -> bool {
             .to_ascii_lowercase()
     };
     norm(a) == norm(b)
-}
-
-fn schedule_delete_on_reboot(path: &Path) {
-    let wide = HSTRING::from(path.as_os_str());
-    unsafe {
-        let _ = MoveFileExW(
-            PCWSTR(wide.as_ptr()),
-            PCWSTR::null(),
-            MOVEFILE_DELAY_UNTIL_REBOOT,
-        );
-    }
 }
 
 /// Builds the Task Scheduler 1.2 XML string passed to `ITaskFolder::RegisterTask`.
@@ -265,6 +246,7 @@ pub fn build_elevated_task_xml_string(exe_path: &Path) -> String {
 
 /// Builds a Task Scheduler 1.2 UTF-16LE XML definition (with BOM) that starts Omvix Hub
 /// elevated (`HighestAvailable`, zero UAC prompt) at logon on both AC and battery power.
+#[cfg(test)]
 pub fn build_elevated_task_xml(exe_path: &Path) -> Vec<u8> {
     let xml = build_elevated_task_xml_string(exe_path);
 
@@ -305,19 +287,17 @@ pub fn install_or_update_gui_copy(source_exe: &Path) -> Result<PathBuf> {
     }
 
     if target.exists() {
-        let running_from_target = same_file(source_exe, &target);
+        if same_file(source_exe, &target) {
+            return Ok(target);
+        }
         let backup_path = if old_base.exists() {
             dir.join(format!("omvix-hub.exe.old.{}", std::process::id()))
         } else {
             old_base
         };
         fs::rename(&target, &backup_path)?;
-        let copy_src = if running_from_target {
-            backup_path.as_path()
-        } else {
-            source_exe
-        };
-        if let Err(err) = fs::copy(copy_src, &target) {
+        if let Err(err) = fs::copy(source_exe, &target) {
+            let _ = fs::remove_file(&target);
             let _ = fs::rename(&backup_path, &target);
             return Err(OmvixError::Io(err));
         }
@@ -363,8 +343,6 @@ pub fn query_installed_copy_status() -> InstalledCopyStatus {
     };
 
     let task_exists = is_elevated_task_autostart_enabled();
-    let task_path_matches = query_elevated_task_command()
-        .is_some_and(|cmd| paths_equal_ci(Path::new(&cmd), &installed));
 
     InstalledCopyStatus {
         installed_path: installed.to_string_lossy().to_string(),
@@ -372,7 +350,6 @@ pub fn query_installed_copy_status() -> InstalledCopyStatus {
         running_from_installed,
         installed_is_outdated,
         task_exists,
-        task_path_matches,
     }
 }
 
@@ -381,25 +358,6 @@ pub fn is_elevated_task_autostart_enabled() -> bool {
     TaskSchedulerSession::connect()
         .ok()
         .is_some_and(|session| unsafe { session.root.GetTask(&BSTR::from(TASK_NAME)) }.is_ok())
-}
-
-fn is_registry_autostart_enabled() -> bool {
-    let subkey = HSTRING::from(RUN_SUBKEY);
-    let val_name = HSTRING::from(VALUE_NAME);
-    let mut hkey = HKEY::default();
-    let open = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, 0, KEY_READ, &mut hkey) };
-    if open != ERROR_SUCCESS {
-        return false;
-    }
-    let query = unsafe { RegQueryValueExW(hkey, &val_name, None, None, None, None) };
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    query == ERROR_SUCCESS
-}
-
-pub fn is_autostart_enabled() -> bool {
-    is_elevated_task_autostart_enabled() || is_registry_autostart_enabled()
 }
 
 fn set_registry_autostart(enabled: bool, exe_path: &Path) -> Result<()> {
@@ -463,9 +421,14 @@ pub fn create_elevated_task(exe_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn delete_elevated_task() {
-    if let Ok(session) = TaskSchedulerSession::connect() {
-        let _ = unsafe { session.root.DeleteTask(&BSTR::from(TASK_NAME), 0) };
+fn delete_elevated_task() -> Result<()> {
+    let session = TaskSchedulerSession::connect()?;
+    match unsafe { session.root.DeleteTask(&BSTR::from(TASK_NAME), 0) } {
+        Ok(()) => Ok(()),
+        Err(err) if err.code().0 == 0x8007_0002u32 as i32 => Ok(()),
+        Err(err) => Err(OmvixError::PermissionDenied(format!(
+            "ITaskFolder::DeleteTask failed: {err}"
+        ))),
     }
 }
 
@@ -505,7 +468,7 @@ pub fn verify_and_repair_autostart_task(current_exe: &Path, config_enabled: bool
 
 /// Removes the Windows Scheduled Task, legacy Run key, and protected Program Files GUI copy.
 pub fn remove_autostart_and_installed_copy() {
-    delete_elevated_task();
+    let _ = delete_elevated_task();
     let installed = paths::installed_gui_exe();
     let _ = set_registry_autostart(false, &installed);
 
@@ -546,8 +509,9 @@ pub fn set_autostart(enabled: bool, exe_path: &Path) -> Result<()> {
             Ok(())
         }
     } else {
-        delete_elevated_task();
+        let task_res = delete_elevated_task();
         let reg_res = set_registry_autostart(false, exe_path);
+        task_res?;
         tracing::info!("Removed Windows Task Scheduler and HKCU Run startup entries");
         reg_res
     }

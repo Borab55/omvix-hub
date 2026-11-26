@@ -206,7 +206,7 @@ pub fn validate_github_release_url(url: &str) -> Result<()> {
     if trimmed.chars().any(|c| {
         c.is_whitespace()
             || c.is_control()
-            || matches!(c, '"' | '\'' | '`' | ';' | '|' | '&' | '<' | '>')
+            || matches!(c, '\\' | '"' | '\'' | '`' | ';' | '|' | '&' | '<' | '>')
     }) {
         return Err(OmvixError::Config(format!(
             "Unsafe characters in update URL: {trimmed}"
@@ -239,6 +239,11 @@ pub fn validate_github_release_url(url: &str) -> Result<()> {
 
     let host_lower = authority.to_ascii_lowercase();
     let path_lower = path.to_ascii_lowercase();
+    if path_lower.contains("%2e") || path_lower.contains("%2f") || path_lower.contains("%5c") {
+        return Err(OmvixError::Config(format!(
+            "Encoded path traversal not allowed in update URL: {trimmed}"
+        )));
+    }
     let repo_prefix = format!(
         "/{}/{}/",
         GITHUB_OWNER.to_ascii_lowercase(),
@@ -472,10 +477,18 @@ pub fn parse_github_release_json(json: &str) -> Result<ReleaseInfo> {
                 .find(|a| a.name.eq_ignore_ascii_case("checksums.txt"))
         })
         .or_else(|| {
+            let exact_sha = format!("{}.sha256", selected_bin.name);
+            let exact_sha_txt = format!("{}.sha256.txt", selected_bin.name);
+            raw.assets.iter().find(|a| {
+                a.name.eq_ignore_ascii_case(&exact_sha)
+                    || a.name.eq_ignore_ascii_case(&exact_sha_txt)
+            })
+        })
+        .or_else(|| {
             raw.assets.iter().find(|a| {
                 let lower = a.name.to_ascii_lowercase();
                 (lower.ends_with(".sha256") || lower.ends_with(".sha256.txt"))
-                    && (lower.contains("omvix-hub") || lower.contains("sha256"))
+                    && lower.contains("omvix-hub")
             })
         });
 
@@ -685,6 +698,14 @@ mod tests {
             validate_github_release_url("https://user@github.com/Borab55/omvix-hub/releases")
                 .is_err()
         );
+        assert!(validate_github_release_url(
+            "https://github.com/Borab55/omvix-hub/releases\\..\\..\\OtherUser\\evil"
+        )
+        .is_err());
+        assert!(validate_github_release_url(
+            "https://github.com/Borab55/omvix-hub/releases/%2e%2e/OtherUser/evil"
+        )
+        .is_err());
     }
 
     #[test]
@@ -747,6 +768,33 @@ mod tests {
             }]
         }"#;
         assert!(parse_github_release_json(bad_url_json).is_err());
+
+        let sha_fallback_json = r#"{
+            "tag_name": "v0.5.1",
+            "draft": false,
+            "assets": [
+                {
+                    "name": "omvix-cli.exe.sha256",
+                    "browser_download_url": "https://github.com/Borab55/omvix-hub/releases/download/v0.5.1/omvix-cli.exe.sha256",
+                    "size": 128
+                },
+                {
+                    "name": "omvix-hub.exe",
+                    "browser_download_url": "https://github.com/Borab55/omvix-hub/releases/download/v0.5.1/omvix-hub.exe",
+                    "size": 4500000
+                },
+                {
+                    "name": "omvix-hub.exe.sha256",
+                    "browser_download_url": "https://github.com/Borab55/omvix-hub/releases/download/v0.5.1/omvix-hub.exe.sha256",
+                    "size": 128
+                }
+            ]
+        }"#;
+        let parsed_fallback = parse_github_release_json(sha_fallback_json).expect("sha fallback");
+        assert_eq!(
+            parsed_fallback.checksum_asset.unwrap().name,
+            "omvix-hub.exe.sha256"
+        );
     }
 
     #[test]
@@ -814,7 +862,7 @@ mod tests {
             version: "0.5.0".into(),
             binary_path: PathBuf::from("omvix-hub.exe"),
             expected_sha256: hash.clone(),
-            verified_sha256: hash.clone(),
+            verified_sha256: hash,
             signature: eval_ok,
             release_url: GITHUB_RELEASES_PAGE_URL.into(),
         };

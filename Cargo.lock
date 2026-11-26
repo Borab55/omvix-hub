@@ -2311,7 +2311,7 @@ dependencies = [
 
 [[package]]
 name = "omvix-cli"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 dependencies = [
  "clap",
  "omvix-core",
@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "omvix-core"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 dependencies = [
  "chrono",
  "directories",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "omvix-hub"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 dependencies = [
  "chrono",
  "eframe",
@@ -2353,16 +2353,15 @@ dependencies = [
 
 [[package]]
 name = "omvix-linux"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 dependencies = [
  "chrono",
  "omvix-core",
- "tracing",
 ]
 
 [[package]]
 name = "omvix-windows"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 dependencies = [
  "chrono",
  "nvml-wrapper",

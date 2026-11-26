@@ -56,15 +56,9 @@ impl BatteryHealthHistory {
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| OmvixError::Config(format!("Serialize battery history failed: {e}")))?;
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, json)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        crate::write_bytes_atomically(path, json.as_bytes())
     }
 
     /// Automatically logs battery health on first run, after 7 days, or after >= 24h when

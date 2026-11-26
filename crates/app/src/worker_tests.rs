@@ -1108,3 +1108,145 @@ fn integration_restore_default_power_limits_reapplies_profile_and_keeps_other_ch
         assert!(g.power_limits_writes.is_empty());
     }
 }
+
+#[test]
+fn integration_thermal_guard_release_resolves_custom_curve_target() {
+    let dir = TempDirGuard::create("guard_release_curve");
+    let mut cfg = AppConfig::default();
+    cfg.thermal_fan.fan_mode = FanMode::CustomCurve;
+    cfg.thermal_fan.manual_speed_pct = 12;
+    cfg.thermal_fan.custom_curve = FanCurvePreset::Aggressive.to_curve();
+    cfg.thermal_fan.guard_cpu_temp_c = 85;
+    cfg.thermal_fan.guard_sustain_secs = 2;
+
+    let rig = MockRig::new(MockHardwareState::default());
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+
+    // Sustain overheating (>= 85C) so Thermal Guard engages emergency Max Fan
+    for t in [1.0, 2.5, 4.0] {
+        let mut g = rig.inner.lock().unwrap();
+        g.telemetry_snap.cpu_temp_c = Some(92.0);
+        g.telemetry_snap.fan_rpms = vec![1400, 1400];
+        drop(g);
+        engine.poll_telemetry_step(t, true, true, false);
+    }
+    assert!(state.lock().unwrap().thermal_guard_active);
+
+    // Cool down well below release threshold (with cool ambient <60C? Use 62C so curve speed != manual 12%)
+    {
+        let mut g = rig.inner.lock().unwrap();
+        g.telemetry_snap.cpu_temp_c = Some(62.0);
+        g.telemetry_snap.gpu_temp_c = Some(55.0);
+        g.telemetry_snap.chassis_temp_c = Some(40.0);
+        g.telemetry_snap.fan_rpms = vec![5000, 5000];
+        g.fan_writes.clear();
+    }
+    engine.poll_telemetry_step(15.0, true, true, false);
+    engine.poll_telemetry_step(25.0, true, true, false);
+
+    assert!(!state.lock().unwrap().thermal_guard_active);
+    let expected_curve_pct = FanCurvePreset::Aggressive
+        .to_curve()
+        .evaluate(62.0, 62.0, 0);
+    assert_ne!(expected_curve_pct, 12);
+    let writes = rig.inner.lock().unwrap().fan_writes.clone();
+    assert!(writes
+        .iter()
+        .any(|&(mode, pct, _)| mode == FanMode::CustomCurve && pct == Some(expected_curve_pct)));
+}
+
+#[test]
+fn integration_first_time_power_limits_recorded_and_undoable_to_defaults() {
+    let dir = TempDirGuard::create("first_power_limit_undo");
+    let mut cfg = AppConfig::default();
+    cfg.thermal_fan.performance_mode = PerformanceMode::Balanced;
+    cfg.tuning.pl1_watts = None;
+    cfg.tuning.pl2_watts = None;
+
+    let rig = MockRig::new(MockHardwareState::default());
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+
+    engine.handle_command(
+        WorkerCommand::SetPowerLimits {
+            pl1: Some(45),
+            pl2: Some(90),
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    assert_eq!(engine.change_history.entries_vec().len(), 1);
+    assert_eq!(engine.last_committed_power_limits, (Some(45), Some(90)));
+
+    rig.inner.lock().unwrap().event_log.clear();
+    rig.inner.lock().unwrap().power_limits_writes.clear();
+
+    engine.handle_command(WorkerCommand::UndoLastChange, &tx, &None, &visible);
+    assert!(engine.change_history.entries_vec().is_empty());
+    assert!(state.lock().unwrap().change_history.is_empty());
+    assert_eq!(engine.cfg.tuning.pl1_watts, None);
+    assert_eq!(engine.cfg.tuning.pl2_watts, None);
+    assert_eq!(engine.last_committed_power_limits, (None, None));
+    assert_eq!(
+        rig.inner.lock().unwrap().event_log,
+        vec![
+            "perf:Balanced".to_string(),
+            "win_power:Balanced".to_string()
+        ]
+    );
+}
+
+#[test]
+fn integration_blocked_and_failed_undo_preserve_config_and_history() {
+    let dir = TempDirGuard::create("blocked_failed_undo");
+    let mut cfg = AppConfig::default();
+    cfg.thermal_fan.fan_mode = FanMode::Max;
+    cfg.thermal_fan.manual_speed_pct = 50;
+
+    let rig = MockRig::new(MockHardwareState::default());
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+
+    // Change FanMode: Max -> Manual (65%) so undo wants to revert to Max
+    engine.handle_command(
+        WorkerCommand::SetFanMode {
+            mode: FanMode::Manual,
+            manual_speed_pct: Some(65),
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+    assert_eq!(engine.change_history.entries_vec().len(), 1);
+    let sync_before = state.lock().unwrap().synced_config_rev;
+
+    // 1. Hardware failure while reverting to Max -> cfg & history stay unchanged
+    rig.inner.lock().unwrap().fail_max_fan = true;
+    engine.handle_command(WorkerCommand::UndoLastChange, &tx, &None, &visible);
+    assert_eq!(engine.cfg.thermal_fan.fan_mode, FanMode::Manual);
+    assert_eq!(engine.cfg.thermal_fan.manual_speed_pct, 65);
+    assert_eq!(engine.change_history.entries_vec().len(), 1);
+    assert_eq!(state.lock().unwrap().change_history.len(), 1);
+    assert_eq!(state.lock().unwrap().synced_config_rev, sync_before);
+
+    // 2. Guard block (Thermal Guard active) -> cfg & history stay unchanged even without backend error
+    rig.inner.lock().unwrap().fail_max_fan = false;
+    for t in [1.0, 12.0] {
+        let mut g = rig.inner.lock().unwrap();
+        g.telemetry_snap.cpu_temp_c = Some(92.0);
+        g.telemetry_snap.fan_rpms = vec![1400, 1400];
+        drop(g);
+        engine.poll_telemetry_step(t, true, true, false);
+    }
+    assert!(engine.thermal_guard.is_active());
+
+    engine.handle_command(WorkerCommand::UndoLastChange, &tx, &None, &visible);
+    assert_eq!(engine.cfg.thermal_fan.fan_mode, FanMode::Manual);
+    assert_eq!(engine.cfg.thermal_fan.manual_speed_pct, 65);
+    assert_eq!(engine.change_history.entries_vec().len(), 1);
+    assert_eq!(state.lock().unwrap().change_history.len(), 1);
+    assert_eq!(state.lock().unwrap().synced_config_rev, sync_before);
+}

@@ -10,7 +10,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetMessageW, PostThreadMessageW, MSG, WM_HOTKEY, WM_QUIT,
+    GetMessageW, PeekMessageW, PostThreadMessageW, MSG, PM_NOREMOVE, WM_HOTKEY, WM_QUIT,
 };
 
 const OMEN_KEY_EVENT_DATA: u32 = 8613; // 0x21A5
@@ -122,7 +122,7 @@ pub struct ListenerHandle {
 impl ListenerHandle {
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(tid) = self.thread_id {
+        if let Some(tid) = self.thread_id.take() {
             unsafe {
                 let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
             }
@@ -136,7 +136,7 @@ impl ListenerHandle {
 impl Drop for ListenerHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(tid) = self.thread_id {
+        if let Some(tid) = self.thread_id.take() {
             unsafe {
                 let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
             }
@@ -169,6 +169,13 @@ where
             let hr = unsafe { enumerator.Next(1000, &mut row, &mut returned) };
             if hr.0 == WBEM_E_ACCESS_DENIED.0 {
                 tracing::warn!("Omen key listener stopped due to WMI access denied");
+                break;
+            }
+            if hr.is_err() {
+                tracing::warn!(
+                    hresult = format_args!("0x{:08X}", hr.0 as u32),
+                    "Omen key WMI listener stopped due to query error"
+                );
                 break;
             }
             if returned > 0 {
@@ -215,10 +222,13 @@ where
             let _ = tid_tx.send(Err(classified));
             return;
         }
+        let mut msg = MSG::default();
+        unsafe {
+            let _ = PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE);
+        }
         let _ = tid_tx.send(Ok(tid));
         tracing::info!(shortcut = %spec_owned, "Registered global toggle hotkey");
 
-        let mut msg = MSG::default();
         while !stop_flag.load(Ordering::SeqCst) {
             let got = unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) };
             if got.0 <= 0 {

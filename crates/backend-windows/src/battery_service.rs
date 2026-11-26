@@ -1,6 +1,9 @@
 use crate::battery::WindowsBatteryBackend;
 use crate::paths;
-use crate::security_fs::{ensure_secure_program_data_dir, is_reparse_point, open_log_no_reparse};
+use crate::security_fs::{
+    ensure_secure_program_data_dir, is_reparse_point, open_log_no_reparse, same_file,
+    schedule_delete_on_reboot,
+};
 use crate::system_info::is_process_elevated;
 use crate::wmi_bios::HpWmiBios;
 use chrono::Local;
@@ -20,8 +23,9 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::{HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST;
-use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+use windows::Win32::Foundation::{
+    ERROR_INSUFFICIENT_BUFFER, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE,
+};
 use windows::Win32::System::Services::{
     ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
     CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
@@ -47,8 +51,6 @@ const DESCRIPTION: &str =
 const SERVICE_CONTROL_DELETE_ACCESS: u32 = 0x0001_0000;
 const OS_ERR_ACCESS_DENIED: i32 = 5;
 const OS_ERR_SHARING_VIOLATION: i32 = 32;
-const OS_ERR_INSUFFICIENT_BUFFER: i32 = 122;
-const OS_ERR_SERVICE_NOT_ACTIVE: i32 = 1062;
 const WIN32_ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 const LOG_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -64,24 +66,12 @@ impl Drop for ScHandleGuard {
     }
 }
 
-pub fn install_dir() -> PathBuf {
-    paths::install_dir()
-}
-
-pub fn installed_exe() -> PathBuf {
-    paths::installed_service_exe()
-}
-
-pub fn data_dir() -> PathBuf {
-    paths::omvix_program_data_dir()
-}
-
 pub fn config_file_path() -> PathBuf {
-    data_dir().join("battery-service.toml")
+    paths::omvix_program_data_dir().join("battery-service.toml")
 }
 
 pub fn log_file_path() -> PathBuf {
-    data_dir().join("battery-service.log")
+    paths::omvix_program_data_dir().join("battery-service.log")
 }
 
 pub fn service_command_line(exe: &Path) -> String {
@@ -201,6 +191,17 @@ pub fn decide_off_state_mode_at(
     }
 }
 
+pub(crate) fn decide_off_state_fallback(
+    cfg: &BatteryServiceConfig,
+    now_utc: i64,
+) -> BatteryChargeMode {
+    if cfg.enabled && cfg.hold_when_shutdown && !cfg.is_travel_charge_active(now_utc) {
+        BatteryChargeMode::Hold
+    } else {
+        BatteryChargeMode::Auto
+    }
+}
+
 /// Evaluates one service battery care tick and reports whether persistent travel-charge flags changed.
 pub fn evaluate_service_tick(
     engine: &mut BatteryCareEngine,
@@ -250,11 +251,10 @@ fn map_service_state(raw: u32) -> BatteryServiceState {
 fn query_binary_path(svc: SC_HANDLE) -> Option<String> {
     let mut needed: u32 = 0;
     let first = unsafe { QueryServiceConfigW(svc, None, 0, &mut needed) };
-    if first.is_ok() || needed == 0 {
+    let Err(err) = first else {
         return None;
-    }
-    let raw_err = io::Error::last_os_error().raw_os_error();
-    if raw_err != Some(OS_ERR_INSUFFICIENT_BUFFER) {
+    };
+    if needed == 0 || err.code() != ERROR_INSUFFICIENT_BUFFER.to_hresult() {
         return None;
     }
 
@@ -276,8 +276,8 @@ fn query_binary_path(svc: SC_HANDLE) -> Option<String> {
 }
 
 pub fn query_service_info() -> BatteryServiceInfo {
-    let exe_path = installed_exe();
-    let d_dir = data_dir();
+    let exe_path = paths::installed_service_exe();
+    let d_dir = paths::omvix_program_data_dir();
     let l_path = log_file_path();
     let mut info = BatteryServiceInfo {
         service_name: SERVICE_NAME.to_string(),
@@ -334,14 +334,16 @@ pub fn is_service_installed() -> bool {
 }
 
 pub fn has_service_leftovers() -> bool {
-    installed_exe().exists() || install_dir().exists() || data_dir().exists()
+    paths::installed_service_exe().exists()
+        || paths::install_dir().exists()
+        || paths::omvix_program_data_dir().exists()
 }
 
 pub fn sync_config_if_installed(cfg: &BatteryConfig) -> Result<()> {
     if !is_service_installed() {
         return Ok(());
     }
-    ensure_secure_program_data_dir(&data_dir())?;
+    ensure_secure_program_data_dir(&paths::omvix_program_data_dir())?;
     BatteryServiceConfig::from(cfg).save_to_path(&config_file_path())
 }
 
@@ -353,13 +355,6 @@ fn require_admin(action: &str) -> Result<()> {
             "Administrator privileges are required to {action}."
         )))
     }
-}
-
-fn same_file(a: &Path, b: &Path) -> bool {
-    matches!(
-        (fs::canonicalize(a), fs::canonicalize(b)),
-        (Ok(ca), Ok(cb)) if ca == cb
-    )
 }
 
 fn while_in_use<F>(mut op: F) -> io::Result<()>
@@ -385,8 +380,7 @@ where
 fn stop_and_wait(svc: SC_HANDLE) -> Result<()> {
     let mut status = SERVICE_STATUS::default();
     if let Err(err) = unsafe { ControlService(svc, SERVICE_CONTROL_STOP, &mut status) } {
-        let raw = io::Error::last_os_error().raw_os_error();
-        if raw != Some(OS_ERR_SERVICE_NOT_ACTIVE) {
+        if err.code() != ERROR_SERVICE_NOT_ACTIVE.to_hresult() {
             return Err(OmvixError::WmiUnavailable(format!(
                 "Failed to stop {SERVICE_NAME}: {err}"
             )));
@@ -434,30 +428,18 @@ fn wait_until_running(svc: SC_HANDLE) -> Result<()> {
     }
 }
 
-fn schedule_delete_on_reboot(path: &Path) -> bool {
-    let wide = HSTRING::from(path.as_os_str());
-    unsafe {
-        MoveFileExW(
-            PCWSTR(wide.as_ptr()),
-            PCWSTR::null(),
-            MOVEFILE_DELAY_UNTIL_REBOOT,
-        )
-    }
-    .is_ok()
-}
-
 pub fn install_or_update_service(cfg: &BatteryConfig) -> Result<String> {
     require_admin("install or update OmvixBatteryService")?;
 
-    let i_dir = install_dir();
+    let i_dir = paths::install_dir();
     if is_reparse_point(&i_dir) {
         return Err(OmvixError::PermissionDenied(format!(
             "Refusing to install service into reparse point {}",
             i_dir.display()
         )));
     }
-    let d_dir = data_dir();
-    let target_exe = installed_exe();
+    let d_dir = paths::omvix_program_data_dir();
+    let target_exe = paths::installed_service_exe();
     fs::create_dir_all(&i_dir)?;
     ensure_secure_program_data_dir(&d_dir)?;
     BatteryServiceConfig::from(cfg).save_to_path(&config_file_path())?;
@@ -656,8 +638,8 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
         deferred_reboot = true;
     }
 
-    let exe_path = installed_exe();
-    let i_dir = install_dir();
+    let exe_path = paths::installed_service_exe();
+    let i_dir = paths::install_dir();
     if exe_path.exists() {
         let current = std::env::current_exe().ok();
         let is_self = current
@@ -674,11 +656,11 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
             deferred_reboot = true;
         }
     }
-    if i_dir.exists() && fs::remove_dir_all(&i_dir).is_err() {
-        let _ = schedule_delete_on_reboot(&i_dir);
+    if i_dir.exists() && fs::remove_dir_all(&i_dir).is_err() && schedule_delete_on_reboot(&i_dir) {
+        deferred_reboot = true;
     }
 
-    let d_dir = data_dir();
+    let d_dir = paths::omvix_program_data_dir();
     if d_dir.exists()
         && while_in_use(|| fs::remove_dir_all(&d_dir)).is_err()
         && schedule_delete_on_reboot(&d_dir)
@@ -826,7 +808,14 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
     let accepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN | SERVICE_ACCEPT_POWEREVENT;
     set_scm_state(SERVICE_RUNNING.0, accepted, 0, 0);
 
-    let code = run_daemon_loop(&rx);
+    let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_daemon_loop(&rx)))
+    {
+        Ok(c) => c,
+        Err(_) => {
+            daemon_log("OmvixBatteryService panicked inside run_daemon_loop; reporting stopped");
+            1
+        }
+    };
 
     if let Ok(mut guard) = lock.lock() {
         *guard = None;
@@ -839,7 +828,7 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
     let battery_be = WindowsBatteryBackend::new();
     let mut engine = BatteryCareEngine::new();
 
-    if let Err(err) = ensure_secure_program_data_dir(&data_dir()) {
+    if let Err(err) = ensure_secure_program_data_dir(&paths::omvix_program_data_dir()) {
         daemon_log(&format!("Warning: ProgramData ACL repair returned: {err}"));
     }
     let cfg_path = config_file_path();
@@ -847,7 +836,7 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
     let mut bat_cfg = svc_cfg.to_battery_config();
     let mut last_cfg_mtime = fs::metadata(&cfg_path).and_then(|m| m.modified()).ok();
     let mut last_applied: Option<BatteryChargeMode> = None;
-    let mut last_eval = Instant::now() - Duration::from_secs(60);
+    let mut last_eval: Option<Instant> = None;
 
     daemon_log(&format!(
         "OmvixBatteryService started (enabled={}, stop={}%, start={}%, mode={:?}, hold_when_shutdown={})",
@@ -869,7 +858,7 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
                 svc_cfg = reloaded;
                 bat_cfg = svc_cfg.to_battery_config();
                 last_applied = None;
-                last_eval = Instant::now() - Duration::from_secs(60);
+                last_eval = None;
                 daemon_log(&format!(
                     "Config reloaded (enabled={}, stop={}%, start={}%, mode={:?}, hold_when_shutdown={})",
                     svc_cfg.enabled,
@@ -882,8 +871,8 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
         }
 
         let poll_secs = svc_cfg.poll_interval_secs.clamp(2, 60);
-        if last_eval.elapsed() >= Duration::from_secs(poll_secs) {
-            last_eval = Instant::now();
+        if last_eval.is_none_or(|t| t.elapsed() >= Duration::from_secs(poll_secs)) {
+            last_eval = Some(Instant::now());
             match battery_be.get_battery_status() {
                 Ok(bat) => {
                     let (target, travel_changed) = evaluate_service_tick(
@@ -936,15 +925,10 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
                 return 0;
             }
             Ok(DaemonEvent::Shutdown(ack)) => {
+                let now_utc = chrono::Utc::now().timestamp();
                 let target = match battery_be.get_battery_status() {
-                    Ok(bat) => decide_off_state_mode(&svc_cfg, bat.charge_percent),
-                    Err(_) => {
-                        if svc_cfg.enabled && svc_cfg.hold_when_shutdown {
-                            BatteryChargeMode::Hold
-                        } else {
-                            BatteryChargeMode::Auto
-                        }
-                    }
+                    Ok(bat) => decide_off_state_mode_at(&svc_cfg, bat.charge_percent, now_utc),
+                    Err(_) => decide_off_state_fallback(&svc_cfg, now_utc),
                 };
                 let _ = battery_be.set_charge_mode(target);
                 daemon_log(&format!(
@@ -954,23 +938,22 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
                 return 0;
             }
             Ok(DaemonEvent::Suspend(ack)) => {
+                let now_utc = chrono::Utc::now().timestamp();
                 let target = match battery_be.get_battery_status() {
-                    Ok(bat) => decide_off_state_mode(&svc_cfg, bat.charge_percent),
-                    Err(_) => {
-                        if svc_cfg.enabled && svc_cfg.hold_when_shutdown {
-                            BatteryChargeMode::Hold
-                        } else {
-                            BatteryChargeMode::Auto
-                        }
-                    }
+                    Ok(bat) => decide_off_state_mode_at(&svc_cfg, bat.charge_percent, now_utc),
+                    Err(_) => decide_off_state_fallback(&svc_cfg, now_utc),
                 };
-                let _ = battery_be.set_charge_mode(target);
+                last_applied = if battery_be.set_charge_mode(target).is_ok() {
+                    Some(target)
+                } else {
+                    None
+                };
                 daemon_log(&format!("System suspend/hibernate -> applied {target:?}"));
                 let _ = ack.send(());
             }
             Ok(DaemonEvent::Resume) => {
                 last_applied = None;
-                last_eval = Instant::now() - Duration::from_secs(60);
+                last_eval = None;
                 daemon_log("System resumed -> forcing immediate charge check");
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1127,5 +1110,22 @@ mod tests {
         cfg.hold_when_shutdown = true;
         cfg.enabled = false;
         assert_eq!(decide_off_state_mode(&cfg, 85), BatteryChargeMode::Auto);
+
+        // Error fallback checks travel charge window cleanly
+        cfg.enabled = true;
+        assert_eq!(
+            decide_off_state_fallback(&cfg, 1_900_000_000),
+            BatteryChargeMode::Hold
+        );
+        cfg.one_time_full_charge = true;
+        cfg.travel_charge_until_utc = Some(2_000_000_000);
+        assert_eq!(
+            decide_off_state_fallback(&cfg, 1_900_000_000),
+            BatteryChargeMode::Auto
+        );
+        assert_eq!(
+            decide_off_state_fallback(&cfg, 2_000_000_000),
+            BatteryChargeMode::Hold
+        );
     }
 }

@@ -14,10 +14,6 @@ impl BatteryCareEngine {
         }
     }
 
-    pub fn last_mode(&self) -> BatteryChargeMode {
-        self.last_applied_mode
-    }
-
     /// Evaluates the target firmware `BatteryChargeMode` given current charge percentage and AC state.
     /// Automatically clears travel charge once expired, battery reaches >=99%, or AC is unplugged.
     pub fn evaluate(
@@ -62,17 +58,21 @@ impl BatteryCareEngine {
         let stop = cfg.stop_threshold_pct.clamp(50, 100);
         let start = cfg.start_threshold_pct.clamp(40, stop.saturating_sub(2));
 
-        let target = if charge_pct >= stop {
-            match cfg.mode {
-                BatteryChargeMode::Hold => BatteryChargeMode::Hold,
+        let resolve_limit_mode = || match cfg.mode {
+            BatteryChargeMode::Hold => BatteryChargeMode::Hold,
+            BatteryChargeMode::Inhibit | BatteryChargeMode::Auto | BatteryChargeMode::Unknown => {
                 BatteryChargeMode::Inhibit
-                | BatteryChargeMode::Auto
-                | BatteryChargeMode::Unknown => BatteryChargeMode::Inhibit,
             }
+        };
+
+        let target = if charge_pct >= stop {
+            resolve_limit_mode()
         } else if charge_pct <= start {
             BatteryChargeMode::Auto
+        } else if self.last_applied_mode != BatteryChargeMode::Auto {
+            resolve_limit_mode()
         } else {
-            self.last_applied_mode
+            BatteryChargeMode::Auto
         };
 
         self.last_applied_mode = target;
@@ -202,5 +202,29 @@ mod tests {
         );
         assert!(!cfg.one_time_full_charge);
         assert!(cfg.travel_charge_until_utc.is_none());
+    }
+
+    #[test]
+    fn switching_inhibit_and_hold_inside_hysteresis_band_applies_immediately() {
+        let mut engine = BatteryCareEngine::new();
+        let mut cfg = BatteryConfig {
+            enabled: true,
+            mode: BatteryChargeMode::Inhibit,
+            stop_threshold_pct: 80,
+            start_threshold_pct: 75,
+            ..BatteryConfig::default()
+        };
+
+        assert_eq!(
+            engine.evaluate(&mut cfg, 82, true),
+            BatteryChargeMode::Inhibit
+        );
+        cfg.mode = BatteryChargeMode::Hold;
+        assert_eq!(engine.evaluate(&mut cfg, 78, true), BatteryChargeMode::Hold);
+        cfg.mode = BatteryChargeMode::Inhibit;
+        assert_eq!(
+            engine.evaluate(&mut cfg, 77, true),
+            BatteryChargeMode::Inhibit
+        );
     }
 }

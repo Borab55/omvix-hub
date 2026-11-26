@@ -11,8 +11,8 @@ use windows::Win32::System::Com::{
     RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, SAFEARRAY,
 };
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayGetLBound, SafeArrayGetUBound,
-    SafeArrayUnaccessData,
+    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayDestroy, SafeArrayGetLBound,
+    SafeArrayGetUBound, SafeArrayUnaccessData,
 };
 use windows::Win32::System::Variant::{
     VariantToUInt32, VT_ARRAY, VT_I4, VT_TYPEMASK, VT_UI1, VT_UI4,
@@ -131,7 +131,7 @@ impl WmiConnection {
                     &BSTR::new(),
                     None,
                 )
-                .map_err(|e| map_wmi_err(namespace, "ConnectServer", e))?;
+                .map_err(|e| map_wmi_err(namespace, "ConnectServer", &e))?;
 
             CoSetProxyBlanket(
                 &services,
@@ -165,7 +165,7 @@ impl WmiConnection {
                     WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
                     None,
                 )
-                .map_err(|e| map_wmi_err(&self.namespace, wql, e))?;
+                .map_err(|e| map_wmi_err(&self.namespace, wql, &e))?;
 
             let mut results = Vec::new();
             loop {
@@ -209,7 +209,7 @@ impl WmiConnection {
                     Some(&mut obj),
                     None,
                 )
-                .map_err(|e| map_wmi_err(&self.namespace, path, e))?;
+                .map_err(|e| map_wmi_err(&self.namespace, path, &e))?;
             obj.ok_or_else(|| {
                 OmvixError::WmiUnavailable(format!(
                     "WMI object `{path}` returned null in `{}`",
@@ -232,7 +232,7 @@ impl WmiConnection {
                     WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
                     None,
                 )
-                .map_err(|e| map_wmi_err(&self.namespace, wql, e))
+                .map_err(|e| map_wmi_err(&self.namespace, wql, &e))
         }
     }
 
@@ -254,13 +254,13 @@ impl WmiConnection {
                     Some(&mut out_params),
                     None,
                 )
-                .map_err(|e| map_wmi_err(&self.namespace, method_name, e))?;
+                .map_err(|e| map_wmi_err(&self.namespace, method_name, &e))?;
             Ok(out_params)
         }
     }
 }
 
-fn map_wmi_err(namespace: &str, op: &str, err: windows::core::Error) -> OmvixError {
+fn map_wmi_err(namespace: &str, op: &str, err: &windows::core::Error) -> OmvixError {
     if err.code().0 == WBEM_E_ACCESS_DENIED.0 {
         OmvixError::PermissionDenied(format!(
             "Administrator privileges required for `{op}` in `{namespace}`"
@@ -377,9 +377,17 @@ pub fn variant_from_u8_array(bytes: &[u8]) -> Result<VARIANT> {
         if !bytes.is_empty() {
             let mut data_ptr: *mut c_void = ptr::null_mut();
             if let Err(err) = SafeArrayAccessData(psa, &mut data_ptr) {
+                let _ = SafeArrayDestroy(psa);
                 return Err(OmvixError::WmiUnavailable(format!(
                     "SafeArrayAccessData failed: {err}"
                 )));
+            }
+            if data_ptr.is_null() {
+                let _ = SafeArrayUnaccessData(psa);
+                let _ = SafeArrayDestroy(psa);
+                return Err(OmvixError::WmiUnavailable(
+                    "SafeArrayAccessData returned null data pointer".into(),
+                ));
             }
             ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr as *mut u8, bytes.len());
             let _ = SafeArrayUnaccessData(psa);

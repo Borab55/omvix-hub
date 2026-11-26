@@ -120,7 +120,7 @@ pub fn control_committed(
     }
 }
 
-fn default_desktop_or_temp_file(filename: &str) -> std::path::PathBuf {
+pub fn default_desktop_or_temp_file(filename: &str) -> std::path::PathBuf {
     #[cfg(windows)]
     if let Some(desktop) = std::env::var_os("USERPROFILE") {
         let candidate = std::path::PathBuf::from(desktop).join("Desktop");
@@ -129,6 +129,49 @@ fn default_desktop_or_temp_file(filename: &str) -> std::path::PathBuf {
         }
     }
     std::env::temp_dir().join(filename)
+}
+
+pub const REFRESH_OPTIONS_MS: &[(u64, &str)] = &[
+    (100, "0.1s"),
+    (250, "0.25s"),
+    (500, "0.5s"),
+    (1000, "1s"),
+    (1500, "1.5s"),
+    (2000, "2s"),
+    (5000, "5s"),
+];
+
+pub fn open_folder_in_explorer(dir: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new(omvix_windows::paths::system_tool("explorer.exe"))
+            .arg(dir)
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = dir;
+}
+
+pub fn unique_profile_slug(name: &str, fallback: &str, is_used: impl Fn(&str) -> bool) -> String {
+    let slug_base = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let base = if slug_base.is_empty() {
+        fallback.to_string()
+    } else {
+        slug_base
+    };
+    let mut candidate = base.clone();
+    let mut n = 2usize;
+    while is_used(&candidate) {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    candidate
 }
 
 pub fn default_support_bundle_path() -> std::path::PathBuf {

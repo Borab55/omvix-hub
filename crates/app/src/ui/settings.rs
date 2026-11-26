@@ -3,7 +3,10 @@ use crate::theme::{
     saved_theme_chip, section_title, status_badge, status_err, status_ok, status_warn,
     ColorButtonStyle, SavedChipAction,
 };
-use crate::ui::{control_committed, default_support_bundle_path, show_file_in_folder};
+use crate::ui::{
+    control_committed, default_support_bundle_path, open_folder_in_explorer, show_file_in_folder,
+    REFRESH_OPTIONS_MS,
+};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Slider, Ui};
 use omvix_core::updater::GITHUB_RELEASES_PAGE_URL;
@@ -86,15 +89,7 @@ pub fn render(
 
             ui.add_space(12.0);
             ui.label(i18n.t("monitor.refresh_rate"));
-            for &(ms, label) in &[
-                (100u64, "0.1s"),
-                (250, "0.25s"),
-                (500, "0.5s"),
-                (1000, "1s"),
-                (1500, "1.5s"),
-                (2000, "2s"),
-                (5000, "5s"),
-            ] {
+            for &(ms, label) in REFRESH_OPTIONS_MS {
                 if ui
                     .selectable_label(cfg.general.telemetry_interval_ms == ms, label)
                     .clicked()
@@ -254,6 +249,7 @@ pub fn render(
             } else {
                 CustomThemeConfig::preset_dark_slate()
             };
+            cfg.general.theme = "dark".to_string();
             actions.theme_changed = true;
             on_save();
         }
@@ -584,14 +580,7 @@ pub fn render(
 
         ui.horizontal_wrapped(|ui| {
             if ui.button(i18n.t("logs.open_folder")).clicked() {
-                #[cfg(windows)]
-                {
-                    let _ = std::process::Command::new(omvix_windows::paths::system_tool(
-                        "explorer.exe",
-                    ))
-                    .arg(&log_dir)
-                    .spawn();
-                }
+                open_folder_in_explorer(&log_dir);
             }
             if ui.button(i18n.t("logs.clear_logs")).clicked() {
                 let _ = clear_logs(&log_dir);
