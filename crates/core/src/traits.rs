@@ -53,8 +53,3 @@ pub trait CpuTuningBackend: Send + Sync {
     fn set_tcc_temp_limit(&self, temp_c: u8) -> Result<()>;
     fn set_core_undervolt_mv(&self, offset_mv: i16) -> Result<()>;
 }
-
-/// Omen key / global hotkey integration hook.
-pub trait HotkeyBackend: Send + Sync {
-    fn poll_omen_key_pressed(&self) -> Result<bool>;
-}

@@ -23,10 +23,6 @@ impl AutoProfileEngine {
         }
     }
 
-    pub fn last_ac_state(&self) -> Option<bool> {
-        self.last_ac_state
-    }
-
     /// Evaluates whether an AC/DC transition occurred (or `force == true`).
     /// Returns `None` if auto-profile is disabled or power state did not change.
     pub fn evaluate(

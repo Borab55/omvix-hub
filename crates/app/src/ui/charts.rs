@@ -1,4 +1,4 @@
-use crate::theme::{accent_color, rgb, status_ok, status_warn};
+use crate::theme::{accent_color, muted_text, rgb, status_ok, status_warn};
 use egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Shape, Stroke, StrokeKind, Ui, Vec2,
 };
@@ -14,7 +14,6 @@ pub struct ChartSeries<'a> {
 
 #[derive(Default, Clone, Copy)]
 pub struct FanCurveEditResult {
-    pub changed: bool,
     pub committed: bool,
 }
 
@@ -30,14 +29,6 @@ fn chart_bg_color(t: &CustomThemeConfig) -> Color32 {
     }
 }
 
-fn muted_text_color(t: &CustomThemeConfig) -> Color32 {
-    if t.dark_base {
-        Color32::from_rgb(156, 160, 170)
-    } else {
-        Color32::from_rgb(100, 110, 125)
-    }
-}
-
 fn subtle_grid_color(t: &CustomThemeConfig) -> Color32 {
     if t.dark_base {
         Color32::from_rgba_unmultiplied(255, 255, 255, 18)
@@ -50,7 +41,6 @@ fn subtle_grid_color(t: &CustomThemeConfig) -> Color32 {
 #[allow(clippy::too_many_arguments)]
 pub fn telemetry_area_chart(
     ui: &mut Ui,
-    _id_salt: &str,
     height: f32,
     y_min: f32,
     y_max: f32,
@@ -84,11 +74,7 @@ pub fn telemetry_area_chart(
                 ui.spacing_mut().item_spacing.x = 5.0;
                 let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(9.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot_rect.center(), 4.0, s.color);
-                ui.label(
-                    egui::RichText::new(s.name)
-                        .size(11.5)
-                        .color(muted_text_color(t)),
-                );
+                ui.label(egui::RichText::new(s.name).size(11.5).color(muted_text(t)));
                 ui.label(
                     egui::RichText::new(latest)
                         .size(12.0)
@@ -106,7 +92,7 @@ pub fn telemetry_area_chart(
     let bg = chart_bg_color(t);
     let border = rgb(t.card_border);
     let grid = subtle_grid_color(t);
-    let axis_text = muted_text_color(t);
+    let axis_text = muted_text(t);
 
     painter.rect_filled(outer_rect, CornerRadius::same(8), bg);
     painter.rect_stroke(
@@ -336,7 +322,7 @@ pub fn interactive_fan_curve(
     let bg = chart_bg_color(t);
     let border = rgb(t.card_border);
     let grid = subtle_grid_color(t);
-    let axis_text = muted_text_color(t);
+    let axis_text = muted_text(t);
 
     painter.rect_filled(outer_rect, CornerRadius::same(9), bg);
     painter.rect_stroke(
@@ -543,7 +529,6 @@ pub fn interactive_fan_curve(
                         }
                         running_max = pt.speed_pct;
                     }
-                    res.changed = true;
                 }
             }
         }
@@ -725,7 +710,7 @@ pub fn battery_health_chart(
 
     let health_color = status_ok(t);
     let wear_color = status_warn(t);
-    let axis_text = muted_text_color(t);
+    let axis_text = muted_text(t);
     let bg = chart_bg_color(t);
     let border = rgb(t.card_border);
     let grid = subtle_grid_color(t);

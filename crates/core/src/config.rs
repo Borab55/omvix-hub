@@ -1174,12 +1174,7 @@ impl AppConfig {
         if path.exists() && fs::read_to_string(path).ok().as_deref() == Some(serialized.as_str()) {
             return Ok(());
         }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp_path = path.with_extension("toml.tmp");
-        fs::write(&tmp_path, serialized)?;
-        fs::rename(&tmp_path, path)?;
+        crate::write_bytes_atomically(path, serialized.as_bytes())?;
         Ok(())
     }
 }

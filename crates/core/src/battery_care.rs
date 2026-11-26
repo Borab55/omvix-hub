@@ -14,10 +14,6 @@ impl BatteryCareEngine {
         }
     }
 
-    pub fn last_mode(&self) -> BatteryChargeMode {
-        self.last_applied_mode
-    }
-
     /// Evaluates the target firmware `BatteryChargeMode` given current charge percentage and AC state.
     /// Automatically clears travel charge once expired, battery reaches >=99%, or AC is unplugged.
     pub fn evaluate(

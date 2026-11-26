@@ -10,8 +10,8 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+    KEY_WRITE, REG_SZ,
 };
 use windows::Win32::System::TaskScheduler::{
     ITaskFolder, ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_LOGON_GROUP,
@@ -246,6 +246,7 @@ pub fn build_elevated_task_xml_string(exe_path: &Path) -> String {
 
 /// Builds a Task Scheduler 1.2 UTF-16LE XML definition (with BOM) that starts Omvix Hub
 /// elevated (`HighestAvailable`, zero UAC prompt) at logon on both AC and battery power.
+#[cfg(test)]
 pub fn build_elevated_task_xml(exe_path: &Path) -> Vec<u8> {
     let xml = build_elevated_task_xml_string(exe_path);
 
@@ -342,8 +343,6 @@ pub fn query_installed_copy_status() -> InstalledCopyStatus {
     };
 
     let task_exists = is_elevated_task_autostart_enabled();
-    let task_path_matches = query_elevated_task_command()
-        .is_some_and(|cmd| paths_equal_ci(Path::new(&cmd), &installed));
 
     InstalledCopyStatus {
         installed_path: installed.to_string_lossy().to_string(),
@@ -351,7 +350,6 @@ pub fn query_installed_copy_status() -> InstalledCopyStatus {
         running_from_installed,
         installed_is_outdated,
         task_exists,
-        task_path_matches,
     }
 }
 
@@ -360,25 +358,6 @@ pub fn is_elevated_task_autostart_enabled() -> bool {
     TaskSchedulerSession::connect()
         .ok()
         .is_some_and(|session| unsafe { session.root.GetTask(&BSTR::from(TASK_NAME)) }.is_ok())
-}
-
-fn is_registry_autostart_enabled() -> bool {
-    let subkey = HSTRING::from(RUN_SUBKEY);
-    let val_name = HSTRING::from(VALUE_NAME);
-    let mut hkey = HKEY::default();
-    let open = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, 0, KEY_READ, &mut hkey) };
-    if open != ERROR_SUCCESS {
-        return false;
-    }
-    let query = unsafe { RegQueryValueExW(hkey, &val_name, None, None, None, None) };
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    query == ERROR_SUCCESS
-}
-
-pub fn is_autostart_enabled() -> bool {
-    is_elevated_task_autostart_enabled() || is_registry_autostart_enabled()
 }
 
 fn set_registry_autostart(enabled: bool, exe_path: &Path) -> Result<()> {

@@ -76,15 +76,9 @@ impl CrashGuardState {
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let serialized = serde_json::to_string_pretty(self)
             .map_err(|e| crate::error::OmvixError::Config(e.to_string()))?;
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, serialized)?;
-        fs::rename(&tmp_path, path)?;
-        Ok(())
+        crate::write_bytes_atomically(path, serialized.as_bytes())
     }
 
     /// Returns `true` when the last 3 launches that applied hardware settings all ended within

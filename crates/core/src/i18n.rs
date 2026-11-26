@@ -1,6 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::Path;
 
 const EN_JSON: &str = include_str!("../../../locales/en.json");
 const TR_JSON: &str = include_str!("../../../locales/tr.json");
@@ -40,31 +38,6 @@ impl I18n {
         };
         instance.set_language(initial_lang);
         instance
-    }
-
-    /// Loads additional `<lang>.json` translation packs from an external directory.
-    pub fn load_extra_locales(&mut self, dir: &Path) -> usize {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return 0;
-        };
-        let mut loaded = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let code = stem.to_lowercase();
-            if let Ok(raw) = fs::read_to_string(&path) {
-                if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&raw) {
-                    self.catalogs.insert(code, map);
-                    loaded += 1;
-                }
-            }
-        }
-        loaded
     }
 
     pub fn active_language(&self) -> &str {

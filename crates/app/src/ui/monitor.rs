@@ -2,20 +2,10 @@ use crate::theme::{
     accent_color, card_frame, pill_button, section_title, status_badge, status_err,
 };
 use crate::ui::charts::{telemetry_area_chart, ChartSeries};
-use crate::ui::{default_telemetry_csv_path, show_file_in_folder};
+use crate::ui::{default_telemetry_csv_path, show_file_in_folder, REFRESH_OPTIONS_MS};
 use crate::worker::{MetricStats, SharedState, WorkerCommand};
 use egui::{Color32, RichText, Ui};
 use omvix_core::{AppConfig, I18n};
-
-const REFRESH_OPTIONS_MS: &[(u64, &str)] = &[
-    (100, "0.1s"),
-    (250, "0.25s"),
-    (500, "0.5s"),
-    (1000, "1s"),
-    (1500, "1.5s"),
-    (2000, "2s"),
-    (5000, "5s"),
-];
 
 pub fn render(
     ui: &mut Ui,
@@ -363,7 +353,6 @@ pub fn render(
 
         telemetry_area_chart(
             ui,
-            "monitor_temp_chart",
             175.0,
             20.0,
             105.0,
@@ -406,7 +395,6 @@ pub fn render(
 
         telemetry_area_chart(
             ui,
-            "monitor_usage_chart",
             175.0,
             0.0,
             100.0,
@@ -449,7 +437,6 @@ pub fn render(
 
         telemetry_area_chart(
             ui,
-            "monitor_power_chart",
             175.0,
             0.0,
             60.0,

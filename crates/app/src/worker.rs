@@ -111,9 +111,6 @@ pub struct SharedState {
     pub cpu_temp_stats: MetricStats,
     pub gpu_temp_stats: MetricStats,
     pub cpu_power_stats: MetricStats,
-    pub gpu_power_stats: MetricStats,
-    pub cpu_usage_stats: MetricStats,
-    pub gpu_usage_stats: MetricStats,
     pub telemetry_paused: bool,
     pub safe_mode: Option<SafeModeReason>,
     pub thermal_guard_active: bool,
@@ -173,9 +170,6 @@ impl Default for SharedState {
             cpu_temp_stats: MetricStats::new(),
             gpu_temp_stats: MetricStats::new(),
             cpu_power_stats: MetricStats::new(),
-            gpu_power_stats: MetricStats::new(),
-            cpu_usage_stats: MetricStats::new(),
-            gpu_usage_stats: MetricStats::new(),
             telemetry_paused: false,
             safe_mode: None,
             thermal_guard_active: false,
@@ -246,9 +240,6 @@ impl SharedState {
         self.cpu_temp_stats = MetricStats::new();
         self.gpu_temp_stats = MetricStats::new();
         self.cpu_power_stats = MetricStats::new();
-        self.gpu_power_stats = MetricStats::new();
-        self.cpu_usage_stats = MetricStats::new();
-        self.gpu_usage_stats = MetricStats::new();
     }
 }
 
@@ -1006,11 +997,9 @@ fn spawn_test_worker(
 fn record_snapshot(st: &mut SharedState, snap: &TelemetrySnapshot, t: f64) {
     if let Some(u) = snap.cpu_usage_pct {
         push_sample(&mut st.cpu_usage_history, t, u);
-        st.cpu_usage_stats.record(u);
     }
     if let Some(gl) = snap.gpu_usage_pct {
         push_sample(&mut st.gpu_load_history, t, gl);
-        st.gpu_usage_stats.record(gl);
     }
     if let (Some(used), Some(total)) = (snap.ram_used_gb, snap.ram_total_gb) {
         if total > 0.0 {
@@ -1035,7 +1024,6 @@ fn record_snapshot(st: &mut SharedState, snap: &TelemetrySnapshot, t: f64) {
     }
     if let Some(gp) = snap.gpu_power_w {
         push_sample(&mut st.gpu_power_history, t, gp);
-        st.gpu_power_stats.record(gp);
     }
     if let Some(bp) = snap.battery_rate_w {
         push_sample(&mut st.battery_power_history, t, bp.abs());

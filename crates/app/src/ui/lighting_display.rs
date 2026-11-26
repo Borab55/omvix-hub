@@ -2,7 +2,7 @@ use crate::theme::{
     accent_color, card_frame, fixed_color_picker_button, lighting_swatch_button, pill_button,
     section_title, section_toggle_button, status_badge, status_err, status_warn, ColorButtonStyle,
 };
-use crate::ui::control_committed;
+use crate::ui::{control_committed, unique_profile_slug};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
 use omvix_core::{AppConfig, GpuMode, I18n, KeyboardType, LightingProfile, RgbColor};
@@ -198,32 +198,10 @@ pub fn render(
                     } else {
                         clean_name.to_string()
                     };
-                    let slug_base = final_name
-                        .to_lowercase()
-                        .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                        .collect::<String>()
-                        .trim_matches('-')
-                        .to_string();
-                    let base = if slug_base.is_empty() {
-                        "rgb".to_string()
-                    } else {
-                        slug_base
-                    };
-                    let mut candidate = base.clone();
-                    let mut n = 2usize;
-                    while cfg
-                        .lighting
-                        .custom_profiles
-                        .iter()
-                        .any(|p| p.id == candidate)
-                        || LightingProfile::builtins()
-                            .iter()
-                            .any(|p| p.id == candidate)
-                    {
-                        candidate = format!("{base}-{n}");
-                        n += 1;
-                    }
+                    let candidate = unique_profile_slug(&final_name, "rgb", |id| {
+                        cfg.lighting.custom_profiles.iter().any(|p| p.id == id)
+                            || LightingProfile::builtins().iter().any(|p| p.id == id)
+                    });
                     let prof = LightingProfile {
                         id: candidate,
                         name: final_name,

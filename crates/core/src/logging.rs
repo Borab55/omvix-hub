@@ -334,14 +334,6 @@ impl LogHandle {
     pub fn flush(&self) {
         self.writer.flush_all();
     }
-
-    pub fn total_bytes(&self) -> u64 {
-        total_log_bytes(&self.log_dir)
-    }
-
-    pub fn files(&self) -> Vec<PathBuf> {
-        list_log_files(&self.log_dir)
-    }
 }
 
 /// Initializes structured, timestamped, size-bounded logging and installs a panic hook.

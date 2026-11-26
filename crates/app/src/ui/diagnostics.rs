@@ -2,11 +2,10 @@ use crate::theme::{
     card_frame, pill_button, pill_button_enabled, section_title, status_badge, status_ok,
     status_warn,
 };
-use crate::ui::{default_support_bundle_path, show_file_in_folder};
+use crate::ui::{default_desktop_or_temp_file, default_support_bundle_path, show_file_in_folder};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, ScrollArea, Ui};
 use omvix_core::{CustomThemeConfig, I18n};
-use std::path::PathBuf;
 
 pub fn render(
     ui: &mut Ui,
@@ -25,7 +24,7 @@ pub fn render(
             on_cmd(WorkerCommand::RefreshDiagnostics);
         }
         if pill_button(ui, &i18n.t("diagnostics.export_json"), false, t).clicked() {
-            let out_path = default_export_path();
+            let out_path = default_desktop_or_temp_file("omvix-diagnostics.json");
             on_cmd(WorkerCommand::ExportDiagnostics(out_path));
         }
         let bundle_lbl = if st.support_bundle_busy {
@@ -252,15 +251,4 @@ pub fn render(
     } else {
         ui.weak("Collecting hardware diagnostics...");
     }
-}
-
-fn default_export_path() -> PathBuf {
-    #[cfg(windows)]
-    if let Some(desktop) = std::env::var_os("USERPROFILE") {
-        let candidate = PathBuf::from(desktop).join("Desktop");
-        if candidate.exists() {
-            return candidate.join("omvix-diagnostics.json");
-        }
-    }
-    std::env::temp_dir().join("omvix-diagnostics.json")
 }

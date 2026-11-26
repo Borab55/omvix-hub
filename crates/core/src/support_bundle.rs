@@ -3,7 +3,7 @@ use crate::error::Result;
 use crate::logging::list_log_files;
 use crate::models::DiagnosticReport;
 use chrono::{Datelike, Local, Timelike, Utc};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -380,12 +380,7 @@ pub fn build_support_bundle_zip(
     let bytes = zip.finish();
     let total_bytes = bytes.len();
 
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp_path = out_path.with_extension("zip.tmp");
-    fs::write(&tmp_path, &bytes)?;
-    fs::rename(&tmp_path, out_path)?;
+    crate::write_bytes_atomically(out_path, &bytes)?;
 
     Ok(SupportBundleSummary {
         output_path: out_path.to_path_buf(),
@@ -397,6 +392,7 @@ pub fn build_support_bundle_zip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()

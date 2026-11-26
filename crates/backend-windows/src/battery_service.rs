@@ -66,24 +66,12 @@ impl Drop for ScHandleGuard {
     }
 }
 
-pub fn install_dir() -> PathBuf {
-    paths::install_dir()
-}
-
-pub fn installed_exe() -> PathBuf {
-    paths::installed_service_exe()
-}
-
-pub fn data_dir() -> PathBuf {
-    paths::omvix_program_data_dir()
-}
-
 pub fn config_file_path() -> PathBuf {
-    data_dir().join("battery-service.toml")
+    paths::omvix_program_data_dir().join("battery-service.toml")
 }
 
 pub fn log_file_path() -> PathBuf {
-    data_dir().join("battery-service.log")
+    paths::omvix_program_data_dir().join("battery-service.log")
 }
 
 pub fn service_command_line(exe: &Path) -> String {
@@ -288,8 +276,8 @@ fn query_binary_path(svc: SC_HANDLE) -> Option<String> {
 }
 
 pub fn query_service_info() -> BatteryServiceInfo {
-    let exe_path = installed_exe();
-    let d_dir = data_dir();
+    let exe_path = paths::installed_service_exe();
+    let d_dir = paths::omvix_program_data_dir();
     let l_path = log_file_path();
     let mut info = BatteryServiceInfo {
         service_name: SERVICE_NAME.to_string(),
@@ -346,14 +334,16 @@ pub fn is_service_installed() -> bool {
 }
 
 pub fn has_service_leftovers() -> bool {
-    installed_exe().exists() || install_dir().exists() || data_dir().exists()
+    paths::installed_service_exe().exists()
+        || paths::install_dir().exists()
+        || paths::omvix_program_data_dir().exists()
 }
 
 pub fn sync_config_if_installed(cfg: &BatteryConfig) -> Result<()> {
     if !is_service_installed() {
         return Ok(());
     }
-    ensure_secure_program_data_dir(&data_dir())?;
+    ensure_secure_program_data_dir(&paths::omvix_program_data_dir())?;
     BatteryServiceConfig::from(cfg).save_to_path(&config_file_path())
 }
 
@@ -441,15 +431,15 @@ fn wait_until_running(svc: SC_HANDLE) -> Result<()> {
 pub fn install_or_update_service(cfg: &BatteryConfig) -> Result<String> {
     require_admin("install or update OmvixBatteryService")?;
 
-    let i_dir = install_dir();
+    let i_dir = paths::install_dir();
     if is_reparse_point(&i_dir) {
         return Err(OmvixError::PermissionDenied(format!(
             "Refusing to install service into reparse point {}",
             i_dir.display()
         )));
     }
-    let d_dir = data_dir();
-    let target_exe = installed_exe();
+    let d_dir = paths::omvix_program_data_dir();
+    let target_exe = paths::installed_service_exe();
     fs::create_dir_all(&i_dir)?;
     ensure_secure_program_data_dir(&d_dir)?;
     BatteryServiceConfig::from(cfg).save_to_path(&config_file_path())?;
@@ -648,8 +638,8 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
         deferred_reboot = true;
     }
 
-    let exe_path = installed_exe();
-    let i_dir = install_dir();
+    let exe_path = paths::installed_service_exe();
+    let i_dir = paths::install_dir();
     if exe_path.exists() {
         let current = std::env::current_exe().ok();
         let is_self = current
@@ -670,7 +660,7 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
         deferred_reboot = true;
     }
 
-    let d_dir = data_dir();
+    let d_dir = paths::omvix_program_data_dir();
     if d_dir.exists()
         && while_in_use(|| fs::remove_dir_all(&d_dir)).is_err()
         && schedule_delete_on_reboot(&d_dir)
@@ -838,7 +828,7 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
     let battery_be = WindowsBatteryBackend::new();
     let mut engine = BatteryCareEngine::new();
 
-    if let Err(err) = ensure_secure_program_data_dir(&data_dir()) {
+    if let Err(err) = ensure_secure_program_data_dir(&paths::omvix_program_data_dir()) {
         daemon_log(&format!("Warning: ProgramData ACL repair returned: {err}"));
     }
     let cfg_path = config_file_path();

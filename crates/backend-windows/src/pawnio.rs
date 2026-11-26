@@ -107,11 +107,6 @@ pub fn median3(a: f32, b: f32, c: f32) -> f32 {
     vals[1]
 }
 
-/// Admin-protected directory where Omvix Hub stores verified PawnIO module binaries (`C:\Program Files\OmvixHub\pawnio`).
-pub fn pawnio_module_dir() -> PathBuf {
-    paths::pawnio_module_dir()
-}
-
 /// Checks whether the PawnIO kernel driver device is reachable or installed on this machine.
 pub fn is_pawnio_driver_installed() -> bool {
     let wide_path: Vec<u16> = PAWNIO_DEVICE_PATH
@@ -164,7 +159,7 @@ pub fn install_pawnio_and_module() -> Result<String> {
             install_root.display()
         )));
     }
-    let dir = pawnio_module_dir();
+    let dir = paths::pawnio_module_dir();
     if is_reparse_point(&dir) {
         return Err(OmvixError::PermissionDenied(format!(
             "Refusing to write into reparse point {}",
@@ -358,7 +353,7 @@ fn try_migrate_legacy_module(bytes: &[u8], target: &Path) -> bool {
 }
 
 fn find_intel_msr_module() -> Option<PathBuf> {
-    let protected = pawnio_module_dir().join("IntelMSR.bin");
+    let protected = paths::pawnio_module_dir().join("IntelMSR.bin");
     if read_verified_module(&protected).is_some() {
         return Some(protected);
     }
