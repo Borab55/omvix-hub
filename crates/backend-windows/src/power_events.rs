@@ -141,10 +141,9 @@ where
         *guard = Some(Box::new(on_event));
     }
 
-    let (tid_tx, tid_rx) = mpsc::channel::<u32>();
+    let (tid_tx, tid_rx) = mpsc::channel::<Option<u32>>();
     let join = thread::spawn(move || {
         let tid = unsafe { GetCurrentThreadId() };
-        let _ = tid_tx.send(tid);
 
         let class_utf16: Vec<u16> = POWER_CLASS_NAME
             .encode_utf16()
@@ -186,9 +185,12 @@ where
             Ok(h) => h,
             Err(err) => {
                 tracing::warn!("Could not create power event listener window: {err}");
+                let _ = tid_tx.send(None);
                 return;
             }
         };
+
+        let _ = tid_tx.send(Some(tid));
 
         let notify_handle = unsafe {
             RegisterSuspendResumeNotification(HANDLE(hwnd.0), DEVICE_NOTIFY_WINDOW_HANDLE)
@@ -203,7 +205,7 @@ where
         }
 
         let mut msg = MSG::default();
-        while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.as_bool() {
+        while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -227,7 +229,10 @@ where
         tracing::debug!("Stopped Windows power event listener");
     });
 
-    let thread_id = tid_rx.recv_timeout(Duration::from_millis(500)).ok();
+    let thread_id = tid_rx
+        .recv_timeout(Duration::from_millis(500))
+        .ok()
+        .flatten();
     PowerEventHandle {
         thread_id,
         join: Some(join),

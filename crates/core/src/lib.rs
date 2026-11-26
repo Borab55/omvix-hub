@@ -36,3 +36,20 @@ pub use updater::{
     AuthenticodeInfo, ReleaseAsset, ReleaseInfo, SemVer, StagedUpdate, UpdateSignatureStatus,
     UpdateUiStatus,
 };
+
+pub(crate) fn write_bytes_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_ext = match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{ext}.tmp"),
+        _ => "tmp".to_string(),
+    };
+    let tmp_path = path.with_extension(tmp_ext);
+    std::fs::write(&tmp_path, bytes)?;
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err.into());
+    }
+    Ok(())
+}

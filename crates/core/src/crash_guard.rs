@@ -76,15 +76,9 @@ impl CrashGuardState {
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let serialized = serde_json::to_string_pretty(self)
             .map_err(|e| crate::error::OmvixError::Config(e.to_string()))?;
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, serialized)?;
-        fs::rename(&tmp_path, path)?;
-        Ok(())
+        crate::write_bytes_atomically(path, serialized.as_bytes())
     }
 
     /// Returns `true` when the last 3 launches that applied hardware settings all ended within
@@ -107,9 +101,16 @@ impl CrashGuardState {
             stabilized_at_unix: None,
             clean_exit_at_unix: None,
         });
-        if self.launches.len() > MAX_STORED_LAUNCHES {
-            let excess = self.launches.len() - MAX_STORED_LAUNCHES;
-            self.launches.drain(0..excess);
+        while self.launches.len() > MAX_STORED_LAUNCHES {
+            if let Some(pos) = self
+                .launches
+                .iter()
+                .position(|r| r.hw_applied_at_unix.is_none())
+            {
+                self.launches.remove(pos);
+            } else {
+                self.launches.remove(0);
+            }
         }
     }
 
@@ -255,5 +256,20 @@ mod tests {
         assert!(loaded.is_crash_loop_triggered());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn safe_mode_launches_do_not_evict_post_apply_crash_loop() {
+        let mut g = CrashGuardState::default();
+        for t in [100u64, 200, 300] {
+            g.record_launch_start(t);
+            g.record_hw_applied(t + 1);
+        }
+        assert!(g.is_crash_loop_triggered());
+
+        for i in 0..10u64 {
+            g.record_launch_start(400 + i * 10);
+        }
+        assert!(g.is_crash_loop_triggered());
     }
 }

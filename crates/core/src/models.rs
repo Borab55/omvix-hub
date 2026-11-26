@@ -639,7 +639,6 @@ pub struct InstalledCopyStatus {
     pub running_from_installed: bool,
     pub installed_is_outdated: bool,
     pub task_exists: bool,
-    pub task_path_matches: bool,
 }
 
 #[cfg(test)]

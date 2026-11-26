@@ -1027,7 +1027,6 @@ impl OmvixApp {
         let tray_drawer_hwnd = Arc::clone(&drawer_hwnd_atomic);
         let tray_force_quit = Arc::clone(&force_quit);
         let tray_quit_started = Arc::clone(&clean_quit_started);
-        let tray_cfg_manual_speed = cfg.thermal_fan.manual_speed_pct;
         let _worker_clone_for_tray = worker_command_proxy(&worker);
         thread::spawn(move || loop {
             for action in TrayController::poll_actions() {
@@ -1064,7 +1063,7 @@ impl OmvixApp {
                     TrayAction::SetFan(mode) => {
                         let _ = _worker_clone_for_tray.send(WorkerCommand::SetFanMode {
                             mode,
-                            manual_speed_pct: Some(tray_cfg_manual_speed),
+                            manual_speed_pct: None,
                         });
                         let _ = tray_tx.send(AppSignal::TrayFanChanged(mode));
                         wake_ctx.request_repaint();
@@ -1173,6 +1172,9 @@ impl OmvixApp {
             crash_guard_path,
             log_handle,
         };
+        if let Some(tray) = &mut app.tray {
+            tray.update_labels(&app.i18n, initial_visible);
+        }
         #[cfg(windows)]
         {
             if let Some(w) = &app.worker {
@@ -1728,8 +1730,48 @@ fn worker_command_proxy(worker: &BackgroundWorker) -> Sender<WorkerCommand> {
     worker.sender_clone()
 }
 
+fn merge_worker_synced_config(dst: &mut AppConfig, synced: &AppConfig) {
+    dst.thermal_fan.performance_mode = synced.thermal_fan.performance_mode;
+    dst.thermal_fan.fan_mode = synced.thermal_fan.fan_mode;
+    dst.thermal_fan.manual_speed_pct = synced.thermal_fan.manual_speed_pct;
+    dst.thermal_fan.custom_curve = synced.thermal_fan.custom_curve.clone();
+
+    dst.battery.enabled = synced.battery.enabled;
+    dst.battery.mode = synced.battery.mode;
+    dst.battery.stop_threshold_pct = synced.battery.stop_threshold_pct;
+    dst.battery.start_threshold_pct = synced.battery.start_threshold_pct;
+    dst.battery.hold_when_shutdown = synced.battery.hold_when_shutdown;
+    dst.battery.one_time_full_charge = synced.battery.one_time_full_charge;
+    dst.battery.travel_charge_until_utc = synced.battery.travel_charge_until_utc;
+    dst.battery.active_profile_id = synced.battery.active_profile_id.clone();
+
+    dst.lighting.enabled = synced.lighting.enabled;
+    dst.lighting.brightness_pct = synced.lighting.brightness_pct;
+    dst.lighting.zones = synced.lighting.zones;
+    dst.lighting.active_profile_id = synced.lighting.active_profile_id.clone();
+
+    dst.tuning.cpu_boost_mode = synced.tuning.cpu_boost_mode;
+    dst.tuning.pl1_watts = synced.tuning.pl1_watts;
+    dst.tuning.pl2_watts = synced.tuning.pl2_watts;
+}
+
+#[cfg(windows)]
+fn win32_is_window_visible(hwnd_raw: isize) -> bool {
+    if hwnd_raw == 0 {
+        return false;
+    }
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(windows::Win32::Foundation::HWND(
+            hwnd_raw as *mut std::ffi::c_void,
+        ))
+        .as_bool()
+    }
+}
+
 impl eframe::App for OmvixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.process_signals(ctx);
+
         if self.pending_hide_frames > 0 && self.open_drawer.is_none() {
             self.pending_hide_frames -= 1;
             if self.pending_hide_frames == 0 {
@@ -1739,9 +1781,15 @@ impl eframe::App for OmvixApp {
             ctx.request_repaint();
         }
 
-        self.process_signals(ctx);
-
         let main_hwnd = self.hwnd_atomic.load(Ordering::SeqCst);
+        #[cfg(windows)]
+        if self.pending_hide_frames == 0
+            && !self.window_visible.load(Ordering::Relaxed)
+            && main_hwnd != 0
+            && win32_is_window_visible(main_hwnd)
+        {
+            self.show_and_focus_window(ctx);
+        }
         let dock_locked = self.cfg.general.dock_bottom_right;
         if main_hwnd != 0 && self.prev_dock_locked != Some(dock_locked) {
             self.prev_dock_locked = Some(dock_locked);
@@ -1812,7 +1860,7 @@ impl eframe::App for OmvixApp {
             self.last_seen_config_sync_rev = snapshot_state.synced_config_rev;
             self.last_seen_auto_revision = snapshot_state.auto_applied_revision;
             if let Some(ref synced) = snapshot_state.synced_config {
-                self.cfg = synced.clone();
+                merge_worker_synced_config(&mut self.cfg, synced);
                 self.config_dirty_since = None;
                 should_save = true;
             }
@@ -1931,7 +1979,7 @@ impl eframe::App for OmvixApp {
                         self.show_wizard = false;
                         should_save = true;
                         pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
-                        if self.cfg.battery.enabled && snapshot_state.safe_mode.is_none() {
+                        if snapshot_state.safe_mode.is_none() {
                             pending_cmds.push(WorkerCommand::ApplyBatteryNow);
                         }
                     }
@@ -2039,7 +2087,6 @@ impl eframe::App for OmvixApp {
                 }
 
                 let mut close_drawer = false;
-                let mut theme_applied = false;
                 let mut drawer_gained_focus = false;
                 let drawer_id = egui::ViewportId::from_hash_of("omvix_drawer_viewport");
                 ctx.show_viewport_immediate(drawer_id, builder, |drawer_ctx, _class| {
@@ -2271,7 +2318,6 @@ impl eframe::App for OmvixApp {
                                                     }
                                                 }
                                                 if res.theme_changed {
-                                                    theme_applied = true;
                                                     theme::apply_theme(
                                                         drawer_ctx,
                                                         &self.cfg.general.custom_theme,
@@ -2338,14 +2384,7 @@ impl eframe::App for OmvixApp {
                         }
                     }
                 }
-                if theme_applied {
-                    theme::apply_theme(
-                        ctx,
-                        &self.cfg.general.custom_theme,
-                        self.cfg.general.font_scale_pct,
-                    );
-                }
-            } else {
+            } else if !should_hide_to_tray && !should_quit {
                 self.reset_drawer_handles();
             }
         } else {
@@ -2380,6 +2419,7 @@ impl eframe::App for OmvixApp {
             self.profiles_draft = ui::profiles::ProfilesDraftState::default();
             self.battery_draft = ui::battery::BatteryDraftState::default();
             self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();
+            self.hotkeys_draft = ui::hotkeys::HotkeysDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();
             self.last_seen_config_sync_rev = snapshot_state.synced_config_rev;
             self.last_seen_auto_revision = snapshot_state.auto_applied_revision;
@@ -2396,8 +2436,9 @@ impl eframe::App for OmvixApp {
             if self.cfg.general.dock_bottom_right {
                 self.pending_dock_frames = 2;
             }
-            pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
             pending_cmds.push(WorkerCommand::RestoreAllDefaults);
+            pending_cmds.push(WorkerCommand::UpdateConfig(self.cfg.clone()));
+            ctx.request_repaint();
         }
 
         if should_save {
@@ -2432,5 +2473,68 @@ impl eframe::App for OmvixApp {
         {
             self.save_config();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_worker_synced_config;
+    use omvix_core::{
+        AppConfig, BatteryChargeMode, CpuBoostMode, FanMode, PerformanceMode, RgbColor,
+    };
+
+    #[test]
+    fn merge_worker_synced_config_preserves_ui_only_settings() {
+        let mut dst = AppConfig::default();
+        dst.general.language = "tr".to_string();
+        dst.general.theme = "light".to_string();
+        dst.general.font_scale_pct = 115;
+        dst.general.hide_on_focus_loss = true;
+        dst.hotkeys.global_toggle_shortcut = "Ctrl+Alt+O".to_string();
+
+        let mut synced = AppConfig::default();
+        synced.general.language = "en".to_string();
+        synced.general.theme = "dark".to_string();
+        synced.general.font_scale_pct = 100;
+        synced.general.hide_on_focus_loss = false;
+        synced.hotkeys.global_toggle_shortcut = String::new();
+        synced.thermal_fan.performance_mode = PerformanceMode::Performance;
+        synced.thermal_fan.fan_mode = FanMode::Manual;
+        synced.thermal_fan.manual_speed_pct = 75;
+        synced.battery.enabled = true;
+        synced.battery.mode = BatteryChargeMode::Hold;
+        synced.battery.stop_threshold_pct = 80;
+        synced.lighting.enabled = false;
+        synced.lighting.brightness_pct = 40;
+        synced.lighting.zones = [RgbColor { r: 1, g: 2, b: 3 }; 4];
+        synced.tuning.cpu_boost_mode = Some(CpuBoostMode::Disabled);
+        synced.tuning.pl1_watts = Some(45);
+        synced.tuning.pl2_watts = Some(90);
+
+        merge_worker_synced_config(&mut dst, &synced);
+
+        // UI-only settings preserved
+        assert_eq!(dst.general.language, "tr");
+        assert_eq!(dst.general.theme, "light");
+        assert_eq!(dst.general.font_scale_pct, 115);
+        assert!(dst.general.hide_on_focus_loss);
+        assert_eq!(dst.hotkeys.global_toggle_shortcut, "Ctrl+Alt+O");
+
+        // Worker-owned hardware fields synced
+        assert_eq!(
+            dst.thermal_fan.performance_mode,
+            PerformanceMode::Performance
+        );
+        assert_eq!(dst.thermal_fan.fan_mode, FanMode::Manual);
+        assert_eq!(dst.thermal_fan.manual_speed_pct, 75);
+        assert!(dst.battery.enabled);
+        assert_eq!(dst.battery.mode, BatteryChargeMode::Hold);
+        assert_eq!(dst.battery.stop_threshold_pct, 80);
+        assert!(!dst.lighting.enabled);
+        assert_eq!(dst.lighting.brightness_pct, 40);
+        assert_eq!(dst.lighting.zones, [RgbColor { r: 1, g: 2, b: 3 }; 4]);
+        assert_eq!(dst.tuning.cpu_boost_mode, Some(CpuBoostMode::Disabled));
+        assert_eq!(dst.tuning.pl1_watts, Some(45));
+        assert_eq!(dst.tuning.pl2_watts, Some(90));
     }
 }

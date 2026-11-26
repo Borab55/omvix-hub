@@ -38,6 +38,7 @@ struct TelemetryState {
     pawnio_attempts: u8,
     first_sample_done: bool,
     last_fast_refresh: Instant,
+    last_io_refresh: Instant,
     last_disk_list_refresh: Instant,
     last_ec_poll: Option<Instant>,
     fan_count: Option<usize>,
@@ -536,6 +537,7 @@ impl WindowsTelemetryBackend {
                 pawnio_attempts: 0,
                 first_sample_done: false,
                 last_fast_refresh: Instant::now(),
+                last_io_refresh: Instant::now(),
                 last_disk_list_refresh: Instant::now(),
                 last_ec_poll: None,
                 fan_count: None,
@@ -754,11 +756,11 @@ impl WindowsTelemetryBackend {
                 guard.first_sample_done = true;
             }
 
-            let dt_secs = guard.last_fast_refresh.elapsed().as_secs_f32().max(0.05);
             guard.sys.refresh_cpu_all();
             guard.sys.refresh_memory();
 
             let (net_rx_mb_s, net_tx_mb_s, disk_read_mb_s, disk_write_mb_s) = if include_heavy_io {
+                let io_dt_secs = guard.last_io_refresh.elapsed().as_secs_f32().max(0.05);
                 guard.networks.refresh(false);
 
                 if guard.last_disk_list_refresh.elapsed() >= Duration::from_secs(15) {
@@ -790,11 +792,12 @@ impl WindowsTelemetryBackend {
                     total_disk_w = total_disk_w.saturating_add(usage.written_bytes);
                 }
 
+                guard.last_io_refresh = Instant::now();
                 (
-                    Some((total_rx as f32 / (1024.0 * 1024.0)) / dt_secs),
-                    Some((total_tx as f32 / (1024.0 * 1024.0)) / dt_secs),
-                    Some((total_disk_r as f32 / (1024.0 * 1024.0)) / dt_secs),
-                    Some((total_disk_w as f32 / (1024.0 * 1024.0)) / dt_secs),
+                    Some((total_rx as f32 / (1024.0 * 1024.0)) / io_dt_secs),
+                    Some((total_tx as f32 / (1024.0 * 1024.0)) / io_dt_secs),
+                    Some((total_disk_r as f32 / (1024.0 * 1024.0)) / io_dt_secs),
+                    Some((total_disk_w as f32 / (1024.0 * 1024.0)) / io_dt_secs),
                 )
             } else {
                 (None, None, None, None)
@@ -809,13 +812,13 @@ impl WindowsTelemetryBackend {
             let cpu_power_w = guard.emi.as_mut().and_then(|e| e.sample_cpu_power_w());
 
             if guard.pawnio.is_none()
-                && crate::pawnio::has_intel_msr_module()
                 && should_retry_init(
                     guard.pawnio_attempts,
                     3,
                     guard.pawnio_last_attempt,
                     Duration::from_secs(30),
                 )
+                && crate::pawnio::has_intel_msr_module()
             {
                 guard.pawnio_attempts = guard.pawnio_attempts.saturating_add(1);
                 guard.pawnio_last_attempt = Some(Instant::now());
@@ -919,7 +922,8 @@ impl WindowsTelemetryBackend {
                                         raw.mem_used_mb = Some((mem.used / (1024 * 1024)) as u32);
                                         raw.mem_total_mb = Some((mem.total / (1024 * 1024)) as u32);
                                     }
-                                    raw.pstate = device.performance_state().ok().map(format_pstate);
+                                    raw.pstate =
+                                        device.performance_state().ok().map(|p| format_pstate(&p));
                                     if let Ok(reasons) = device.current_throttle_reasons() {
                                         let (reason, is_thermal) = filter_throttle_reasons(
                                             reasons,
@@ -1095,8 +1099,8 @@ impl TelemetryBackend for WindowsTelemetryBackend {
     }
 }
 
-fn format_pstate(p: PerformanceState) -> String {
-    match p {
+fn format_pstate(p: &PerformanceState) -> String {
+    match *p {
         PerformanceState::Zero => "P0".to_string(),
         PerformanceState::One => "P1".to_string(),
         PerformanceState::Two => "P2".to_string(),
@@ -1129,11 +1133,13 @@ mod tests {
         // Inside cooldown -> blocked
         let recent = Some(Instant::now());
         assert!(!should_retry_init(1, 5, recent, cd));
-        // Past cooldown -> allowed
-        let old = Some(Instant::now() - Duration::from_secs(31));
-        assert!(should_retry_init(1, 5, old, cd));
+        // Past cooldown (or zero cooldown) -> allowed without panicking when uptime < 31s
+        assert!(should_retry_init(1, 5, recent, Duration::ZERO));
+        if let Some(old) = Instant::now().checked_sub(Duration::from_secs(31)) {
+            assert!(should_retry_init(1, 5, Some(old), cd));
+        }
         // Reached max attempts -> blocked permanently
-        assert!(!should_retry_init(5, 5, old, cd));
+        assert!(!should_retry_init(5, 5, recent, Duration::ZERO));
     }
 
     #[test]

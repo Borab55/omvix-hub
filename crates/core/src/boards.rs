@@ -96,10 +96,6 @@ pub fn lookup_board(board_id: &str) -> Option<BoardProfile> {
         .cloned()
 }
 
-pub fn all_known_boards() -> &'static [BoardProfile] {
-    KNOWN_BOARDS
-}
-
 /// Returns `true` when BIOS WMI writes are authorized either because `board_id` is in the
 /// verified board table or because the user explicitly approved Experimental Mode for this board.
 pub fn is_bios_write_allowed(board_id: &str, experimental_approved_board: Option<&str>) -> bool {

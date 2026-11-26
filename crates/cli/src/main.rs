@@ -145,7 +145,7 @@ enum FanAction {
         #[arg(value_enum)]
         mode: CliFanMode,
         /// Target fan speed percentage (0..100) for manual mode.
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
         speed: Option<u8>,
     },
 }
@@ -164,6 +164,22 @@ impl From<CliFanMode> for FanMode {
             CliFanMode::Max => Self::Max,
             CliFanMode::Manual => Self::Manual,
         }
+    }
+}
+
+fn ensure_cli_bios_write_allowed(cfg: &AppConfig) -> std::result::Result<(), String> {
+    let identity = system_info::collect_system_identity()
+        .map_err(|e| format!("Failed reading motherboard identity for BIOS write gate: {e}"))?;
+    if omvix_core::boards::is_bios_write_allowed(
+        &identity.board_id,
+        cfg.general.experimental_board_id.as_deref(),
+    ) {
+        Ok(())
+    } else {
+        Err(format!(
+            "BIOS writes are blocked on unverified motherboard ID `{}` (enable Experimental Mode for this board in Omvix Hub settings first; safe recovery commands `fan set auto` and `battery auto` remain enabled).",
+            identity.board_id
+        ))
     }
 }
 
@@ -186,13 +202,10 @@ fn main() -> ExitCode {
         }
     };
 
-    match cli.command {
+    let exit_code = match cli.command {
         Commands::Probe => match run_diagnostics() {
             Ok(report) => {
                 print_report(&report);
-                if let Some(h) = log_handle {
-                    h.flush();
-                }
                 ExitCode::SUCCESS
             }
             Err(err) => {
@@ -256,16 +269,22 @@ fn main() -> ExitCode {
         },
         Commands::Thermal { action } => match action {
             ThermalAction::Set { mode } => {
-                let target: PerformanceMode = mode.into();
-                match WindowsThermalFanBackend::new().set_performance_mode(target) {
-                    Ok(()) => {
-                        println!("Applied performance mode: {target:?}");
-                        ExitCode::SUCCESS
-                    }
-                    Err(err) => {
-                        tracing::error!("Failed to set performance mode: {err}");
-                        eprintln!("Error: {err}");
-                        ExitCode::FAILURE
+                if let Err(msg) = ensure_cli_bios_write_allowed(&cfg) {
+                    tracing::warn!("{msg}");
+                    eprintln!("Error: {msg}");
+                    ExitCode::FAILURE
+                } else {
+                    let target: PerformanceMode = mode.into();
+                    match WindowsThermalFanBackend::new().set_performance_mode(target) {
+                        Ok(()) => {
+                            println!("Applied performance mode: {target:?}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            tracing::error!("Failed to set performance mode: {err}");
+                            eprintln!("Error: {err}");
+                            ExitCode::FAILURE
+                        }
                     }
                 }
             }
@@ -273,15 +292,28 @@ fn main() -> ExitCode {
         Commands::Fan { action } => match action {
             FanAction::Set { mode, speed } => {
                 let target: FanMode = mode.into();
-                match WindowsThermalFanBackend::new().set_fan_mode(target, speed) {
-                    Ok(()) => {
-                        println!("Applied fan mode: {target:?} (speed={speed:?})");
-                        ExitCode::SUCCESS
-                    }
-                    Err(err) => {
-                        tracing::error!("Failed to set fan mode: {err}");
-                        eprintln!("Error: {err}");
-                        ExitCode::FAILURE
+                if target == FanMode::Manual && speed.is_none() {
+                    eprintln!("Error: --speed <0..=100> is required when mode is `manual`.");
+                    ExitCode::FAILURE
+                } else if let Err(msg) = if target == FanMode::Auto {
+                    Ok(())
+                } else {
+                    ensure_cli_bios_write_allowed(&cfg)
+                } {
+                    tracing::warn!("{msg}");
+                    eprintln!("Error: {msg}");
+                    ExitCode::FAILURE
+                } else {
+                    match WindowsThermalFanBackend::new().set_fan_mode(target, speed) {
+                        Ok(()) => {
+                            println!("Applied fan mode: {target:?} (speed={speed:?})");
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            tracing::error!("Failed to set fan mode: {err}");
+                            eprintln!("Error: {err}");
+                            ExitCode::FAILURE
+                        }
                     }
                 }
             }
@@ -313,15 +345,25 @@ fn main() -> ExitCode {
             }
             BatteryAction::SetMode { mode } => {
                 let target: BatteryChargeMode = mode.into();
-                match WindowsBatteryBackend::new().set_charge_mode(target) {
-                    Ok(()) => {
-                        println!("Applied battery charge mode: {target:?}");
-                        ExitCode::SUCCESS
-                    }
-                    Err(err) => {
-                        tracing::error!("Failed to set battery charge mode: {err}");
-                        eprintln!("Error: {err}");
-                        ExitCode::FAILURE
+                if let Err(msg) = if target == BatteryChargeMode::Auto {
+                    Ok(())
+                } else {
+                    ensure_cli_bios_write_allowed(&cfg)
+                } {
+                    tracing::warn!("{msg}");
+                    eprintln!("Error: {msg}");
+                    ExitCode::FAILURE
+                } else {
+                    match WindowsBatteryBackend::new().set_charge_mode(target) {
+                        Ok(()) => {
+                            println!("Applied battery charge mode: {target:?}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            tracing::error!("Failed to set battery charge mode: {err}");
+                            eprintln!("Error: {err}");
+                            ExitCode::FAILURE
+                        }
                     }
                 }
             }
@@ -376,7 +418,12 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         },
+    };
+
+    if let Some(h) = log_handle {
+        h.flush();
     }
+    exit_code
 }
 
 fn print_battery_status(b: &BatteryStatus) {

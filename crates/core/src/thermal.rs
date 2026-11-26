@@ -357,7 +357,9 @@ impl ThermalSafetyGuard {
             let release_cpu_max = (cpu_thresh - 12.0).min(78.0);
             let fans_low_any =
                 !fan_rpms.is_empty() && fan_rpms.iter().any(|&r| r < MIN_GUARD_FAN_RPM);
-            let cooled = cpu_c.is_none_or(|t| t <= release_cpu_max)
+            let has_any_temp = cpu_c.is_some() || gpu_c.is_some() || chassis_c.is_some();
+            let cooled = has_any_temp
+                && cpu_c.is_none_or(|t| t <= release_cpu_max)
                 && gpu_c.is_none_or(|t| t <= 74.0)
                 && chassis_c.is_none_or(|t| t <= 46.0)
                 && (fan_mode == FanMode::Auto || !fans_low_any);
@@ -474,11 +476,12 @@ impl GuardMaxRetryController {
                     .iter()
                     .copied()
                     .max()
-                    .map(|m| (m * 55) / 100)
+                    .map(|m| m.saturating_mul(55) / 100)
                     .unwrap_or(2800)
                     .max(2400);
 
                 if !current_rpms.is_empty()
+                    && cur_max >= MIN_GUARD_FAN_RPM
                     && (cur_max >= self.baseline_max_rpm.saturating_add(400)
                         || cur_max >= target_floor)
                 {
@@ -916,5 +919,73 @@ mod tests {
             rc3.tick(&[1200, 1200], &[5800, 6100], 4.0),
             GuardMaxAction::RetryMax { attempt: 2 }
         );
+
+        // Path 4: Small spin below MIN_GUARD_FAN_RPM (0 -> 400 RPM) must NOT falsely verify
+        let mut rc4 = GuardMaxRetryController::new();
+        rc4.begin_engage(&[0, 0], 0.0);
+        assert_eq!(rc4.record_attempt_result(true, 0.0), GuardMaxAction::Wait);
+        assert_eq!(
+            rc4.tick(&[400, 400], &[5800, 6100], 1.0),
+            GuardMaxAction::Wait
+        );
+        assert_eq!(
+            rc4.tick(&[400, 400], &[5800, 6100], 4.0),
+            GuardMaxAction::RetryMax { attempt: 2 }
+        );
+    }
+
+    #[test]
+    fn thermal_safety_guard_does_not_release_on_total_sensor_loss() {
+        let mut g = ThermalSafetyGuard::new();
+        let cfg = ThermalGuardConfig::default();
+
+        // Trigger sustained thermal guard
+        assert_eq!(
+            g.evaluate(
+                cfg,
+                FanMode::Manual,
+                Some(96.0),
+                Some(60.0),
+                Some(40.0),
+                None,
+                &[3000, 3000],
+                0.0
+            ),
+            ThermalGuardDecision::NoChange
+        );
+        let engage_t = (cfg.sustain_secs as f64).max(15.0) + 1.0;
+        let engaged = g.evaluate(
+            cfg,
+            FanMode::Manual,
+            Some(96.0),
+            Some(60.0),
+            Some(40.0),
+            None,
+            &[3000, 3000],
+            engage_t,
+        );
+        assert!(matches!(
+            engaged,
+            ThermalGuardDecision::EngageEmergencyMax(_)
+        ));
+        assert!(g.is_active());
+
+        // Total sensor loss (all temps None) must NOT be misclassified as cooled
+        for dt in [1.0, 6.0, 15.0] {
+            assert_eq!(
+                g.evaluate(
+                    cfg,
+                    FanMode::Max,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[5800, 5800],
+                    engage_t + dt
+                ),
+                ThermalGuardDecision::NoChange
+            );
+        }
+        assert!(g.is_active());
     }
 }

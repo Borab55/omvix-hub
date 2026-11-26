@@ -4,7 +4,7 @@ use crate::theme::{
 };
 use crate::ui::charts::battery_health_chart;
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
-use crate::ui::control_committed;
+use crate::ui::{control_committed, open_folder_in_explorer, unique_profile_slug};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
 use omvix_core::{AppConfig, BatteryChargeMode, BatteryProfile, BatteryServiceState, I18n};
@@ -298,6 +298,7 @@ pub fn render(
                     cfg.battery.active_profile_id = None;
                 }
                 on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
             }
         }
 
@@ -344,30 +345,10 @@ pub fn render(
             } else {
                 clean_name.to_string()
             };
-            let slug_base = final_name
-                .to_lowercase()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect::<String>()
-                .trim_matches('-')
-                .to_string();
-            let base = if slug_base.is_empty() {
-                "custom".to_string()
-            } else {
-                slug_base
-            };
-            let mut candidate = base.clone();
-            let mut n = 2usize;
-            while cfg
-                .battery
-                .custom_profiles
-                .iter()
-                .any(|p| p.id == candidate)
-                || BatteryProfile::builtins().iter().any(|p| p.id == candidate)
-            {
-                candidate = format!("{base}-{n}");
-                n += 1;
-            }
+            let candidate = unique_profile_slug(&final_name, "custom", |id| {
+                cfg.battery.custom_profiles.iter().any(|p| p.id == id)
+                    || BatteryProfile::builtins().iter().any(|p| p.id == id)
+            });
             let prof = BatteryProfile {
                 id: candidate,
                 name: final_name,
@@ -569,13 +550,8 @@ pub fn render(
                             .small_button(i18n.t("battery.service_open_folder"))
                             .clicked()
                     {
-                        #[cfg(windows)]
                         if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
-                            let _ = std::process::Command::new(omvix_windows::paths::system_tool(
-                                "explorer.exe",
-                            ))
-                            .arg(dir)
-                            .spawn();
+                            open_folder_in_explorer(dir);
                         }
                     }
                 });
@@ -589,14 +565,7 @@ pub fn render(
                             .small_button(i18n.t("battery.service_open_folder"))
                             .clicked()
                     {
-                        #[cfg(windows)]
-                        {
-                            let _ = std::process::Command::new(omvix_windows::paths::system_tool(
-                                "explorer.exe",
-                            ))
-                            .arg(&svc.data_dir_path)
-                            .spawn();
-                        }
+                        open_folder_in_explorer(Path::new(&svc.data_dir_path));
                     }
                 });
                 ui.end_row();

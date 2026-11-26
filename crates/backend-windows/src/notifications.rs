@@ -46,6 +46,7 @@ struct OsdState {
     accent_rgb: [u8; 3],
     expires_at: Instant,
     hwnd_raw: isize,
+    spawning: bool,
 }
 
 static OSD_STATE: OnceLock<Mutex<OsdState>> = OnceLock::new();
@@ -59,6 +60,7 @@ fn osd_state() -> &'static Mutex<OsdState> {
             accent_rgb: [0, 196, 235],
             expires_at: Instant::now(),
             hwnd_raw: 0,
+            spawning: false,
         })
     })
 }
@@ -276,6 +278,7 @@ unsafe extern "system" fn osd_wnd_proc(
             if let Ok(mut st) = osd_state().lock() {
                 if st.hwnd_raw == hwnd.0 as isize {
                     st.hwnd_raw = 0;
+                    st.spawning = false;
                 }
             }
             unsafe { PostQuitMessage(0) };
@@ -288,7 +291,7 @@ unsafe extern "system" fn osd_wnd_proc(
 /// Displays a brief translucent click-through OSD badge in the lower screen area.
 /// Rapid mode cycles update the existing popup cleanly without stacking windows.
 pub fn show_mode_osd(title: &str, subtitle: &str, accent_rgb: [u8; 3]) {
-    let existing_hwnd = {
+    let (existing_hwnd, should_spawn) = {
         let Ok(mut st) = osd_state().lock() else {
             return;
         };
@@ -296,7 +299,11 @@ pub fn show_mode_osd(title: &str, subtitle: &str, accent_rgb: [u8; 3]) {
         st.subtitle = subtitle.to_string();
         st.accent_rgb = accent_rgb;
         st.expires_at = Instant::now() + Duration::from_millis(OSD_DURATION_MS);
-        st.hwnd_raw
+        let need_spawn = st.hwnd_raw == 0 && !st.spawning;
+        if need_spawn {
+            st.spawning = true;
+        }
+        (st.hwnd_raw, need_spawn)
     };
 
     if existing_hwnd != 0 {
@@ -304,6 +311,9 @@ pub fn show_mode_osd(title: &str, subtitle: &str, accent_rgb: [u8; 3]) {
         unsafe {
             let _ = InvalidateRect(hwnd, None, true);
         }
+        return;
+    }
+    if !should_spawn {
         return;
     }
 
@@ -345,6 +355,9 @@ pub fn show_mode_osd(title: &str, subtitle: &str, accent_rgb: [u8; 3]) {
                 None,
             )
         }) else {
+            if let Ok(mut st) = osd_state().lock() {
+                st.spawning = false;
+            }
             return;
         };
 
@@ -358,15 +371,17 @@ pub fn show_mode_osd(title: &str, subtitle: &str, accent_rgb: [u8; 3]) {
 
         if let Ok(mut st) = osd_state().lock() {
             st.hwnd_raw = hwnd.0 as isize;
+            st.spawning = false;
         }
 
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = InvalidateRect(hwnd, None, true);
             let _ = SetTimer(hwnd, OSD_TIMER_ID, 80, None);
         }
 
         let mut msg = MSG::default();
-        while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.as_bool() {
+        while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);

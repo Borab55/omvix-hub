@@ -363,7 +363,6 @@ fn render_step_battery(
         }
     });
 
-    let t = &cfg.general.custom_theme.clone();
     ui.add_space(6.0);
     if feature_toggle_button(
         ui,
@@ -374,8 +373,13 @@ fn render_step_battery(
     )
     .changed()
     {
-        if cfg.battery.enabled && cfg.battery.mode == BatteryChargeMode::Auto {
-            cfg.battery.mode = BatteryChargeMode::Inhibit;
+        if cfg.battery.enabled {
+            if cfg.battery.mode == BatteryChargeMode::Auto {
+                cfg.battery.mode = BatteryChargeMode::Inhibit;
+            }
+        } else {
+            cfg.battery.mode = BatteryChargeMode::Auto;
+            cfg.battery.active_profile_id = None;
         }
         on_save();
         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -422,6 +426,8 @@ fn render_step_battery(
                     && !st.battery_service_busy
                     && pill_button(ui, &i18n.t("battery.service_install"), false, t).clicked()
                 {
+                    on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                     on_cmd(WorkerCommand::InstallBatteryService);
                 }
             }
