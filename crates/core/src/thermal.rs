@@ -30,7 +30,7 @@ pub const GUARD_RPM_VERIFY_DELAY_SECS: f64 = 4.0;
 pub fn thermal_profile_byte(scheme: ThermalProfileScheme, mode: PerformanceMode) -> u8 {
     match scheme {
         ThermalProfileScheme::VictusS | ThermalProfileScheme::OmenV1 => match mode {
-            PerformanceMode::Eco | PerformanceMode::Quiet => 0x50,
+            PerformanceMode::Quiet => 0x50,
             PerformanceMode::Balanced => 0x30,
             PerformanceMode::Performance => 0x31,
         },
@@ -39,7 +39,7 @@ pub fn thermal_profile_byte(scheme: ThermalProfileScheme, mode: PerformanceMode)
         | ThermalProfileScheme::Unknown => match mode {
             PerformanceMode::Balanced => 0x00,
             PerformanceMode::Performance => 0x01,
-            PerformanceMode::Eco | PerformanceMode::Quiet => 0x02,
+            PerformanceMode::Quiet => 0x02,
         },
     }
 }
@@ -572,7 +572,7 @@ mod tests {
             0x31
         );
         assert_eq!(
-            thermal_profile_byte(ThermalProfileScheme::VictusS, PerformanceMode::Eco),
+            thermal_profile_byte(ThermalProfileScheme::VictusS, PerformanceMode::Quiet),
             0x50
         );
         assert_eq!(
@@ -588,7 +588,7 @@ mod tests {
             0x01
         );
         assert_eq!(
-            thermal_profile_byte(ThermalProfileScheme::OmenV0, PerformanceMode::Eco),
+            thermal_profile_byte(ThermalProfileScheme::OmenV0, PerformanceMode::Quiet),
             0x02
         );
     }

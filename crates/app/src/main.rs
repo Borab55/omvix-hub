@@ -51,7 +51,6 @@ enum AppSignal {
 
 fn perf_mode_label(i18n: &I18n, mode: PerformanceMode) -> String {
     match mode {
-        PerformanceMode::Eco => i18n.t("thermal.mode_eco"),
         PerformanceMode::Quiet => i18n.t("thermal.mode_quiet"),
         PerformanceMode::Balanced => i18n.t("thermal.mode_balanced"),
         PerformanceMode::Performance => i18n.t("thermal.mode_performance"),
@@ -1526,10 +1525,9 @@ impl OmvixApp {
             return;
         }
         let next = match self.cfg.thermal_fan.performance_mode {
-            PerformanceMode::Eco => PerformanceMode::Quiet,
             PerformanceMode::Quiet => PerformanceMode::Balanced,
             PerformanceMode::Balanced => PerformanceMode::Performance,
-            PerformanceMode::Performance => PerformanceMode::Eco,
+            PerformanceMode::Performance => PerformanceMode::Quiet,
         };
         self.cfg.thermal_fan.performance_mode = next;
         self.save_config();

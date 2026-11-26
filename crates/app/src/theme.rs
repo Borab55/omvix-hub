@@ -296,7 +296,6 @@ pub fn tile_button(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileIcon {
-    Leaf,
     Feather,
     Gauge,
     Rocket,
@@ -310,22 +309,6 @@ fn draw_tile_icon(p: &egui::Painter, c: egui::Pos2, icon: TileIcon, color: Color
     let s = Stroke::new(1.45_f32, color);
     let thin = Stroke::new(1.15_f32, color);
     match icon {
-        TileIcon::Leaf => {
-            // Simple leaf outline + midrib stem
-            let pts = vec![
-                pos2(c.x - 5.0, c.y + 4.5),
-                pos2(c.x - 4.5, c.y - 2.0),
-                pos2(c.x + 1.5, c.y - 6.0),
-                pos2(c.x + 5.5, c.y - 5.5),
-                pos2(c.x + 5.0, c.y + 0.5),
-                pos2(c.x + 0.5, c.y + 4.5),
-            ];
-            p.add(Shape::closed_line(pts, s));
-            p.line_segment(
-                [pos2(c.x - 5.8, c.y + 5.5), pos2(c.x + 3.2, c.y - 3.2)],
-                thin,
-            );
-        }
         TileIcon::Feather => {
             // Quiet / silent crescent moon + soft wave
             let steps = 12usize;

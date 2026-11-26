@@ -300,7 +300,6 @@ pub fn render(
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             for (mode, key) in [
-                (PerformanceMode::Eco, "thermal.mode_eco"),
                 (PerformanceMode::Quiet, "thermal.mode_quiet"),
                 (PerformanceMode::Balanced, "thermal.mode_balanced"),
                 (PerformanceMode::Performance, "thermal.mode_performance"),

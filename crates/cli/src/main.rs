@@ -121,7 +121,6 @@ enum ThermalAction {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum CliPerfMode {
-    Eco,
     Quiet,
     Balanced,
     Performance,
@@ -130,7 +129,6 @@ enum CliPerfMode {
 impl From<CliPerfMode> for PerformanceMode {
     fn from(value: CliPerfMode) -> Self {
         match value {
-            CliPerfMode::Eco => Self::Eco,
             CliPerfMode::Quiet => Self::Quiet,
             CliPerfMode::Balanced => Self::Balanced,
             CliPerfMode::Performance => Self::Performance,

@@ -3,7 +3,6 @@
   "app.tray.show": "Omvix Hub'ı Aç",
   "app.tray.hide": "Tepsiye Gizle",
   "app.tray.quit": "Omvix Hub'dan Çık",
-  "app.tray.mode_eco": "Mod: Eco",
   "app.tray.mode_quiet": "Mod: Sessiz",
   "app.tray.mode_balanced": "Mod: Dengeli",
   "app.tray.mode_performance": "Mod: Performans",
@@ -100,7 +99,6 @@
   "dashboard.power_source_dc": "Pilde",
 
   "thermal.mode": "Performans Modu",
-  "thermal.mode_eco": "Eco",
   "thermal.mode_quiet": "Sessiz",
   "thermal.mode_balanced": "Dengeli",
   "thermal.mode_performance": "Performans",

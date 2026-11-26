@@ -808,7 +808,7 @@ impl Default for AutoProfileConfig {
         Self {
             enabled: false,
             ac_performance_mode: PerformanceMode::Balanced,
-            dc_performance_mode: PerformanceMode::Eco,
+            dc_performance_mode: PerformanceMode::Quiet,
             ac_fan_mode: None,
             dc_fan_mode: None,
             ac_curve_preset: None,
@@ -2189,5 +2189,52 @@ border_width_x10 = 1
         assert!(outcome.corrupt_backup.is_none());
         assert!(dir.exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_eco_performance_mode_deserializes_to_quiet_without_quarantine() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("omvix_legacy_eco_{nanos}.toml"));
+        let toml = r#"
+[thermal_fan]
+performance_mode = "Eco"
+
+[auto_profile]
+ac_performance_mode = "Eco"
+dc_performance_mode = "Eco"
+
+[[app_profiles.rules]]
+id = "r1"
+name = "Browser"
+exe_name = "msedge.exe"
+enabled = true
+performance_mode = "Eco"
+"#;
+        fs::write(&path, toml).unwrap();
+
+        let outcome = AppConfig::load_or_quarantine_corrupt_with_stamp(&path, "legacy");
+        assert!(!outcome.load_failed);
+        assert!(outcome.corrupt_backup.is_none());
+        assert_eq!(
+            outcome.config.thermal_fan.performance_mode,
+            PerformanceMode::Quiet
+        );
+        assert_eq!(
+            outcome.config.auto_profile.ac_performance_mode,
+            PerformanceMode::Quiet
+        );
+        assert_eq!(
+            outcome.config.auto_profile.dc_performance_mode,
+            PerformanceMode::Quiet
+        );
+        assert_eq!(
+            outcome.config.app_profiles.rules[0].performance_mode,
+            PerformanceMode::Quiet
+        );
+        assert!(path.exists());
+        let _ = fs::remove_file(&path);
     }
 }

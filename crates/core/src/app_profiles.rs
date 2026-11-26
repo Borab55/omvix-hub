@@ -336,7 +336,7 @@ mod tests {
             id: "low".into(),
             name: "Browser".into(),
             exe_name: "browser.exe".into(),
-            performance_mode: PerformanceMode::Eco,
+            performance_mode: PerformanceMode::Quiet,
             ..Default::default()
         };
         let cfg = AppProfilesConfig {
@@ -396,7 +396,7 @@ mod tests {
 
         let _ = engine.evaluate(&cfg, &set_of(&["app.exe"]), sample_baseline);
         engine.update_baseline_for_ac_dc(&AutoProfileAction {
-            performance_mode: PerformanceMode::Eco,
+            performance_mode: PerformanceMode::Quiet,
             fan_mode: Some(FanMode::CustomCurve),
             curve_preset: Some(FanCurvePreset::Quiet),
             refresh_hz: Some(60),
@@ -407,7 +407,7 @@ mod tests {
         let restored = engine.evaluate(&cfg, &set_of(&[]), sample_baseline);
         match restored {
             AppProfileTransition::Restore(b) => {
-                assert_eq!(b.performance_mode, PerformanceMode::Eco);
+                assert_eq!(b.performance_mode, PerformanceMode::Quiet);
                 assert_eq!(b.fan_mode, FanMode::CustomCurve);
                 assert_eq!(b.custom_curve, FanCurve::preset_quiet());
                 assert_eq!(b.refresh_hz, Some(60));

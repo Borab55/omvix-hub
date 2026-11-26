@@ -37,7 +37,7 @@ pub struct BoardProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PerformanceMode {
-    Eco,
+    #[serde(alias = "Eco")]
     Quiet,
     #[default]
     Balanced,
@@ -55,7 +55,7 @@ pub enum WindowsPowerOverlay {
 impl WindowsPowerOverlay {
     pub fn for_performance_mode(mode: PerformanceMode) -> Self {
         match mode {
-            PerformanceMode::Eco | PerformanceMode::Quiet => Self::BestPowerEfficiency,
+            PerformanceMode::Quiet => Self::BestPowerEfficiency,
             PerformanceMode::Balanced => Self::Balanced,
             PerformanceMode::Performance => Self::BestPerformance,
         }
@@ -813,10 +813,6 @@ mod tests {
 
     #[test]
     fn windows_power_overlay_mapping_and_guids() {
-        assert_eq!(
-            WindowsPowerOverlay::for_performance_mode(PerformanceMode::Eco),
-            WindowsPowerOverlay::BestPowerEfficiency
-        );
         assert_eq!(
             WindowsPowerOverlay::for_performance_mode(PerformanceMode::Quiet),
             WindowsPowerOverlay::BestPowerEfficiency

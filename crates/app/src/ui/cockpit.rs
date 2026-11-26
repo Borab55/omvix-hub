@@ -30,7 +30,6 @@ pub struct CockpitActions {
 
 fn perf_mode_name(i18n: &I18n, mode: PerformanceMode) -> String {
     match mode {
-        PerformanceMode::Eco => i18n.t("thermal.mode_eco"),
         PerformanceMode::Quiet => i18n.t("thermal.mode_quiet"),
         PerformanceMode::Balanced => i18n.t("thermal.mode_balanced"),
         PerformanceMode::Performance => i18n.t("thermal.mode_performance"),
@@ -374,12 +373,6 @@ pub fn render(
 
                 ui.add_space(4.0);
                 let items = [
-                    (
-                        PerformanceMode::Eco,
-                        TileIcon::Leaf,
-                        i18n.t("thermal.mode_eco"),
-                        Color32::from_rgb(74, 222, 128),
-                    ),
                     (
                         PerformanceMode::Quiet,
                         TileIcon::Feather,

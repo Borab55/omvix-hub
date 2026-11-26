@@ -3,7 +3,6 @@
   "app.tray.show": "Open Omvix Hub",
   "app.tray.hide": "Hide to Tray",
   "app.tray.quit": "Quit Omvix Hub",
-  "app.tray.mode_eco": "Mode: Eco",
   "app.tray.mode_quiet": "Mode: Quiet",
   "app.tray.mode_balanced": "Mode: Balanced",
   "app.tray.mode_performance": "Mode: Performance",
@@ -100,7 +99,6 @@
   "dashboard.power_source_dc": "On Battery",
 
   "thermal.mode": "Performance Mode",
-  "thermal.mode_eco": "Eco",
   "thermal.mode_quiet": "Quiet",
   "thermal.mode_balanced": "Balanced",
   "thermal.mode_performance": "Performance",

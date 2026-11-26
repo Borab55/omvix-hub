@@ -596,7 +596,7 @@ fn integration_unknown_board_blocks_bios_writes_until_experimental_approved() {
     assert!(state.lock().unwrap().bios_writes_allowed);
 
     engine.handle_command(
-        WorkerCommand::SetPerformanceMode(PerformanceMode::Eco),
+        WorkerCommand::SetPerformanceMode(PerformanceMode::Quiet),
         &tx,
         &None,
         &visible,
@@ -615,7 +615,7 @@ fn integration_unknown_board_blocks_bios_writes_until_experimental_approved() {
     engine.handle_command(WorkerCommand::ApplyBatteryNow, &tx, &None, &visible);
 
     let g = rig.inner.lock().unwrap();
-    assert_eq!(g.perf_mode, PerformanceMode::Eco);
+    assert_eq!(g.perf_mode, PerformanceMode::Quiet);
     assert_eq!(g.fan_mode, FanMode::Max);
     assert_eq!(g.battery_mode_writes.len(), 1);
 }
@@ -855,7 +855,7 @@ fn integration_ac_dc_auto_profile_and_app_profile_restore_baseline() {
     let mut cfg = AppConfig::default();
     cfg.auto_profile.enabled = true;
     cfg.auto_profile.ac_performance_mode = PerformanceMode::Balanced;
-    cfg.auto_profile.dc_performance_mode = PerformanceMode::Eco;
+    cfg.auto_profile.dc_performance_mode = PerformanceMode::Quiet;
     cfg.auto_profile.dc_fan_mode = Some(FanMode::Auto);
     cfg.auto_profile.dc_refresh_hz = Some(60);
 
@@ -877,11 +877,11 @@ fn integration_ac_dc_auto_profile_and_app_profile_restore_baseline() {
     let rig = MockRig::new(mock);
     let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
 
-    // Transition to DC triggers AC/DC auto-profile (Eco + Auto + 60Hz)
+    // Transition to DC triggers AC/DC auto-profile (Quiet + Auto + 60Hz)
     engine.poll_telemetry_step(1.0, true, false, false);
     {
         let g = rig.inner.lock().unwrap();
-        assert_eq!(g.perf_mode, PerformanceMode::Eco);
+        assert_eq!(g.perf_mode, PerformanceMode::Quiet);
         assert_eq!(g.fan_mode, FanMode::Auto);
         assert_eq!(g.display_mode.current_hz, 60);
         assert_eq!(state.lock().unwrap().auto_applied_revision, 1);
@@ -917,7 +917,7 @@ fn integration_ac_dc_auto_profile_and_app_profile_restore_baseline() {
         let g = rig.inner.lock().unwrap();
         let st = state.lock().unwrap();
         assert!(st.active_app_profile.is_none());
-        assert_eq!(g.perf_mode, PerformanceMode::Eco);
+        assert_eq!(g.perf_mode, PerformanceMode::Quiet);
         assert_eq!(g.fan_mode, FanMode::Auto);
         assert_eq!(g.display_mode.current_hz, 60);
     }
