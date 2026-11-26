@@ -157,6 +157,7 @@ impl InnerWriter {
         let active = self.dir.join("omvix.log");
         let first_backup = self.dir.join("omvix.1.log");
         // Drop handle before renaming on Windows by replacing with a temp open or reopening after rename.
+        let mut rotated_tmp = false;
         if active.exists() {
             let dummy = OpenOptions::new()
                 .create(true)
@@ -164,12 +165,15 @@ impl InnerWriter {
                 .truncate(true)
                 .open(self.dir.join("omvix.tmp.log"))?;
             self.file = BufWriter::new(dummy);
+            rotated_tmp = true;
             let _ = fs::rename(&active, &first_backup);
-            let _ = fs::remove_file(self.dir.join("omvix.tmp.log"));
         }
 
         let (writer, len) = Self::open_active(&self.dir)?;
         self.file = writer;
+        if rotated_tmp {
+            let _ = fs::remove_file(self.dir.join("omvix.tmp.log"));
+        }
         self.current_bytes = len;
         Ok(())
     }
@@ -310,10 +314,11 @@ where
         if let Some(msg) = &visitor.message {
             write!(writer, "{msg}")?;
         }
-        for field in &visitor.fields {
-            if visitor.message.is_some() || !visitor.fields.is_empty() {
-                write!(writer, " {field}")?;
+        for (i, field) in visitor.fields.iter().enumerate() {
+            if i > 0 || visitor.message.is_some() {
+                write!(writer, " ")?;
             }
+            write!(writer, "{field}")?;
         }
         writeln!(writer)
     }

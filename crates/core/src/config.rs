@@ -420,7 +420,7 @@ fn rgb_to_hex(rgb: [u8; 3]) -> String {
 
 fn hex_to_rgb(s: &str) -> Result<[u8; 3]> {
     let hex = s.trim().trim_start_matches('#');
-    if hex.len() != 6 {
+    if !hex.is_ascii() || hex.len() != 6 {
         return Err(OmvixError::Config(format!(
             "Invalid RGB hex color `{s}` (expected 6 hex chars)"
         )));
@@ -1046,11 +1046,26 @@ impl AppConfig {
         {
             self.battery.clear_travel_charge();
         }
+        self.battery
+            .custom_profiles
+            .retain(|p| !p.id.trim().is_empty() && !p.name.trim().is_empty());
+        let mut seen_bat_ids = std::collections::HashSet::new();
+        self.battery.custom_profiles.retain(|p| {
+            let key = p.id.trim().to_ascii_lowercase();
+            seen_bat_ids.insert(key)
+        });
         for prof in &mut self.battery.custom_profiles {
+            prof.id = prof.id.trim().to_string();
+            prof.name = prof.name.trim().to_string();
+            prof.builtin = false;
+            if prof.mode == BatteryChargeMode::Unknown {
+                prof.mode = BatteryChargeMode::Inhibit;
+            }
             prof.stop_threshold_pct = prof.stop_threshold_pct.clamp(50, 100);
             let p_max_start = prof.stop_threshold_pct.saturating_sub(2).max(40);
             prof.start_threshold_pct = prof.start_threshold_pct.clamp(40, p_max_start);
         }
+        self.battery.custom_profiles.truncate(24);
 
         self.lighting.brightness_pct = self.lighting.brightness_pct.clamp(0, 100);
         for theme in &mut self.general.custom_themes {
@@ -1092,25 +1107,19 @@ impl AppConfig {
             *uv = (*uv).clamp(-150, 0);
         }
 
-        let cleaned_args: String = self
-            .hotkeys
-            .custom_args
-            .chars()
-            .filter(|c| !matches!(c, '\0' | '\r' | '\n'))
-            .collect();
-        self.hotkeys.custom_args = cleaned_args.trim().to_string();
-
-        if !self.hotkeys.custom_command.trim().is_empty() {
+        if self.hotkeys.custom_command.trim().is_empty() {
+            self.hotkeys.custom_command.clear();
+        } else {
             let original = self.hotkeys.custom_command.trim().to_string();
             let (exe_part, split_args) = split_legacy_command(&original);
             if is_valid_custom_command_syntax(&exe_part) {
                 self.hotkeys.custom_command = exe_part;
                 if !split_args.is_empty() {
-                    if self.hotkeys.custom_args.is_empty() {
+                    if self.hotkeys.custom_args.trim().is_empty() {
                         self.hotkeys.custom_args = split_args;
                     } else {
                         self.hotkeys.custom_args =
-                            format!("{split_args} {}", self.hotkeys.custom_args);
+                            format!("{split_args} {}", self.hotkeys.custom_args.trim());
                     }
                     warnings.push(format!(
                         "Migrated legacy custom_command arguments into custom_args ({}).",
@@ -1125,6 +1134,14 @@ impl AppConfig {
                 ));
             }
         }
+
+        let cleaned_args: String = self
+            .hotkeys
+            .custom_args
+            .chars()
+            .filter(|c| !matches!(c, '\0' | '\r' | '\n'))
+            .collect();
+        self.hotkeys.custom_args = cleaned_args.trim().to_string();
 
         self.app_profiles.poll_interval_secs = self.app_profiles.poll_interval_secs.clamp(2, 15);
         let mut sanitized_rules = Vec::with_capacity(self.app_profiles.rules.len());
@@ -1826,5 +1843,55 @@ text_primary = [20, 20, 20]
         assert!(code_v2.starts_with("OMVIX2|"));
         let decoded_v2 = CustomThemeConfig::decode_share_code(&code_v2).unwrap();
         assert_eq!(decoded_v2, light);
+    }
+
+    #[test]
+    fn hex_to_rgb_rejects_non_ascii_six_byte_strings_without_panic() {
+        assert!(hex_to_rgb("😀ab").is_err());
+        assert!(hex_to_rgb("a😀b").is_err());
+        assert!(hex_to_rgb("şıkx").is_err());
+    }
+
+    #[test]
+    fn sanitize_strips_control_chars_from_migrated_custom_args_and_sanitizes_battery_profiles() {
+        let mut cfg = AppConfig::default();
+        cfg.hotkeys.custom_command = "C:\\Tools\\app.exe --ok\r\n--bad\0arg".to_string();
+        cfg.hotkeys.custom_args = "   ".to_string();
+        cfg.battery.custom_profiles = vec![
+            BatteryProfile {
+                id: "   ".into(),
+                name: "Missing Id".into(),
+                builtin: true,
+                mode: BatteryChargeMode::Unknown,
+                ..BatteryProfile::default()
+            },
+            BatteryProfile {
+                id: " p1 ".into(),
+                name: " Custom Hold ".into(),
+                enabled: true,
+                stop_threshold_pct: 80,
+                start_threshold_pct: 75,
+                mode: BatteryChargeMode::Unknown,
+                builtin: true,
+            },
+            BatteryProfile {
+                id: "P1".into(),
+                name: "Duplicate Id".into(),
+                ..BatteryProfile::default()
+            },
+        ];
+
+        cfg.sanitize();
+        assert_eq!(cfg.hotkeys.custom_command, "C:\\Tools\\app.exe");
+        assert!(!cfg.hotkeys.custom_args.contains(['\0', '\r', '\n']));
+        assert_eq!(cfg.hotkeys.custom_args, "--ok--badarg");
+        assert_eq!(cfg.battery.custom_profiles.len(), 1);
+        assert_eq!(cfg.battery.custom_profiles[0].id, "p1");
+        assert_eq!(cfg.battery.custom_profiles[0].name, "Custom Hold");
+        assert!(!cfg.battery.custom_profiles[0].builtin);
+        assert_eq!(
+            cfg.battery.custom_profiles[0].mode,
+            BatteryChargeMode::Inhibit
+        );
     }
 }
