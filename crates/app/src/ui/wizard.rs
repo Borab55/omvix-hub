@@ -201,7 +201,7 @@ fn render_step_board(
         if st.security.is_admin {
             status_badge(ui, &i18n.t("app.admin_active"), status_ok(t));
         } else {
-            status_badge(ui, "Standard User", status_warn(t));
+            status_badge(ui, &i18n.t("wizard.standard_user"), status_warn(t));
             if ui.button(i18n.t("app.restart_as_admin")).clicked() {
                 actions.restart_admin = true;
             }

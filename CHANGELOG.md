@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-26
+
+### Added
+- **Independent CPU & GPU Fan Controls (`omvix-core`, `omvix-windows`, `omvix-hub`):** Unlocked dual-channel HP WMI fan writes (`0x2E [l1, l2]`), adding separate CPU & GPU manual speed sliders, independent 8-point CPU & GPU fan curves (CPU tracking CPU temperature; GPU tracking GPU temperature with sleeping-dGPU fallback), per-curve hysteresis, an optional `Link CPU & GPU Fans` toggle, and Config v8 migration (`CURRENT_CONFIG_VERSION = 8`).
+- **Separate CPU & GPU `Fans + Power` Drawer Tabs (`ui/performance.rs`, `ui/tuning.rs`, `ui/mod.rs`):** Reorganized `Fans + Power` into **CPU · Fan & Power** (performance mode, Windows power sync, CPU Turbo Boost, PL1/PL2 power limits, CPU fan mode & curve, collapsible safety settings), **GPU · Fan & Graphics** (live GPU stats & power, independent GPU fan mode & curve, Graphics Mode MUX switch), and **Profiles**.
+- **G-Helper-Style Minimal Main Cockpit (`theme.rs`, `ui/cockpit.rs`, `main.rs`):** Added vector icon + label mode tiles (`mode_tile_button` with `TileIcon`), moved live `CPU: °C  Fan: RPM` and `GPU: °C  Fan: RPM` onto section headers, and stripped always-on informational status pills from the top so banners appear only on genuine warnings or conflicts.
+
+### Changed
+- **End-User Friendly Copy Across UI (`locales/tr.json`, `locales/en.json`, `ui/*.rs`):** Replaced internal/firmware jargon (`0x2B`, `0x29`, `0x0300`, `Inhibit`, `HVCI`, `Keep-alive`, `D3`) with plain, accessible Turkish and English headings, labels, tooltips, and chart annotations while maintaining exact TR/EN key parity.
+
+### Fixed
+- **Custom Fan Curve Telemetry Update Order (`worker.rs`):** Evaluated sensor-loss restoration curve targets only during actual sensor recovery so normal telemetry polls never clobber hysteresis state before the 2-second custom curve loop runs.
+
 ## [0.6.0-beta.2] - 2026-11-26
 
 ### Security & Reliability Fixes

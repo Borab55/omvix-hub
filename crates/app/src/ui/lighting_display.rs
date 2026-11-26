@@ -1,16 +1,14 @@
 use crate::theme::{
-    accent_color, card_frame, fixed_color_picker_button, lighting_profile_button, pill_button,
-    section_title, section_toggle_button, status_badge, status_err, status_warn, ColorButtonStyle,
+    accent_color, card_frame, fixed_color_picker_button, lighting_profile_button, section_title,
+    section_toggle_button, status_badge, ColorButtonStyle,
 };
 use crate::ui::{control_committed, unique_profile_slug};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{RichText, Slider, Ui};
-use omvix_core::{AppConfig, GpuMode, I18n, KeyboardType, LightingProfile, RgbColor};
+use omvix_core::{AppConfig, I18n, KeyboardType, LightingProfile, RgbColor};
 
 #[derive(Debug, Default, Clone)]
 pub struct LightingDisplayDraftState {
-    pub pending_gpu_mode: Option<GpuMode>,
-    pub reboot_dismissed: bool,
     pub profile_name: String,
 }
 
@@ -25,8 +23,6 @@ pub fn render(
 ) {
     let t = &cfg.general.custom_theme.clone();
     let accent = accent_color(t);
-    let warn_c = status_warn(t);
-    let err_c = status_err(t);
 
     ui.heading(i18n.t("nav.lighting_display"));
     ui.add_space(6.0);
@@ -47,7 +43,15 @@ pub fn render(
                 on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 on_cmd(WorkerCommand::ApplyLighting);
             }
-            status_badge(ui, &format!("{:?}", st.keyboard_type), accent);
+            let kbd_label = match st.keyboard_type {
+                KeyboardType::None => i18n.t("lighting.type_none"),
+                KeyboardType::WhiteBacklight => i18n.t("lighting.type_white"),
+                KeyboardType::SingleZoneRgb => i18n.t("lighting.type_1zone"),
+                KeyboardType::FourZoneRgb => i18n.t("lighting.type_4zone"),
+                KeyboardType::PerKeyRgb => i18n.t("lighting.type_per_key"),
+                KeyboardType::Unknown => i18n.t("battery.mode_unknown"),
+            };
+            status_badge(ui, &kbd_label, accent);
         });
 
         ui.add_space(6.0);
@@ -259,75 +263,6 @@ pub fn render(
             });
         } else {
             ui.weak("...");
-        }
-    });
-
-    ui.add_space(8.0);
-
-    // GPU MUX Switch Card (R6: 2-step confirmation + BitLocker/battery warning + reboot prompt)
-    card_frame(t).show(ui, |ui| {
-        section_title(ui, i18n.t("gpu.mux_switch"), t);
-        let cur = st.gpu_mode.unwrap_or(GpuMode::Unknown);
-        ui.horizontal_wrapped(|ui| {
-            for (mode, key) in [
-                (GpuMode::Hybrid, "gpu.mode_hybrid"),
-                (GpuMode::Discrete, "gpu.mode_discrete"),
-                (GpuMode::Optimus, "gpu.mode_optimus"),
-            ] {
-                let selected = draft.pending_gpu_mode.unwrap_or(cur) == mode;
-                if pill_button(ui, &i18n.t(key), selected, t).clicked() {
-                    draft.pending_gpu_mode = Some(mode);
-                }
-            }
-        });
-
-        if let Some(pending) = draft.pending_gpu_mode {
-            ui.add_space(6.0);
-            ui.colored_label(
-                warn_c,
-                RichText::new(i18n.t_fmt(
-                    "gpu.mux_confirm_prompt",
-                    &[("mode", &format!("{pending:?}"))],
-                ))
-                .strong(),
-            );
-            ui.colored_label(
-                err_c,
-                RichText::new(i18n.t("gpu.bitlocker_warning")).size(11.5),
-            );
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                if pill_button(ui, &i18n.t("gpu.confirm_apply"), true, t).clicked() {
-                    cfg.tuning.preferred_gpu_mode = Some(pending);
-                    draft.pending_gpu_mode = None;
-                    draft.reboot_dismissed = false;
-                    on_save();
-                    on_cmd(WorkerCommand::SetGpuMode(pending));
-                }
-                if ui.button(i18n.t("common.cancel")).clicked() {
-                    draft.pending_gpu_mode = None;
-                }
-            });
-        } else {
-            ui.add_space(4.0);
-            ui.label(RichText::new(i18n.t("gpu.reboot_required")).color(warn_c));
-        }
-
-        if st.gpu_mux_reboot_pending && !draft.reboot_dismissed {
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(accent, RichText::new(i18n.t("gpu.reboot_prompt")).strong());
-                if pill_button(ui, &i18n.t("gpu.reboot_now"), true, t).clicked() {
-                    on_cmd(WorkerCommand::RebootSystem);
-                }
-                if ui.button(i18n.t("gpu.reboot_later")).clicked() {
-                    draft.reboot_dismissed = true;
-                }
-            });
-        }
-
-        if !st.security.is_admin {
-            ui.colored_label(warn_c, i18n.t("tuning.admin_required_warning"));
         }
     });
 }

@@ -1,17 +1,17 @@
 use crate::theme::{
     accent_color, clickable_status_badge, clickable_warning_badge, compact_card,
-    compact_status_pill, compact_toggle_pill, detail_dial_button, fixed_color_picker_button,
-    lighting_profile_button, lighting_swatch_button, muted_text, pill_button, section_title,
+    compact_toggle_pill, detail_dial_button, fixed_color_picker_button, lighting_profile_button,
+    lighting_swatch_button, mode_tile_button, muted_text, pill_button, section_title,
     section_toggle_button, status_badge, status_err, status_ok, status_warn, tile_button,
-    undo_button, ColorButtonStyle,
+    undo_button, ColorButtonStyle, TileIcon,
 };
 use crate::ui::lighting_display::{apply_lighting_profile, is_lighting_profile_active};
 use crate::ui::{control_committed, Drawer, ExtraSubTab, FansPowerSubTab};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
 use omvix_core::{
-    AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, KeyboardType,
-    LightingProfile, PerformanceMode, RgbColor, SafeModeReason, UpdateUiStatus,
+    AppConfig, BatteryProfile, FanMode, GpuMode, I18n, KeyboardType, LightingProfile,
+    PerformanceMode, RgbColor, SafeModeReason, UpdateUiStatus,
 };
 use std::time::Duration;
 
@@ -25,6 +25,32 @@ pub struct CockpitActions {
     pub restart_admin: bool,
     pub hide_to_tray: bool,
     pub quit_app: bool,
+}
+
+fn perf_mode_name(i18n: &I18n, mode: PerformanceMode) -> String {
+    match mode {
+        PerformanceMode::Eco => i18n.t("thermal.mode_eco"),
+        PerformanceMode::Quiet => i18n.t("thermal.mode_quiet"),
+        PerformanceMode::Balanced => i18n.t("thermal.mode_balanced"),
+        PerformanceMode::Performance => i18n.t("thermal.mode_performance"),
+    }
+}
+
+fn fan_mode_name(i18n: &I18n, mode: FanMode) -> String {
+    match mode {
+        FanMode::Auto => i18n.t("cockpit.fan_auto"),
+        FanMode::Max => i18n.t("cockpit.fan_max"),
+        FanMode::Manual => i18n.t("cockpit.fan_manual"),
+        FanMode::CustomCurve => i18n.t("cockpit.fan_curve"),
+    }
+}
+
+fn temp_color(temp_c: Option<f32>, t: &omvix_core::CustomThemeConfig) -> Color32 {
+    match temp_c {
+        Some(v) if v >= 88.0 => status_err(t),
+        Some(v) if v >= 78.0 => status_warn(t),
+        _ => muted_text(t),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -48,7 +74,7 @@ pub fn render(
     let ok_c = status_ok(t);
     let warn_c = status_warn(t);
     let err_c = status_err(t);
-    let muted_pill = muted_text(t);
+    let muted_c = muted_text(t);
 
     // Explicitly pin cockpit interior width to match `cockpit_frame` (Margin 12) + `compact_card` (Margin 10 + Stroke 1)
     let content_w = (pane_width - 24.0).max(240.0);
@@ -57,24 +83,27 @@ pub fn render(
     ui.set_max_width(content_w);
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
 
-    // 1. Header Row: Brand + Detected Model + Admin / Conflict badges
+    // 1. Minimal G-Helper-style Header: Brand + Model on left; ONLY issues/actions on right
     ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(i18n.t("app.title"))
-                    .size(18.0)
-                    .strong()
-                    .color(accent),
-            );
-            let device_sub = st
-                .diagnostics
-                .as_ref()
-                .map(|d| d.identity.model.trim())
-                .filter(|m| !m.is_empty())
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| i18n.t("app.subtitle"));
-            ui.weak(RichText::new(device_sub).size(11.0));
-        });
+        ui.label(
+            RichText::new(i18n.t("app.title"))
+                .size(16.0)
+                .strong()
+                .color(accent),
+        );
+        if let Some(model) = st
+            .diagnostics
+            .as_ref()
+            .map(|d| d.identity.model.trim())
+            .filter(|m| !m.is_empty())
+        {
+            let short_model = if model.chars().count() > 26 {
+                format!("— {}...", model.chars().take(23).collect::<String>())
+            } else {
+                format!("— {model}")
+            };
+            ui.label(RichText::new(short_model).size(12.0).color(muted_c));
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if !st.security.is_admin && clickable_status_badge(ui, "Admin ?", warn_c).clicked() {
@@ -98,7 +127,7 @@ pub fn render(
             }
 
             if st.thermal_guard_active {
-                status_badge(ui, "MAX GUARD", err_c);
+                status_badge(ui, "MAX FAN", err_c);
             }
             if st.sensor_loss_active {
                 status_badge(ui, &i18n.t("cockpit.sensor_loss_badge"), err_c);
@@ -122,193 +151,9 @@ pub fn render(
         });
     });
 
-    ui.add_space(4.0);
-
-    // 2. Glanceable Live Telemetry Strip
-    compact_card(t).show(ui, |ui| {
-        ui.set_width(card_inner_w);
-        ui.set_max_width(card_inner_w);
-
-        let cpu_u = st
-            .telemetry
-            .cpu_usage_pct
-            .map(|v| format!("{v:.0}%"))
-            .unwrap_or_else(|| "—".into());
-        let cpu_w = st
-            .telemetry
-            .cpu_power_w
-            .map(|v| format!("{v:.0}W"))
-            .unwrap_or_else(|| "—".into());
-        let cpu_line = match st.telemetry.cpu_temp_c {
-            Some(v) => format!("CPU {cpu_u} · {v:.0}°C · {cpu_w}"),
-            None => format!("CPU {cpu_u} · {cpu_w}"),
-        };
-
-        let gpu_u = st
-            .telemetry
-            .gpu_usage_pct
-            .map(|v| format!("{v:.0}%"))
-            .unwrap_or_else(|| "—".into());
-        let gpu_t = st
-            .telemetry
-            .gpu_temp_c
-            .map(|v| format!("{v:.0}°C"))
-            .unwrap_or_else(|| "—".into());
-        let gpu_w = st
-            .telemetry
-            .gpu_power_w
-            .map(|v| format!("{v:.0}W"))
-            .unwrap_or_else(|| "—".into());
-
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(cpu_line).size(12.5).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mon_open = open_drawer == Some(Drawer::Monitor);
-                let mon_tip = i18n.t_fmt(
-                    "cockpit.open_detail_tooltip",
-                    &[("section", &i18n.t("monitor.title"))],
-                );
-                if detail_dial_button(ui, mon_open, &mon_tip, t).clicked() {
-                    actions.open_drawer_exact = Some(Drawer::Monitor);
-                }
-                if st.telemetry.gpu_sleeping {
-                    ui.label(
-                        RichText::new(format!("GPU — · {}", i18n.t("cockpit.gpu_sleep_short")))
-                            .size(12.5)
-                            .color(Color32::from_rgb(138, 162, 194)),
-                    )
-                    .on_hover_text(i18n.t("monitor.gpu_sleeping_tooltip"));
-                } else {
-                    ui.label(
-                        RichText::new(format!("GPU {gpu_u} · {gpu_t} · {gpu_w}"))
-                            .size(12.5)
-                            .strong(),
-                    );
-                }
-            });
-        });
-
-        let fans = if st.telemetry.fan_rpms.is_empty() {
-            "Fan: —".to_string()
-        } else {
-            st.telemetry
-                .fan_rpms
-                .iter()
-                .enumerate()
-                .map(|(i, r)| format!("F{}: {r}", i + 1))
-                .collect::<Vec<_>>()
-                .join(" · ")
-                + " RPM"
-        };
-        let fans_and_chassis = match st.telemetry.chassis_temp_c {
-            Some(ch) if st.telemetry.cpu_temp_c.is_none() => {
-                format!("{fans} · {} {ch:.0}°C", i18n.t("cockpit.chassis_short"))
-            }
-            _ => fans,
-        };
-        let ram = match (st.telemetry.ram_used_gb, st.telemetry.ram_total_gb) {
-            (Some(u), Some(tot)) if tot > 0.0 => {
-                let pct = ((u / tot) * 100.0).clamp(0.0, 100.0);
-                format!("RAM {u:.1}/{tot:.0}G ({pct:.0}%)")
-            }
-            (Some(u), Some(tot)) => format!("RAM {u:.1}/{tot:.0}G"),
-            _ => "RAM —".into(),
-        };
-        let bat = st
-            .telemetry
-            .battery_pct
-            .map(|p| {
-                let src = match st.telemetry.ac_connected {
-                    Some(true) => "AC",
-                    Some(false) => "DC",
-                    None => "",
-                };
-                if src.is_empty() {
-                    format!("Bat {p}%")
-                } else {
-                    format!("Bat {p}% {src}")
-                }
-            })
-            .unwrap_or_else(|| "Bat —".into());
-
-        ui.horizontal(|ui| {
-            ui.weak(RichText::new(fans_and_chassis).size(11.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(RichText::new(format!("{ram}  |  {bat}")).size(11.0));
-            });
-        });
-
-        ui.add_space(2.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(5.0, 3.0);
-
-            let (guard_lbl, guard_clr) = if st.thermal_guard_active {
-                (i18n.t("cockpit.badge_guard_active"), err_c)
-            } else if st.safe_mode.is_some() {
-                (i18n.t("cockpit.badge_guard_paused"), warn_c)
-            } else {
-                (
-                    i18n.t_fmt(
-                        "cockpit.badge_guard_ready",
-                        &[("temp", &cfg.thermal_fan.guard_cpu_temp_c.to_string())],
-                    ),
-                    ok_c,
-                )
-            };
-            compact_status_pill(ui, &guard_lbl, guard_clr).on_hover_text(i18n.t_fmt(
-                "cockpit.badge_guard_tooltip",
-                &[
-                    ("temp", &cfg.thermal_fan.guard_cpu_temp_c.to_string()),
-                    ("secs", &cfg.thermal_fan.guard_sustain_secs.to_string()),
-                ],
-            ));
-
-            let bat_hw_mode = st
-                .battery_status
-                .as_ref()
-                .map(|b| b.current_mode)
-                .unwrap_or(BatteryChargeMode::Unknown);
-            let (hold_lbl, hold_clr) = match bat_hw_mode {
-                BatteryChargeMode::Hold => (i18n.t("cockpit.badge_hold_active"), warn_c),
-                BatteryChargeMode::Inhibit => (i18n.t("cockpit.badge_hold_inhibit"), ok_c),
-                BatteryChargeMode::Unknown => (i18n.t("cockpit.badge_hold_unknown"), muted_pill),
-                BatteryChargeMode::Auto
-                    if cfg.battery.enabled && cfg.battery.hold_when_shutdown =>
-                {
-                    (i18n.t("cockpit.badge_hold_armed"), accent)
-                }
-                BatteryChargeMode::Auto => (i18n.t("cockpit.badge_hold_off"), muted_pill),
-            };
-            compact_status_pill(ui, &hold_lbl, hold_clr)
-                .on_hover_text(i18n.t("cockpit.badge_hold_tooltip"));
-
-            let (ka_lbl, ka_clr) = if st.sensor_loss_active || st.safe_mode.is_some() {
-                (i18n.t("cockpit.badge_keepalive_paused"), warn_c)
-            } else if cfg.thermal_fan.keep_alive_enabled
-                && matches!(
-                    cfg.thermal_fan.fan_mode,
-                    FanMode::Manual | FanMode::CustomCurve
-                )
-            {
-                (i18n.t("cockpit.badge_keepalive_on"), ok_c)
-            } else {
-                (i18n.t("cockpit.badge_keepalive_off"), muted_pill)
-            };
-            compact_status_pill(ui, &ka_lbl, ka_clr)
-                .on_hover_text(i18n.t("cockpit.badge_keepalive_tooltip"));
-
-            let (pawn_lbl, pawn_clr) = if st.pawnio_cpu_active {
-                (i18n.t("cockpit.badge_pawnio_ready"), ok_c)
-            } else {
-                (i18n.t("cockpit.badge_pawnio_missing"), warn_c)
-            };
-            compact_status_pill(ui, &pawn_lbl, pawn_clr)
-                .on_hover_text(i18n.t("cockpit.badge_pawnio_tooltip"));
-        });
-    });
-
+    // Conditional Problem / Warning Banners (HIDDEN during normal healthy operation)
     if worker_dead {
-        ui.add_space(4.0);
+        ui.add_space(3.0);
         compact_card(t).show(ui, |ui| {
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
@@ -322,7 +167,7 @@ pub fn render(
     }
 
     if let Some(reason) = st.safe_mode {
-        ui.add_space(4.0);
+        ui.add_space(3.0);
         compact_card(t).show(ui, |ui| {
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
@@ -350,7 +195,7 @@ pub fn render(
     }
 
     if !config_warnings.is_empty() {
-        ui.add_space(4.0);
+        ui.add_space(3.0);
         compact_card(t).show(ui, |ui| {
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
@@ -379,7 +224,7 @@ pub fn render(
     }
 
     if !st.board_known && !st.bios_writes_allowed && !st.board_id.is_empty() {
-        ui.add_space(4.0);
+        ui.add_space(3.0);
         compact_card(t).show(ui, |ui| {
             ui.set_width(card_inner_w);
             ui.set_max_width(card_inner_w);
@@ -390,19 +235,6 @@ pub fn render(
                     .strong(),
             );
             ui.weak(RichText::new(i18n.t("board.experimental_desc")).size(10.5));
-            if let Some(diag) = &st.diagnostics {
-                let ok_cnt = diag.probes.iter().filter(|p| p.success).count();
-                ui.weak(
-                    RichText::new(i18n.t_fmt(
-                        "board.probe_summary",
-                        &[
-                            ("ok", &ok_cnt.to_string()),
-                            ("total", &diag.probes.len().to_string()),
-                        ],
-                    ))
-                    .size(10.5),
-                );
-            }
             ui.horizontal_wrapped(|ui| {
                 if pill_button(ui, &i18n.t("board.approve_experimental"), false, t).clicked() {
                     cfg.general.experimental_board_id = Some(st.board_id.clone());
@@ -432,9 +264,9 @@ pub fn render(
 
     ui.add_space(5.0);
 
-    // 3. Width-locked middle cockpit controls (fits cleanly without horizontal or vertical overflow)
+    // 2. Clean G-Helper-style Main Cockpit Sections
     let avail_h = ui.available_height();
-    let reserve_footer = 76.0_f32;
+    let reserve_footer = 66.0_f32;
     egui::ScrollArea::vertical()
         .id_salt("cockpit_middle_scroll")
         .max_width(content_w)
@@ -443,22 +275,57 @@ pub fn render(
             ui.set_width(content_w);
             ui.set_max_width(content_w);
 
-            // Card A: Performance Mode
+            let effective_perf = if st.active_app_profile.is_some() {
+                st.effective_performance_mode
+            } else {
+                cfg.thermal_fan.performance_mode
+            };
+            let effective_fan = if st.active_app_profile.is_some() {
+                st.effective_fan_mode
+            } else {
+                cfg.thermal_fan.fan_mode
+            };
+
+            // Card A: Performance Mode (`Mod: <Mode> · 25W`  |  `CPU: 37°C  Fan: 2000 RPM`)
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
+
                 ui.horizontal(|ui| {
-                    section_title(ui, i18n.t("thermal.mode"), t);
+                    let mode_title = format!(
+                        "{}: {}",
+                        i18n.t("cockpit.mode_prefix"),
+                        perf_mode_name(i18n, effective_perf)
+                    );
+                    section_title(ui, mode_title, t);
+                    if let Some(cpu_w) = st.telemetry.cpu_power_w {
+                        ui.label(
+                            RichText::new(format!("{cpu_w:.0}W"))
+                                .size(11.5)
+                                .color(muted_c),
+                        );
+                    }
+                    if let Some(ref prof_name) = st.active_app_profile {
+                        let short_name = if prof_name.chars().count() > 11 {
+                            format!("{}...", prof_name.chars().take(9).collect::<String>())
+                        } else {
+                            prof_name.clone()
+                        };
+                        if clickable_status_badge(ui, &short_name, ok_c).clicked() {
+                            actions.open_profiles = true;
+                        }
+                    }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 5.0;
-                        let perf_open = open_drawer == Some(Drawer::FansPower)
-                            && fans_power_tab == FansPowerSubTab::PerformanceFans;
-                        let perf_tip = i18n.t_fmt(
+                        let cpu_open = open_drawer == Some(Drawer::FansPower)
+                            && fans_power_tab == FansPowerSubTab::Cpu;
+                        let cpu_tip = i18n.t_fmt(
                             "cockpit.open_detail_tooltip",
-                            &[("section", &i18n.t("drawer.sub_perf_fans"))],
+                            &[("section", &i18n.t("drawer.sub_cpu"))],
                         );
-                        if detail_dial_button(ui, perf_open, &perf_tip, t).clicked() {
-                            actions.open_fans_power_subtab = Some(FansPowerSubTab::PerformanceFans);
+                        if detail_dial_button(ui, cpu_open, &cpu_tip, t).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::Cpu);
                         }
                         if compact_toggle_pill(
                             ui,
@@ -476,48 +343,62 @@ pub fn render(
                                 on_cmd(WorkerCommand::ApplyAutoProfileNow);
                             }
                         }
-                        if let Some(ref prof_name) = st.active_app_profile {
-                            let short_name = if prof_name.chars().count() > 14 {
-                                format!("{}...", prof_name.chars().take(12).collect::<String>())
-                            } else {
-                                prof_name.clone()
-                            };
-                            if clickable_status_badge(
-                                ui,
-                                &i18n.t_fmt(
-                                    "profiles.cockpit_active_badge",
-                                    &[("name", &short_name)],
-                                ),
-                                ok_c,
-                            )
-                            .clicked()
-                            {
-                                actions.open_profiles = true;
-                            }
-                        }
+
+                        let cpu_temp_str = st
+                            .telemetry
+                            .cpu_temp_c
+                            .map(|v| format!("{v:.0}°C"))
+                            .unwrap_or_else(|| "—".into());
+                        let cpu_rpm_str = st
+                            .telemetry
+                            .fan_rpms
+                            .first()
+                            .map(|r| format!("{r} RPM"))
+                            .unwrap_or_else(|| "—".into());
+                        let stat_txt = format!("CPU: {cpu_temp_str}  Fan: {cpu_rpm_str}");
+                        ui.label(
+                            RichText::new(stat_txt)
+                                .size(11.5)
+                                .color(temp_color(st.telemetry.cpu_temp_c, t)),
+                        );
                     });
                 });
-                ui.add_space(3.0);
+
+                ui.add_space(4.0);
                 let items = [
-                    (PerformanceMode::Eco, i18n.t("thermal.mode_eco")),
-                    (PerformanceMode::Quiet, i18n.t("thermal.mode_quiet")),
-                    (PerformanceMode::Balanced, i18n.t("thermal.mode_balanced")),
+                    (
+                        PerformanceMode::Eco,
+                        TileIcon::Leaf,
+                        i18n.t("thermal.mode_eco"),
+                        Color32::from_rgb(74, 222, 128),
+                    ),
+                    (
+                        PerformanceMode::Quiet,
+                        TileIcon::Feather,
+                        i18n.t("thermal.mode_quiet"),
+                        Color32::from_rgb(56, 189, 248),
+                    ),
+                    (
+                        PerformanceMode::Balanced,
+                        TileIcon::Gauge,
+                        i18n.t("thermal.mode_balanced"),
+                        accent,
+                    ),
                     (
                         PerformanceMode::Performance,
+                        TileIcon::Rocket,
                         i18n.t("thermal.mode_performance"),
+                        Color32::from_rgb(239, 68, 68),
                     ),
                 ];
-                let effective_perf = if st.active_app_profile.is_some() {
-                    st.effective_performance_mode
-                } else {
-                    cfg.thermal_fan.performance_mode
-                };
-                let w = equal_tile_width(card_inner_w, items.len(), 5.0);
+                let w = equal_tile_width(card_inner_w, items.len(), 6.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    for (mode, label) in items {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (mode, icon, label, border_c) in items {
                         let selected = effective_perf == mode;
-                        if tile_button(ui, &label, selected, w, 27.0, t).clicked() {
+                        if mode_tile_button(ui, icon, &label, selected, Some(border_c), w, 46.0, t)
+                            .clicked()
+                        {
                             cfg.thermal_fan.performance_mode = mode;
                             on_save();
                             on_cmd(WorkerCommand::SetPerformanceMode(mode));
@@ -528,77 +409,206 @@ pub fn render(
 
             ui.add_space(5.0);
 
-            // Card B: Fan Mode (short crisp cockpit labels)
+            // Card B: Fan & GPU (`Fan: <Mode>`  |  `GPU: 40°C  Fan: 2300 RPM`)
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
+
                 ui.horizontal(|ui| {
-                    section_title(ui, i18n.t("fan.mode"), t);
+                    let fan_title = format!(
+                        "{}: {}",
+                        i18n.t("cockpit.fan_prefix"),
+                        fan_mode_name(i18n, effective_fan)
+                    );
+                    section_title(ui, fan_title, t);
+                    if let Some(gpu_m) = st.gpu_mode.filter(|&m| m != GpuMode::Unknown) {
+                        let mux_lbl = match gpu_m {
+                            GpuMode::Hybrid => i18n.t("tuning.gpu_hybrid_short"),
+                            GpuMode::Discrete => i18n.t("tuning.gpu_discrete_short"),
+                            GpuMode::Optimus => i18n.t("tuning.gpu_optimus_short"),
+                            GpuMode::Unknown => String::new(),
+                        };
+                        let mux_clr = if gpu_m == GpuMode::Discrete {
+                            warn_c
+                        } else {
+                            muted_c
+                        };
+                        if clickable_status_badge(ui, &mux_lbl, mux_clr).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::Gpu);
+                        }
+                    }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let fan_open = open_drawer == Some(Drawer::FansPower)
-                            && fans_power_tab == FansPowerSubTab::PerformanceFans;
-                        let fan_tip = i18n.t_fmt(
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let gpu_open = open_drawer == Some(Drawer::FansPower)
+                            && fans_power_tab == FansPowerSubTab::Gpu;
+                        let gpu_tip = i18n.t_fmt(
                             "cockpit.open_detail_tooltip",
-                            &[("section", &i18n.t("drawer.sub_perf_fans"))],
+                            &[("section", &i18n.t("drawer.sub_gpu"))],
                         );
-                        if detail_dial_button(ui, fan_open, &fan_tip, t).clicked() {
-                            actions.open_fans_power_subtab = Some(FansPowerSubTab::PerformanceFans);
+                        if detail_dial_button(ui, gpu_open, &gpu_tip, t).clicked() {
+                            actions.open_fans_power_subtab = Some(FansPowerSubTab::Gpu);
+                        }
+
+                        let gpu_rpm = st
+                            .telemetry
+                            .fan_rpms
+                            .get(1)
+                            .or_else(|| st.telemetry.fan_rpms.first())
+                            .map(|r| format!("{r} RPM"))
+                            .unwrap_or_else(|| "—".into());
+                        if st.telemetry.gpu_sleeping {
+                            let sleep_txt = format!(
+                                "GPU: {}  Fan: {gpu_rpm}",
+                                i18n.t("cockpit.gpu_sleep_short")
+                            );
+                            ui.label(
+                                RichText::new(sleep_txt)
+                                    .size(11.5)
+                                    .color(Color32::from_rgb(138, 162, 194)),
+                            )
+                            .on_hover_text(i18n.t("monitor.gpu_sleeping_tooltip"));
+                        } else {
+                            let gpu_t = st
+                                .telemetry
+                                .gpu_temp_c
+                                .map(|v| format!("{v:.0}°C"))
+                                .unwrap_or_else(|| "—".into());
+                            ui.label(
+                                RichText::new(format!("GPU: {gpu_t}  Fan: {gpu_rpm}"))
+                                    .size(11.5)
+                                    .color(temp_color(st.telemetry.gpu_temp_c, t)),
+                            );
                         }
                     });
                 });
-                ui.add_space(3.0);
+
+                ui.add_space(4.0);
                 let items = [
-                    (FanMode::Auto, i18n.t("cockpit.fan_auto")),
-                    (FanMode::Max, i18n.t("cockpit.fan_max")),
-                    (FanMode::Manual, i18n.t("cockpit.fan_manual")),
-                    (FanMode::CustomCurve, i18n.t("cockpit.fan_curve")),
+                    (
+                        FanMode::Auto,
+                        TileIcon::FanAuto,
+                        i18n.t("cockpit.fan_auto"),
+                        accent,
+                    ),
+                    (
+                        FanMode::CustomCurve,
+                        TileIcon::FanCurve,
+                        i18n.t("cockpit.fan_curve"),
+                        accent,
+                    ),
+                    (
+                        FanMode::Manual,
+                        TileIcon::FanSliders,
+                        i18n.t("cockpit.fan_manual"),
+                        accent,
+                    ),
+                    (
+                        FanMode::Max,
+                        TileIcon::FanMax,
+                        i18n.t("cockpit.fan_max"),
+                        Color32::from_rgb(245, 158, 11),
+                    ),
                 ];
-                let effective_fan = if st.active_app_profile.is_some() {
-                    st.effective_fan_mode
-                } else {
-                    cfg.thermal_fan.fan_mode
-                };
-                let w = equal_tile_width(card_inner_w, items.len(), 5.0);
+                let w = equal_tile_width(card_inner_w, items.len(), 6.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    for (mode, label) in items {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (mode, icon, label, border_c) in items {
                         let selected = effective_fan == mode;
-                        if tile_button(ui, &label, selected, w, 27.0, t).clicked() {
+                        if mode_tile_button(ui, icon, &label, selected, Some(border_c), w, 46.0, t)
+                            .clicked()
+                        {
                             cfg.thermal_fan.fan_mode = mode;
                             on_save();
+                            let cpu_pct = cfg.thermal_fan.manual_speed_pct;
+                            let gpu_pct = if cfg.thermal_fan.link_cpu_gpu_fans {
+                                cpu_pct
+                            } else {
+                                cfg.thermal_fan.gpu_manual_speed_pct
+                            };
                             on_cmd(WorkerCommand::SetFanMode {
                                 mode,
-                                manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                                manual_speed_pct: Some(cpu_pct),
+                                gpu_manual_speed_pct: Some(gpu_pct),
                             });
                         }
                     }
                 });
+
                 if effective_fan == FanMode::Manual {
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().slider_width = (card_inner_w - 72.0).max(220.0);
-                        let resp = ui.add(
-                            Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100).suffix("%"),
-                        );
-                        if control_committed(ui, "cockpit_manual_fan", &resp) {
-                            on_save();
-                            on_cmd(WorkerCommand::SetFanMode {
-                                mode: FanMode::Manual,
-                                manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
-                            });
-                        }
-                    });
+                    if cfg.thermal_fan.link_cpu_gpu_fans {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(i18n.t("fan.manual_speed")).size(12.0));
+                            ui.spacing_mut().slider_width = (card_inner_w - 135.0).max(160.0);
+                            let resp = ui.add(
+                                Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100)
+                                    .suffix("%"),
+                            );
+                            if control_committed(ui, "cockpit_manual_linked_fan", &resp) {
+                                cfg.thermal_fan.gpu_manual_speed_pct =
+                                    cfg.thermal_fan.manual_speed_pct;
+                                on_save();
+                                on_cmd(WorkerCommand::SetFanMode {
+                                    mode: FanMode::Manual,
+                                    manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                                    gpu_manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                                });
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(i18n.t("fan.cpu_fan_short")).size(12.0));
+                            ui.spacing_mut().slider_width = (card_inner_w - 125.0).max(160.0);
+                            let resp = ui.add(
+                                Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100)
+                                    .suffix("%"),
+                            );
+                            if control_committed(ui, "cockpit_manual_cpu_fan", &resp) {
+                                on_save();
+                                on_cmd(WorkerCommand::SetFanMode {
+                                    mode: FanMode::Manual,
+                                    manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                                    gpu_manual_speed_pct: Some(
+                                        cfg.thermal_fan.gpu_manual_speed_pct,
+                                    ),
+                                });
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(i18n.t("fan.gpu_fan_short")).size(12.0));
+                            ui.spacing_mut().slider_width = (card_inner_w - 125.0).max(160.0);
+                            let resp = ui.add(
+                                Slider::new(&mut cfg.thermal_fan.gpu_manual_speed_pct, 0..=100)
+                                    .suffix("%"),
+                            );
+                            if control_committed(ui, "cockpit_manual_gpu_fan", &resp) {
+                                on_save();
+                                on_cmd(WorkerCommand::SetFanMode {
+                                    mode: FanMode::Manual,
+                                    manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                                    gpu_manual_speed_pct: Some(
+                                        cfg.thermal_fan.gpu_manual_speed_pct,
+                                    ),
+                                });
+                            }
+                        });
+                    }
                 }
             });
 
             ui.add_space(5.0);
 
-            // Card C: Display Refresh Rate & CPU Turbo Boost
+            // Card C: Laptop Screen Refresh Rate
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui.horizontal(|ui| {
-                    section_title(ui, i18n.t("home.quick_display"), t);
+                    let disp_title = match &st.display_mode {
+                        Some(d) => format!("{}: {} Hz", i18n.t("home.quick_display"), d.current_hz),
+                        None => i18n.t("home.quick_display"),
+                    };
+                    section_title(ui, disp_title, t);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let disp_open = open_drawer == Some(Drawer::Extra)
                             && extra_tab == ExtraSubTab::LightingDisplay;
@@ -610,8 +620,10 @@ pub fn render(
                             actions.open_extra_subtab = Some(ExtraSubTab::LightingDisplay);
                         }
                         if let Some(disp) = &st.display_mode {
-                            ui.weak(
-                                RichText::new(format!("{}x{}", disp.width, disp.height)).size(11.0),
+                            ui.label(
+                                RichText::new(format!("{}x{}", disp.width, disp.height))
+                                    .size(11.0)
+                                    .color(muted_c),
                             );
                         }
                     });
@@ -620,9 +632,9 @@ pub fn render(
                 if let Some(disp) = &st.display_mode {
                     if !disp.supported_hz.is_empty() {
                         let compact_hz = disp.supported_hz.len() >= 5;
-                        let w = equal_tile_width(card_inner_w, disp.supported_hz.len(), 4.0);
+                        let w = equal_tile_width(card_inner_w, disp.supported_hz.len(), 5.0);
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.spacing_mut().item_spacing.x = 5.0;
                             for &hz in &disp.supported_hz {
                                 let label = if compact_hz {
                                     format!("{hz}Hz")
@@ -640,48 +652,117 @@ pub fn render(
                 } else {
                     ui.weak("...");
                 }
-
-                ui.add_space(5.0);
-                ui.horizontal(|ui| {
-                    section_title(ui, i18n.t("home.quick_cpu_boost"), t);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let tune_open = open_drawer == Some(Drawer::FansPower)
-                            && fans_power_tab == FansPowerSubTab::Tuning;
-                        let tune_tip = i18n.t_fmt(
-                            "cockpit.open_detail_tooltip",
-                            &[("section", &i18n.t("drawer.sub_cpu_power"))],
-                        );
-                        if detail_dial_button(ui, tune_open, &tune_tip, t).clicked() {
-                            actions.open_fans_power_subtab = Some(FansPowerSubTab::Tuning);
-                        }
-                    });
-                });
-                ui.add_space(3.0);
-                let cur_boost = st
-                    .cpu_boost
-                    .or(cfg.tuning.cpu_boost_mode)
-                    .unwrap_or(CpuBoostMode::Aggressive);
-                let boost_items = [
-                    (CpuBoostMode::Disabled, i18n.t("cockpit.boost_off")),
-                    (CpuBoostMode::Enabled, i18n.t("cockpit.boost_on")),
-                    (CpuBoostMode::Aggressive, i18n.t("cockpit.boost_aggressive")),
-                ];
-                let bw = equal_tile_width(card_inner_w, boost_items.len(), 5.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    for (mode, label) in boost_items {
-                        if tile_button(ui, &label, cur_boost == mode, bw, 25.0, t).clicked() {
-                            cfg.tuning.cpu_boost_mode = Some(mode);
-                            on_save();
-                            on_cmd(WorkerCommand::SetCpuBoost(mode));
-                        }
-                    }
-                });
             });
 
             ui.add_space(5.0);
 
-            // Card D: Keyboard Lighting
+            // Card D: Battery Charge Limit (clean 1-row limits + live % on right)
+            compact_card(t).show(ui, |ui| {
+                ui.set_width(card_inner_w);
+                ui.set_max_width(card_inner_w);
+                let now_utc = chrono::Utc::now().timestamp();
+                let travel_active = cfg.battery.is_travel_charge_active(now_utc);
+
+                ui.horizontal(|ui| {
+                    let bat_title = if cfg.battery.enabled && !travel_active {
+                        format!(
+                            "{}: {}%",
+                            i18n.t("home.quick_battery"),
+                            cfg.battery.stop_threshold_pct
+                        )
+                    } else if travel_active {
+                        format!("{}: 1x 100%", i18n.t("home.quick_battery"))
+                    } else {
+                        format!("{}: 100%", i18n.t("home.quick_battery"))
+                    };
+                    section_title(ui, bat_title, t);
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let bat_open = open_drawer == Some(Drawer::Battery);
+                        let bat_tip = i18n.t_fmt(
+                            "cockpit.open_detail_tooltip",
+                            &[("section", &i18n.t("nav.battery"))],
+                        );
+                        if detail_dial_button(ui, bat_open, &bat_tip, t).clicked() {
+                            actions.open_drawer_exact = Some(Drawer::Battery);
+                        }
+                        if let Some(pct) = st.telemetry.battery_pct {
+                            let src = match st.telemetry.ac_connected {
+                                Some(true) => i18n.t("dashboard.power_source_ac"),
+                                Some(false) => i18n.t("dashboard.power_source_dc"),
+                                None => String::new(),
+                            };
+                            let bat_live = if src.is_empty() {
+                                format!("{pct}%")
+                            } else {
+                                format!("{pct}% · {src}")
+                            };
+                            ui.label(RichText::new(bat_live).size(11.5).color(muted_c));
+                        }
+                    });
+                });
+
+                ui.add_space(3.0);
+                let builtins = BatteryProfile::builtins();
+                let pw = equal_tile_width(card_inner_w, builtins.len() + 1, 5.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    for preset in builtins {
+                        let short_label = match preset.id.as_str() {
+                            "desktop" => "60%",
+                            "balanced" => "80%",
+                            "travel" => "90%",
+                            "full" => "100%",
+                            _ => &preset.name,
+                        };
+                        let selected = is_profile_active(cfg, &preset) && !travel_active;
+                        if tile_button(ui, short_label, selected, pw, 25.0, t).clicked() {
+                            cfg.battery.clear_travel_charge();
+                            apply_battery_profile(cfg, &preset);
+                            on_save();
+                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                            on_cmd(WorkerCommand::ApplyBatteryNow);
+                        }
+                    }
+                    let t_label = i18n.t("cockpit.travel_short");
+                    if tile_button(ui, &t_label, travel_active, pw, 25.0, t)
+                        .on_hover_text(i18n.t("cockpit.travel_short_tooltip"))
+                        .clicked()
+                    {
+                        if travel_active {
+                            cfg.battery.clear_travel_charge();
+                        } else {
+                            cfg.battery.enable_travel_charge(now_utc);
+                        }
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyBatteryNow);
+                    }
+                });
+
+                if !cfg.battery.custom_profiles.is_empty() {
+                    ui.add_space(3.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
+                        for custom in cfg.battery.custom_profiles.clone() {
+                            let selected =
+                                cfg.battery.active_profile_id.as_deref() == Some(&custom.id);
+                            let label = format!("{} ({}%)", custom.name, custom.stop_threshold_pct);
+                            if pill_button(ui, &label, selected, t).clicked() {
+                                apply_battery_profile(cfg, &custom);
+                                on_save();
+                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                                on_cmd(WorkerCommand::ApplyBatteryNow);
+                            }
+                        }
+                    });
+                }
+            });
+
+            ui.add_space(5.0);
+
+            // Card E: Keyboard Lighting
             compact_card(t).show(ui, |ui| {
                 ui.set_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
@@ -789,114 +870,9 @@ pub fn render(
                     }
                 });
             });
-
-            ui.add_space(5.0);
-
-            // Card E: Battery Charge Limit Profiles (All builtin + custom profiles)
-            compact_card(t).show(ui, |ui| {
-                ui.set_width(card_inner_w);
-                ui.set_max_width(card_inner_w);
-                ui.horizontal(|ui| {
-                    if section_toggle_button(
-                        ui,
-                        &i18n.t("home.quick_battery"),
-                        &mut cfg.battery.enabled,
-                        &i18n.t("common.enabled"),
-                        t,
-                    )
-                    .changed()
-                    {
-                        if !cfg.battery.enabled {
-                            cfg.battery.mode = BatteryChargeMode::Auto;
-                        } else if cfg.battery.mode == BatteryChargeMode::Auto {
-                            cfg.battery.mode = BatteryChargeMode::Inhibit;
-                        }
-                        cfg.battery.active_profile_id = None;
-                        on_save();
-                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                        on_cmd(WorkerCommand::ApplyBatteryNow);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 5.0;
-                        let bat_open = open_drawer == Some(Drawer::Battery);
-                        let bat_tip = i18n.t_fmt(
-                            "cockpit.open_detail_tooltip",
-                            &[("section", &i18n.t("nav.battery"))],
-                        );
-                        if detail_dial_button(ui, bat_open, &bat_tip, t).clicked() {
-                            actions.open_drawer_exact = Some(Drawer::Battery);
-                        }
-                        let now_utc = chrono::Utc::now().timestamp();
-                        let travel_active = cfg.battery.is_travel_charge_active(now_utc);
-                        let t_label = i18n.t("cockpit.travel_short");
-                        if pill_button(ui, &t_label, travel_active, t)
-                            .on_hover_text(i18n.t("cockpit.travel_short_tooltip"))
-                            .clicked()
-                        {
-                            if travel_active {
-                                cfg.battery.clear_travel_charge();
-                            } else {
-                                cfg.battery.enable_travel_charge(now_utc);
-                            }
-                            on_save();
-                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            on_cmd(WorkerCommand::ApplyBatteryNow);
-                        }
-                    });
-                });
-
-                ui.add_space(3.0);
-                let builtins = BatteryProfile::builtins();
-                let pw = equal_tile_width(card_inner_w, builtins.len(), 5.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    for preset in builtins {
-                        let short_label = match preset.id.as_str() {
-                            "desktop" => "60%",
-                            "balanced" => "80%",
-                            "travel" => "90%",
-                            "full" => "100%",
-                            _ => &preset.name,
-                        };
-                        let selected = is_profile_active(cfg, &preset);
-                        if tile_button(ui, short_label, selected, pw, 25.0, t).clicked() {
-                            apply_battery_profile(cfg, &preset);
-                            on_save();
-                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                            on_cmd(WorkerCommand::ApplyBatteryNow);
-                        }
-                    }
-                });
-
-                if !cfg.battery.custom_profiles.is_empty() {
-                    ui.add_space(3.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
-                        for custom in cfg.battery.custom_profiles.clone() {
-                            let selected =
-                                cfg.battery.active_profile_id.as_deref() == Some(&custom.id);
-                            let label = format!("{} ({}%)", custom.name, custom.stop_threshold_pct);
-                            if pill_button(ui, &label, selected, t).clicked() {
-                                apply_battery_profile(cfg, &custom);
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                on_cmd(WorkerCommand::ApplyBatteryNow);
-                            }
-                        }
-                    });
-                }
-
-                ui.add_space(2.0);
-                let off_key = if cfg.battery.enabled && cfg.battery.hold_when_shutdown {
-                    "battery.when_off_hold_short"
-                } else {
-                    "battery.when_off_auto_short"
-                };
-                ui.weak(RichText::new(i18n.t(off_key)).size(10.5));
-            });
         });
 
-    // 4. Bottom Drawer Launcher Bar (Fixed Footer)
+    // 3. Bottom Drawer Navigation & Compact Footer
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         ui.set_width(content_w);
         ui.set_max_width(content_w);
@@ -950,7 +926,7 @@ pub fn render(
             });
         });
 
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
         let drawers = [
             (Drawer::Monitor, i18n.t("drawer.monitor")),
@@ -963,12 +939,12 @@ pub fn render(
             ui.spacing_mut().item_spacing.x = 5.0;
             for (d, label) in drawers {
                 let selected = open_drawer == Some(d);
-                if tile_button(ui, &label, selected, dw, 29.0, t).clicked() {
+                if tile_button(ui, &label, selected, dw, 28.0, t).clicked() {
                     actions.toggle_drawer = Some(d);
                 }
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(2.0);
     });
 
     actions

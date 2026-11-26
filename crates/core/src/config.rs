@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::thermal::{DEFAULT_GUARD_CPU_TEMP_C, DEFAULT_GUARD_SUSTAIN_SECS};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 7;
+pub const CURRENT_CONFIG_VERSION: u32 = 8;
 pub const DEFAULT_TRAVEL_CHARGE_DURATION_SECS: i64 = 12 * 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,7 +553,10 @@ pub struct ThermalFanConfig {
     pub performance_mode: PerformanceMode,
     pub fan_mode: FanMode,
     pub manual_speed_pct: u8,
+    pub gpu_manual_speed_pct: u8,
     pub custom_curve: FanCurve,
+    pub gpu_custom_curve: FanCurve,
+    pub link_cpu_gpu_fans: bool,
     pub keep_alive_enabled: bool,
     pub keep_alive_interval_secs: u64,
     pub guard_cpu_temp_c: u8,
@@ -567,7 +570,10 @@ impl Default for ThermalFanConfig {
             performance_mode: PerformanceMode::Balanced,
             fan_mode: FanMode::Auto,
             manual_speed_pct: 50,
+            gpu_manual_speed_pct: 50,
             custom_curve: FanCurve::default(),
+            gpu_custom_curve: FanCurve::default(),
+            link_cpu_gpu_fans: false,
             keep_alive_enabled: true,
             keep_alive_interval_secs: 45,
             guard_cpu_temp_c: DEFAULT_GUARD_CPU_TEMP_C,
@@ -989,6 +995,11 @@ impl AppConfig {
                 theme.apply_legacy_extended_migration();
             }
         }
+        if cfg.config_version < 8 {
+            cfg.thermal_fan.gpu_manual_speed_pct = cfg.thermal_fan.manual_speed_pct;
+            cfg.thermal_fan.gpu_custom_curve = cfg.thermal_fan.custom_curve.clone();
+            cfg.thermal_fan.link_cpu_gpu_fans = false;
+        }
         cfg.config_version = CURRENT_CONFIG_VERSION;
         let warnings = cfg.sanitize();
         Ok((cfg, warnings))
@@ -1005,6 +1016,7 @@ impl AppConfig {
         self.logging.max_files = self.logging.max_files.clamp(1, 16);
 
         self.thermal_fan.manual_speed_pct = self.thermal_fan.manual_speed_pct.clamp(0, 100);
+        self.thermal_fan.gpu_manual_speed_pct = self.thermal_fan.gpu_manual_speed_pct.clamp(0, 100);
         self.thermal_fan.keep_alive_interval_secs =
             self.thermal_fan.keep_alive_interval_secs.clamp(15, 110);
         self.thermal_fan.guard_cpu_temp_c = self.thermal_fan.guard_cpu_temp_c.clamp(90, 98);
@@ -1020,6 +1032,20 @@ impl AppConfig {
             } else {
                 warnings.push(
                     "Normalized custom fan curve (monotonic non-decreasing & >= 50% at >= 80°C)."
+                        .to_string(),
+                );
+            }
+        }
+        let gpu_had_too_few = self.thermal_fan.gpu_custom_curve.points.len() < 2;
+        if self.thermal_fan.gpu_custom_curve.normalize() {
+            if gpu_had_too_few {
+                warnings.push(
+                    "GPU custom fan curve had fewer than 2 points; restored default curve points."
+                        .to_string(),
+                );
+            } else {
+                warnings.push(
+                    "Normalized GPU custom fan curve (monotonic non-decreasing & >= 50% at >= 80°C)."
                         .to_string(),
                 );
             }
@@ -1888,5 +1914,44 @@ text_primary = [20, 20, 20]
             cfg.battery.custom_profiles[0].mode,
             BatteryChargeMode::Inhibit
         );
+    }
+
+    #[test]
+    fn v7_to_v8_migration_copies_gpu_fan_settings_and_sanitizes_gpu_curve() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("omvix_v7_mig_{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let v7 = r#"
+config_version = 7
+
+[thermal_fan]
+fan_mode = "Manual"
+manual_speed_pct = 68
+
+[thermal_fan.custom_curve]
+hysteresis_c = 4
+points = [
+  { temp_c = 40, speed_pct = 30 },
+  { temp_c = 85, speed_pct = 20 }
+]
+"#;
+        fs::write(&path, v7).unwrap();
+
+        let (loaded, warnings) = AppConfig::load_from_path_with_warnings(&path).unwrap();
+        assert_eq!(loaded.config_version, CURRENT_CONFIG_VERSION);
+        assert_eq!(loaded.thermal_fan.manual_speed_pct, 68);
+        assert_eq!(loaded.thermal_fan.gpu_manual_speed_pct, 68);
+        assert!(!loaded.thermal_fan.link_cpu_gpu_fans);
+        assert_eq!(loaded.thermal_fan.custom_curve.points[1].speed_pct, 50);
+        assert_eq!(loaded.thermal_fan.gpu_custom_curve.points[1].speed_pct, 50);
+        assert_eq!(loaded.thermal_fan.gpu_custom_curve.hysteresis_c, 4);
+        assert!(!warnings.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
