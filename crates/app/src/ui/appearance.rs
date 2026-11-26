@@ -232,6 +232,7 @@ pub fn render(
                 } else {
                     clean.to_string()
                 };
+                cfg.general.custom_theme.name = to_save.name.clone();
                 if let Some(existing) = cfg
                     .general
                     .custom_themes

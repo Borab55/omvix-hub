@@ -115,7 +115,7 @@ pub struct TrayController {
     item_bat_100: CheckMenuItem,
     item_quit: MenuItem,
     last_icon_state: Option<(PerformanceMode, BatteryChargeMode)>,
-    last_checked_state: Option<(PerformanceMode, FanMode, bool, u8)>,
+    last_checked_state: Option<(PerformanceMode, Option<FanMode>, bool, u8)>,
 }
 
 impl TrayController {
@@ -278,7 +278,7 @@ impl TrayController {
     pub fn update_visual_state(
         &mut self,
         perf_mode: PerformanceMode,
-        fan_mode: FanMode,
+        fan_mode: Option<FanMode>,
         bat_enabled: bool,
         bat_stop_pct: u8,
         bat_hw_mode: BatteryChargeMode,
@@ -323,12 +323,14 @@ impl TrayController {
             self.item_mode_perf
                 .set_checked(perf_mode == PerformanceMode::Performance);
 
-            self.item_fan_auto.set_checked(fan_mode == FanMode::Auto);
-            self.item_fan_max.set_checked(fan_mode == FanMode::Max);
+            self.item_fan_auto
+                .set_checked(fan_mode == Some(FanMode::Auto));
+            self.item_fan_max
+                .set_checked(fan_mode == Some(FanMode::Max));
             self.item_fan_manual
-                .set_checked(fan_mode == FanMode::Manual);
+                .set_checked(fan_mode == Some(FanMode::Manual));
             self.item_fan_curve
-                .set_checked(fan_mode == FanMode::CustomCurve);
+                .set_checked(fan_mode == Some(FanMode::CustomCurve));
 
             self.item_bat_60
                 .set_checked(bat_enabled && bat_stop_pct == 60);

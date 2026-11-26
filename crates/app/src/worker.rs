@@ -147,7 +147,7 @@ pub struct SharedState {
     pub synced_config: Option<AppConfig>,
     pub last_support_bundle_path: Option<PathBuf>,
     pub support_bundle_busy: bool,
-    pub telemetry_csv_rows: VecDeque<TelemetryCsvRow>,
+    pub telemetry_csv_rows: Arc<Mutex<VecDeque<TelemetryCsvRow>>>,
     pub last_csv_export_path: Option<PathBuf>,
     pub battery_health_history: Vec<BatteryHealthRecord>,
     pub update_status: UpdateUiStatus,
@@ -213,7 +213,9 @@ impl Default for SharedState {
             synced_config: None,
             last_support_bundle_path: None,
             support_bundle_busy: false,
-            telemetry_csv_rows: VecDeque::with_capacity(MAX_TELEMETRY_CSV_ROWS),
+            telemetry_csv_rows: Arc::new(Mutex::new(VecDeque::with_capacity(
+                MAX_TELEMETRY_CSV_ROWS,
+            ))),
             last_csv_export_path: None,
             battery_health_history: Vec::new(),
             update_status: UpdateUiStatus::Idle,
@@ -228,6 +230,13 @@ impl SharedState {
         self.last_toast = Some((msg.into(), is_error, Instant::now()));
     }
 
+    pub fn has_telemetry_csv_rows(&self) -> bool {
+        self.telemetry_csv_rows
+            .lock()
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false)
+    }
+
     pub fn clear_telemetry_history(&mut self) {
         self.cpu_usage_history.clear();
         self.gpu_load_history.clear();
@@ -238,7 +247,9 @@ impl SharedState {
         self.cpu_power_history.clear();
         self.gpu_power_history.clear();
         self.battery_power_history.clear();
-        self.telemetry_csv_rows.clear();
+        if let Ok(mut rows) = self.telemetry_csv_rows.lock() {
+            rows.clear();
+        }
         self.cpu_temp_stats = MetricStats::new();
         self.gpu_temp_stats = MetricStats::new();
         self.cpu_power_stats = MetricStats::new();
@@ -795,6 +806,9 @@ struct WorkerEngine {
     prev_curve_speed: u8,
     prev_gpu_curve_temp: f32,
     prev_gpu_curve_speed: u8,
+    prev_curve_applied: bool,
+    prev_curve_cool_hint: Option<bool>,
+    previous_active_rule: Option<AppProfileRule>,
     change_history: ChangeHistory,
     last_committed_battery: BatteryConfig,
     last_committed_lighting: LightingConfig,
@@ -1071,11 +1085,12 @@ fn record_snapshot(st: &mut SharedState, snap: &TelemetrySnapshot, t: f64) {
     if let Some(bp) = snap.battery_rate_w {
         push_sample(&mut st.battery_power_history, t, bp.abs());
     }
-    if st.telemetry_csv_rows.len() >= MAX_TELEMETRY_CSV_ROWS {
-        st.telemetry_csv_rows.pop_front();
+    if let Ok(mut rows) = st.telemetry_csv_rows.lock() {
+        if rows.len() >= MAX_TELEMETRY_CSV_ROWS {
+            rows.pop_front();
+        }
+        rows.push_back(TelemetryCsvRow::from_snapshot(snap, t));
     }
-    st.telemetry_csv_rows
-        .push_back(TelemetryCsvRow::from_snapshot(snap, t));
     st.telemetry = snap.clone();
 }
 
@@ -1159,6 +1174,9 @@ impl WorkerEngine {
             prev_curve_speed: 40,
             prev_gpu_curve_temp: 40.0,
             prev_gpu_curve_speed: 40,
+            prev_curve_applied: false,
+            prev_curve_cool_hint: None,
+            previous_active_rule: None,
             change_history: ChangeHistory::default(),
             last_committed_battery,
             last_committed_lighting,
@@ -1397,6 +1415,8 @@ impl WorkerEngine {
         };
         match sl_dec {
             SensorLossDecision::EngageAutoFallback => {
+                self.thermal_guard.reset();
+                self.retry_ctrl.reset();
                 tracing::warn!(
                     timeout_secs = DEFAULT_SENSOR_LOSS_TIMEOUT_SECS,
                     "All temperature sensors missing; forcing BIOS Auto fan control"
@@ -1408,6 +1428,7 @@ impl WorkerEngine {
                 );
                 if let Ok(mut st) = self.state.lock() {
                     st.sensor_loss_active = true;
+                    st.thermal_guard_active = false;
                     st.set_toast(
                         "All thermal sensors lost (>6s) -> BIOS Auto fan fallback",
                         true,
@@ -1738,7 +1759,9 @@ impl WorkerEngine {
             let cpu_changed = cpu_target != self.prev_curve_speed;
             let gpu_changed = gpu_target != self.prev_gpu_curve_speed;
             let is_cool = cool_hint_from_snapshot(&snap);
-            if cpu_changed || gpu_changed {
+            let cool_edge = self.prev_curve_cool_hint != Some(is_cool)
+                && (cpu_target <= 30 || gpu_target <= 30);
+            if !self.prev_curve_applied || cpu_changed || gpu_changed || cool_edge {
                 record_hw_write_attempt(
                     &self.crash_guard,
                     &self.crash_guard_path,
@@ -1756,6 +1779,8 @@ impl WorkerEngine {
                         "Custom fan curve write failed: {err}"
                     );
                 } else {
+                    self.prev_curve_applied = true;
+                    self.prev_curve_cool_hint = Some(is_cool);
                     self.prev_curve_speed = cpu_target;
                     if let Some(ct) = cpu_temp_opt {
                         if cpu_changed || ct > self.prev_curve_temp {
@@ -1810,10 +1835,14 @@ impl WorkerEngine {
                 ProfileBaseline {
                     performance_mode: cfg.thermal_fan.performance_mode,
                     fan_mode: cfg.thermal_fan.fan_mode,
+                    gpu_fan_mode: cfg.thermal_fan.gpu_fan_mode,
                     manual_speed_pct: cfg.thermal_fan.manual_speed_pct,
+                    gpu_manual_speed_pct: cfg.thermal_fan.gpu_manual_speed_pct,
                     custom_curve: active_curve_override
                         .clone()
                         .unwrap_or_else(|| cfg.thermal_fan.custom_curve.clone()),
+                    gpu_custom_curve: cfg.thermal_fan.gpu_custom_curve.clone(),
+                    link_cpu_gpu_fans: cfg.thermal_fan.link_cpu_gpu_fans,
                     refresh_hz,
                     cpu_boost_mode,
                 }
@@ -2183,7 +2212,11 @@ impl WorkerEngine {
                         gpu_target_pct,
                         is_cool,
                     ) {
+                        self.prev_curve_applied = false;
                         tracing::warn!("Failed applying updated fan settings: {err}");
+                    } else {
+                        self.prev_curve_applied = true;
+                        self.prev_curve_cool_hint = Some(is_cool);
                     }
                 }
             }
@@ -2253,6 +2286,7 @@ impl WorkerEngine {
                 let prev_gpu_mode = self.cfg.thermal_fan.gpu_fan_mode;
                 let prev_pct = self.cfg.thermal_fan.manual_speed_pct;
                 let prev_gpu_pct = self.cfg.thermal_fan.gpu_manual_speed_pct;
+                let prev_link = self.cfg.thermal_fan.link_cpu_gpu_fans;
                 let prev_curve = self
                     .active_curve_override
                     .clone()
@@ -2277,27 +2311,34 @@ impl WorkerEngine {
                     }
                     return false;
                 }
-                self.active_curve_override = None;
-                self.cfg.thermal_fan.fan_mode = mode;
-                self.cfg.thermal_fan.gpu_fan_mode = resolved_gpu_mode;
-                if let Some(pct) = manual_speed_pct {
-                    self.cfg.thermal_fan.manual_speed_pct = pct.clamp(0, 100);
+                if self.thermal_guard.is_active()
+                    && (mode != FanMode::Max || resolved_gpu_mode != FanMode::Max)
+                {
+                    if let Ok(mut st) = self.state.lock() {
+                        st.set_toast(
+                            "Thermal Guard active: Max Fan remains engaged until temperatures drop",
+                            true,
+                        );
+                    }
+                    return false;
                 }
-                if let Some(gpct) = gpu_manual_speed_pct {
-                    self.cfg.thermal_fan.gpu_manual_speed_pct = gpct.clamp(0, 100);
-                }
-                self.retry_ctrl.reset();
+                let next_cpu_pct = manual_speed_pct
+                    .map(|p| p.clamp(0, 100))
+                    .unwrap_or(self.cfg.thermal_fan.manual_speed_pct);
+                let next_gpu_pct = gpu_manual_speed_pct
+                    .map(|p| p.clamp(0, 100))
+                    .unwrap_or(self.cfg.thermal_fan.gpu_manual_speed_pct);
                 let snap = self
                     .state
                     .lock()
                     .map(|st| st.telemetry.clone())
                     .unwrap_or_default();
                 let is_cool = cool_hint_from_snapshot(&snap);
-                let effective_cpu_manual =
-                    manual_speed_pct.or(Some(self.cfg.thermal_fan.manual_speed_pct));
-                let effective_gpu_manual =
-                    gpu_manual_speed_pct.or(Some(self.cfg.thermal_fan.gpu_manual_speed_pct));
                 let link_fans = self.cfg.thermal_fan.link_cpu_gpu_fans;
+                let mut next_prev_temp = self.prev_curve_temp;
+                let mut next_prev_speed = self.prev_curve_speed;
+                let mut next_prev_gpu_temp = self.prev_gpu_curve_temp;
+                let mut next_prev_gpu_speed = self.prev_gpu_curve_speed;
                 let (hw_mode, cpu_target_pct, gpu_target_pct) =
                     resolve_independent_dual_fan_targets(
                         mode,
@@ -2305,13 +2346,13 @@ impl WorkerEngine {
                         &snap,
                         &self.cfg.thermal_fan.custom_curve,
                         &self.cfg.thermal_fan.gpu_custom_curve,
-                        effective_cpu_manual,
-                        effective_gpu_manual,
+                        Some(next_cpu_pct),
+                        Some(next_gpu_pct),
                         link_fans,
-                        &mut self.prev_curve_temp,
-                        &mut self.prev_curve_speed,
-                        &mut self.prev_gpu_curve_temp,
-                        &mut self.prev_gpu_curve_speed,
+                        &mut next_prev_temp,
+                        &mut next_prev_speed,
+                        &mut next_prev_gpu_temp,
+                        &mut next_prev_gpu_speed,
                     );
                 record_hw_write_attempt(
                     &self.crash_guard,
@@ -2325,6 +2366,18 @@ impl WorkerEngine {
                     is_cool,
                 );
                 if res.is_ok() {
+                    self.active_curve_override = None;
+                    self.cfg.thermal_fan.fan_mode = mode;
+                    self.cfg.thermal_fan.gpu_fan_mode = resolved_gpu_mode;
+                    self.cfg.thermal_fan.manual_speed_pct = next_cpu_pct;
+                    self.cfg.thermal_fan.gpu_manual_speed_pct = next_gpu_pct;
+                    self.retry_ctrl.reset();
+                    self.prev_curve_temp = next_prev_temp;
+                    self.prev_curve_speed = next_prev_speed;
+                    self.prev_gpu_curve_temp = next_prev_gpu_temp;
+                    self.prev_gpu_curve_speed = next_prev_gpu_speed;
+                    self.prev_curve_applied = true;
+                    self.prev_curve_cool_hint = Some(is_cool);
                     if let Ok(mut st) = self.state.lock() {
                         st.effective_fan_mode = mode;
                         st.effective_gpu_fan_mode = resolved_gpu_mode;
@@ -2352,6 +2405,7 @@ impl WorkerEngine {
                             gpu_manual_speed_pct: prev_gpu_pct,
                             custom_curve: prev_curve,
                             gpu_custom_curve: prev_gpu_curve,
+                            link_cpu_gpu_fans: prev_link,
                         },
                     );
                     record_result(&self.state, res, format!("Fan -> {new_sum}"));
@@ -2880,8 +2934,15 @@ impl WorkerEngine {
                     cg.clear_history();
                     let _ = cg.save_to_path(&self.crash_guard_path);
                 }
+                let prev_lang = self.cfg.general.language.clone();
+                self.cfg = AppConfig::default();
+                self.cfg.general.language = prev_lang;
+                self.cfg.general.first_run_completed = true;
                 self.app_profile_engine.reset();
+                self.previous_active_rule = None;
                 self.active_curve_override = None;
+                self.prev_curve_applied = false;
+                self.prev_curve_cool_hint = None;
                 self.change_history.clear();
                 self.last_committed_battery = BatteryConfig::default();
                 self.last_committed_lighting = LightingConfig::default();
@@ -2968,6 +3029,8 @@ impl WorkerEngine {
                     if refreshed_bat.is_some() {
                         st.battery_status = refreshed_bat;
                     }
+                    st.synced_config = Some(self.cfg.clone());
+                    st.synced_config_rev = st.synced_config_rev.wrapping_add(1);
                     st.set_toast("All hardware & app settings restored to defaults", false);
                 }
             }
@@ -3119,6 +3182,9 @@ impl WorkerEngine {
             }
             WorkerCommand::CreateSupportBundle(out_path) => {
                 if let Ok(mut st) = self.state.lock() {
+                    if st.support_bundle_busy {
+                        return false;
+                    }
                     st.support_bundle_busy = true;
                     st.set_toast("Creating support bundle (.zip)...", false);
                 }
@@ -3145,36 +3211,48 @@ impl WorkerEngine {
                     crash_guard_path: Some(self.crash_guard_path.to_path_buf()),
                     extra_text_files,
                 };
-                let res = build_support_bundle_zip(&out_path, &inputs);
-                if let Ok(mut st) = self.state.lock() {
-                    st.support_bundle_busy = false;
-                    if let Some(report) = diag {
-                        st.diagnostics = Some(report);
-                    }
-                    match res {
-                        Ok(summary) => {
-                            let kb = (summary.total_bytes / 1024).max(1);
-                            st.last_support_bundle_path = Some(summary.output_path.clone());
-                            st.set_toast(
-                                format!(
-                                    "Support bundle saved ({} files, {kb} KB)",
-                                    summary.file_count
-                                ),
-                                false,
-                            );
+                let state_clone = Arc::clone(&self.state);
+                let ctx_clone = ctx.clone();
+                let vis_clone = Arc::clone(window_visible);
+                thread::spawn(move || {
+                    let res = build_support_bundle_zip(&out_path, &inputs);
+                    if let Ok(mut st) = state_clone.lock() {
+                        st.support_bundle_busy = false;
+                        if let Some(report) = diag {
+                            st.diagnostics = Some(report);
                         }
-                        Err(err) => {
-                            tracing::warn!("Failed creating support bundle: {err}");
-                            st.set_toast(err.to_string(), true);
+                        match res {
+                            Ok(summary) => {
+                                let kb = (summary.total_bytes / 1024).max(1);
+                                st.last_support_bundle_path = Some(summary.output_path.clone());
+                                st.set_toast(
+                                    format!(
+                                        "Support bundle saved ({} files, {kb} KB)",
+                                        summary.file_count
+                                    ),
+                                    false,
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!("Failed creating support bundle: {err}");
+                                st.set_toast(err.to_string(), true);
+                            }
                         }
                     }
-                }
+                    request_repaint_if_visible(&ctx_clone, &vis_clone);
+                });
             }
             WorkerCommand::ExportTelemetryCsv(out_path) => {
                 let rows: Vec<TelemetryCsvRow> = self
                     .state
                     .lock()
-                    .map(|st| st.telemetry_csv_rows.iter().cloned().collect())
+                    .ok()
+                    .and_then(|st| {
+                        st.telemetry_csv_rows
+                            .lock()
+                            .ok()
+                            .map(|r| r.iter().cloned().collect())
+                    })
                     .unwrap_or_default();
                 match write_telemetry_csv(&out_path, &rows) {
                     Ok(count) => {
@@ -3689,6 +3767,8 @@ impl WorkerEngine {
         match transition {
             AppProfileTransition::None => {}
             AppProfileTransition::Activate { rule } => {
+                let prev_rule = self.previous_active_rule.take();
+                let baseline_opt = self.app_profile_engine.saved_baseline().cloned();
                 tracing::info!(
                     rule_id = %rule.id,
                     exe = %rule.exe_name,
@@ -3711,20 +3791,12 @@ impl WorkerEngine {
                 }
                 self.sync_win_power_mode_if_enabled(rule.performance_mode);
 
-                let eff_cpu_fan = rule.fan_mode.unwrap_or(self.cfg.thermal_fan.fan_mode);
-                let eff_gpu_fan =
-                    rule.fan_mode
-                        .unwrap_or(if self.cfg.thermal_fan.link_cpu_gpu_fans {
-                            self.cfg.thermal_fan.fan_mode
-                        } else {
-                            self.cfg.thermal_fan.gpu_fan_mode
-                        });
-                self.active_curve_override = if rule.fan_mode == Some(FanMode::CustomCurve) {
-                    rule.curve_preset.map(|p| p.to_curve())
-                } else {
-                    None
-                };
-                if let Some(fan_mode) = rule.fan_mode {
+                let (eff_cpu_fan, eff_gpu_fan) = if let Some(fan_mode) = rule.fan_mode {
+                    self.active_curve_override = if fan_mode == FanMode::CustomCurve {
+                        rule.curve_preset.map(|p| p.to_curve())
+                    } else {
+                        None
+                    };
                     let active_curve = self
                         .active_curve_override
                         .clone()
@@ -3735,11 +3807,57 @@ impl WorkerEngine {
                         &active_curve,
                         self.cfg.thermal_fan.manual_speed_pct,
                     );
+                    (fan_mode, fan_mode)
+                } else if prev_rule.as_ref().is_some_and(|p| p.fan_mode.is_some()) {
+                    self.active_curve_override = None;
+                    if let Some(ref baseline) = baseline_opt {
+                        let rest_gpu = if baseline.link_cpu_gpu_fans {
+                            baseline.fan_mode
+                        } else {
+                            baseline.gpu_fan_mode
+                        };
+                        self.cfg.thermal_fan.gpu_custom_curve = baseline.gpu_custom_curve.clone();
+                        self.cfg.thermal_fan.gpu_manual_speed_pct = baseline.gpu_manual_speed_pct;
+                        self.apply_fan_override_if_safe(
+                            baseline.fan_mode,
+                            rest_gpu,
+                            &baseline.custom_curve,
+                            baseline.manual_speed_pct,
+                        );
+                        (baseline.fan_mode, rest_gpu)
+                    } else {
+                        (
+                            effective_fan_mode(&self.cfg, None),
+                            effective_gpu_fan_mode(&self.cfg, None),
+                        )
+                    }
+                } else {
+                    (
+                        effective_fan_mode(&self.cfg, None),
+                        effective_gpu_fan_mode(&self.cfg, None),
+                    )
+                };
+
+                if rule.refresh_hz.is_some() {
+                    self.apply_refresh_rate_if_set(rule.refresh_hz);
+                } else if prev_rule.as_ref().is_some_and(|p| p.refresh_hz.is_some()) {
+                    self.apply_refresh_rate_if_set(
+                        baseline_opt.as_ref().and_then(|b| b.refresh_hz),
+                    );
+                }
+                if rule.cpu_boost_mode.is_some() {
+                    self.apply_cpu_boost_if_set(rule.cpu_boost_mode);
+                } else if prev_rule
+                    .as_ref()
+                    .is_some_and(|p| p.cpu_boost_mode.is_some())
+                {
+                    self.apply_cpu_boost_if_set(
+                        baseline_opt.as_ref().and_then(|b| b.cpu_boost_mode),
+                    );
                 }
 
-                self.apply_refresh_rate_if_set(rule.refresh_hz);
-                self.apply_cpu_boost_if_set(rule.cpu_boost_mode);
-
+                self.previous_active_rule = Some(rule.clone());
+                self.prev_curve_applied = false;
                 let label = rule.display_label().to_string();
                 if let Ok(mut st) = self.state.lock() {
                     st.active_app_profile = Some(label.clone());
@@ -3759,11 +3877,20 @@ impl WorkerEngine {
                 tracing::info!(
                     ?baseline.performance_mode,
                     ?baseline.fan_mode,
+                    ?baseline.gpu_fan_mode,
                     "Restoring baseline after app exit"
                 );
+                self.previous_active_rule = None;
                 self.active_curve_override = None;
+                self.prev_curve_applied = false;
                 self.cfg.thermal_fan.performance_mode = baseline.performance_mode;
                 self.cfg.thermal_fan.fan_mode = baseline.fan_mode;
+                self.cfg.thermal_fan.gpu_fan_mode = baseline.gpu_fan_mode;
+                self.cfg.thermal_fan.manual_speed_pct = baseline.manual_speed_pct;
+                self.cfg.thermal_fan.gpu_manual_speed_pct = baseline.gpu_manual_speed_pct;
+                self.cfg.thermal_fan.custom_curve = baseline.custom_curve.clone();
+                self.cfg.thermal_fan.gpu_custom_curve = baseline.gpu_custom_curve.clone();
+                self.cfg.thermal_fan.link_cpu_gpu_fans = baseline.link_cpu_gpu_fans;
 
                 if self.bios_writes_allowed {
                     record_hw_write_attempt(
@@ -3781,10 +3908,10 @@ impl WorkerEngine {
                 }
                 self.sync_win_power_mode_if_enabled(baseline.performance_mode);
 
-                let restore_gpu_mode = if self.cfg.thermal_fan.link_cpu_gpu_fans {
+                let restore_gpu_mode = if baseline.link_cpu_gpu_fans {
                     baseline.fan_mode
                 } else {
-                    self.cfg.thermal_fan.gpu_fan_mode
+                    baseline.gpu_fan_mode
                 };
                 self.apply_fan_override_if_safe(
                     baseline.fan_mode,
@@ -3802,6 +3929,8 @@ impl WorkerEngine {
                     st.effective_fan_mode = baseline.fan_mode;
                     st.effective_gpu_fan_mode = restore_gpu_mode;
                     st.auto_applied_revision = st.auto_applied_revision.wrapping_add(1);
+                    st.synced_config = Some(self.cfg.clone());
+                    st.synced_config_rev = st.synced_config_rev.wrapping_add(1);
                     st.set_toast("Restored baseline profile", false);
                 }
                 self.backends.os.show_osd(
@@ -3854,12 +3983,9 @@ impl WorkerEngine {
                 gpu_manual_speed_pct,
                 custom_curve,
                 gpu_custom_curve,
+                link_cpu_gpu_fans,
             } => {
-                let target_gpu_mode = if self.cfg.thermal_fan.link_cpu_gpu_fans {
-                    mode
-                } else {
-                    gpu_mode
-                };
+                let target_gpu_mode = if link_cpu_gpu_fans { mode } else { gpu_mode };
                 if self.sensor_loss_guard.is_active()
                     && (mode != FanMode::Auto || target_gpu_mode != FanMode::Auto)
                 {
@@ -3899,7 +4025,7 @@ impl WorkerEngine {
                             &gpu_custom_curve,
                             Some(manual_speed_pct),
                             Some(gpu_manual_speed_pct),
-                            self.cfg.thermal_fan.link_cpu_gpu_fans,
+                            link_cpu_gpu_fans,
                             &mut next_prev_temp,
                             &mut next_prev_speed,
                             &mut next_prev_gpu_temp,
@@ -3918,6 +4044,9 @@ impl WorkerEngine {
                         self.cfg.thermal_fan.gpu_manual_speed_pct = gpu_manual_speed_pct;
                         self.cfg.thermal_fan.custom_curve = custom_curve;
                         self.cfg.thermal_fan.gpu_custom_curve = gpu_custom_curve;
+                        self.cfg.thermal_fan.link_cpu_gpu_fans = link_cpu_gpu_fans;
+                        self.prev_curve_applied = true;
+                        self.prev_curve_cool_hint = Some(is_cool);
                         self.active_curve_override = None;
                         self.retry_ctrl.reset();
                         self.prev_curve_temp = next_prev_temp;
@@ -4442,11 +4571,48 @@ fn coalesce_segment(seg: Vec<WorkerCommand>, out: &mut Vec<WorkerCommand>) {
         }
     }
 
+    let mut merged_fan_gpu_mode: Option<FanMode> = None;
+    let mut merged_fan_cpu_pct: Option<u8> = None;
+    let mut merged_fan_gpu_pct: Option<u8> = None;
     let start_out = out.len();
-    for (idx, cmd) in seg.into_iter().enumerate() {
+    for (idx, mut cmd) in seg.into_iter().enumerate() {
         if let Some(kind) = latest_wins_kind(&cmd) {
             if last_idx_by_kind[kind as usize] != Some(idx) {
+                if let WorkerCommand::SetFanMode {
+                    gpu_mode,
+                    manual_speed_pct,
+                    gpu_manual_speed_pct,
+                    ..
+                } = cmd
+                {
+                    if gpu_mode.is_some() {
+                        merged_fan_gpu_mode = gpu_mode;
+                    }
+                    if manual_speed_pct.is_some() {
+                        merged_fan_cpu_pct = manual_speed_pct;
+                    }
+                    if gpu_manual_speed_pct.is_some() {
+                        merged_fan_gpu_pct = gpu_manual_speed_pct;
+                    }
+                }
                 continue;
+            }
+            if let WorkerCommand::SetFanMode {
+                ref mut gpu_mode,
+                ref mut manual_speed_pct,
+                ref mut gpu_manual_speed_pct,
+                ..
+            } = cmd
+            {
+                if gpu_mode.is_none() {
+                    *gpu_mode = merged_fan_gpu_mode;
+                }
+                if manual_speed_pct.is_none() {
+                    *manual_speed_pct = merged_fan_cpu_pct;
+                }
+                if gpu_manual_speed_pct.is_none() {
+                    *gpu_manual_speed_pct = merged_fan_gpu_pct;
+                }
             }
         }
         let is_update_cfg = matches!(cmd, WorkerCommand::UpdateConfig(_));

@@ -46,6 +46,7 @@ pub enum RevertPayload {
         gpu_manual_speed_pct: u8,
         custom_curve: FanCurve,
         gpu_custom_curve: FanCurve,
+        link_cpu_gpu_fans: bool,
     },
     BatteryLimit {
         enabled: bool,
@@ -173,6 +174,7 @@ mod tests {
                     gpu_manual_speed_pct: i - 1,
                     custom_curve: FanCurve::default(),
                     gpu_custom_curve: FanCurve::default(),
+                    link_cpu_gpu_fans: false,
                 },
             );
             assert_eq!(id, Some(u64::from(i)));

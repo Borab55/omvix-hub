@@ -959,6 +959,8 @@ struct OmvixApp {
     omen_action_code: Arc<AtomicU8>,
     quitting: bool,
     tray: Option<TrayController>,
+    tray_retry_last: Option<Instant>,
+    tray_retry_attempts: u8,
     worker: Option<BackgroundWorker>,
     state: Arc<Mutex<SharedState>>,
     signal_tx: Sender<AppSignal>,
@@ -1101,9 +1103,9 @@ impl OmvixApp {
                                 win32_set_visible(hwnd_raw, true);
                                 win32_post_close(hwnd_raw);
                                 wake_again.request_repaint();
-                                thread::sleep(Duration::from_millis(1500));
+                                thread::sleep(Duration::from_millis(4500));
                             } else {
-                                thread::sleep(Duration::from_millis(1500));
+                                thread::sleep(Duration::from_millis(4500));
                             }
                             tracing::warn!("Tray quit watchdog forcing clean process termination");
                             std::process::exit(0);
@@ -1163,6 +1165,8 @@ impl OmvixApp {
             omen_action_code,
             quitting: false,
             tray,
+            tray_retry_last: None,
+            tray_retry_attempts: 0,
             worker: Some(worker),
             state,
             signal_tx,
@@ -1602,7 +1606,13 @@ impl OmvixApp {
                     self.request_hide(ctx);
                 }
                 AppSignal::TrayPerfChanged(mode) => {
-                    if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
+                    let allow = self
+                        .state
+                        .lock()
+                        .ok()
+                        .map(|s| s.safe_mode.is_none() && s.bios_writes_allowed)
+                        .unwrap_or(false);
+                    if allow {
                         self.cfg.thermal_fan.performance_mode = mode;
                         self.save_config();
                         show_mode_change_osd(
@@ -1615,7 +1625,18 @@ impl OmvixApp {
                     }
                 }
                 AppSignal::TrayFanChanged(mode) => {
-                    if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
+                    let allow = self
+                        .state
+                        .lock()
+                        .ok()
+                        .map(|s| {
+                            s.safe_mode.is_none()
+                                && s.bios_writes_allowed
+                                && !s.thermal_guard_active
+                                && !s.sensor_loss_active
+                        })
+                        .unwrap_or(false);
+                    if allow {
                         self.cfg.thermal_fan.fan_mode = mode;
                         self.cfg.thermal_fan.gpu_fan_mode = mode;
                         self.save_config();
@@ -1895,22 +1916,59 @@ impl eframe::App for OmvixApp {
             }
         }
 
+        if self.tray.is_none()
+            && self.tray_retry_attempts < 15
+            && self
+                .tray_retry_last
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+        {
+            self.tray_retry_last = Some(Instant::now());
+            self.tray_retry_attempts = self.tray_retry_attempts.saturating_add(1);
+            match TrayController::new(&self.i18n) {
+                Ok(mut t) => {
+                    t.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
+                    self.tray = Some(t);
+                    tracing::info!(
+                        attempt = self.tray_retry_attempts,
+                        "Initialized system tray icon on startup retry"
+                    );
+                }
+                Err(err) if self.tray_retry_attempts == 15 => {
+                    tracing::warn!("System tray retry exhausted after 15 attempts: {err}");
+                }
+                Err(_) => {}
+            }
+        }
+
         if let Some(tray) = &mut self.tray {
             let bat_mode = snapshot_state
                 .battery_status
                 .as_ref()
                 .map(|b| b.current_mode)
                 .unwrap_or(omvix_core::BatteryChargeMode::Unknown);
-            let (tray_perf, tray_fan) = if snapshot_state.active_app_profile.is_some() {
-                (
-                    snapshot_state.effective_performance_mode,
-                    snapshot_state.effective_fan_mode,
-                )
+            let (tray_perf, tray_cpu_fan, tray_gpu_fan) =
+                if snapshot_state.active_app_profile.is_some() {
+                    (
+                        snapshot_state.effective_performance_mode,
+                        snapshot_state.effective_fan_mode,
+                        snapshot_state.effective_gpu_fan_mode,
+                    )
+                } else {
+                    let gpu_eff = if self.cfg.thermal_fan.link_cpu_gpu_fans {
+                        self.cfg.thermal_fan.fan_mode
+                    } else {
+                        self.cfg.thermal_fan.gpu_fan_mode
+                    };
+                    (
+                        self.cfg.thermal_fan.performance_mode,
+                        self.cfg.thermal_fan.fan_mode,
+                        gpu_eff,
+                    )
+                };
+            let tray_fan = if tray_cpu_fan == tray_gpu_fan {
+                Some(tray_cpu_fan)
             } else {
-                (
-                    self.cfg.thermal_fan.performance_mode,
-                    self.cfg.thermal_fan.fan_mode,
-                )
+                None
             };
             tray.update_visual_state(
                 tray_perf,

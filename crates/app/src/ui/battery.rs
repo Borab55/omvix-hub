@@ -197,26 +197,30 @@ pub fn render(
             );
             ui.add_space(4.0);
             ui.collapsing(i18n.t("battery.health_history_table"), |ui| {
-                egui::Grid::new("battery_health_history_grid")
-                    .striped(true)
-                    .num_columns(4)
-                    .spacing([14.0, 4.0])
+                egui::ScrollArea::horizontal()
+                    .id_salt("battery_health_history_hscroll")
                     .show(ui, |ui| {
-                        ui.strong(i18n.t("battery.history_date"));
-                        ui.strong(i18n.t("battery.history_capacity"));
-                        ui.strong(i18n.t("battery.health"));
-                        ui.strong(i18n.t("battery.wear_level"));
-                        ui.end_row();
-                        for rec in st.battery_health_history.iter().rev().take(16) {
-                            ui.monospace(&rec.date_label);
-                            ui.monospace(format!(
-                                "{} / {} mWh",
-                                rec.full_charge_capacity_mwh, rec.design_capacity_mwh
-                            ));
-                            ui.label(format!("{:.1}%", rec.health_pct));
-                            ui.label(format!("{:.1}%", rec.wear_pct));
-                            ui.end_row();
-                        }
+                        egui::Grid::new("battery_health_history_grid")
+                            .striped(true)
+                            .num_columns(4)
+                            .spacing([14.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong(i18n.t("battery.history_date"));
+                                ui.strong(i18n.t("battery.history_capacity"));
+                                ui.strong(i18n.t("battery.health"));
+                                ui.strong(i18n.t("battery.wear_level"));
+                                ui.end_row();
+                                for rec in st.battery_health_history.iter().rev().take(16) {
+                                    ui.monospace(&rec.date_label);
+                                    ui.monospace(format!(
+                                        "{} / {} mWh",
+                                        rec.full_charge_capacity_mwh, rec.design_capacity_mwh
+                                    ));
+                                    ui.label(format!("{:.1}%", rec.health_pct));
+                                    ui.label(format!("{:.1}%", rec.wear_pct));
+                                    ui.end_row();
+                                }
+                            });
                     });
             });
         }
@@ -269,17 +273,19 @@ pub fn render(
 
             for (idx, prof) in cfg.battery.custom_profiles.iter().enumerate() {
                 let is_active = cfg.battery.active_profile_id.as_deref() == Some(&prof.id);
-                ui.horizontal_wrapped(|ui| {
-                    if pill_button(ui, &prof.name, is_active, t).clicked() {
-                        apply_profile = Some(prof.clone());
-                    }
-                    ui.weak(format!(
-                        "{}% / {}%  •  {:?}",
-                        prof.stop_threshold_pct, prof.start_threshold_pct, prof.mode
-                    ));
-                    if ui.button(i18n.t("battery.delete")).clicked() {
-                        delete_idx = Some(idx);
-                    }
+                ui.push_id(&prof.id, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if pill_button(ui, &prof.name, is_active, t).clicked() {
+                            apply_profile = Some(prof.clone());
+                        }
+                        ui.weak(format!(
+                            "{}% / {}%  •  {:?}",
+                            prof.stop_threshold_pct, prof.start_threshold_pct, prof.mode
+                        ));
+                        if ui.button(i18n.t("battery.delete")).clicked() {
+                            delete_idx = Some(idx);
+                        }
+                    });
                 });
             }
 

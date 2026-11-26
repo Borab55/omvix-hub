@@ -1476,3 +1476,164 @@ fn integration_independent_cpu_and_gpu_fan_modes_mixed_and_auto() {
         Some((FanMode::Auto, None, None, false))
     );
 }
+
+#[test]
+fn integration_set_fan_mode_blocked_while_thermal_guard_active() {
+    let dir = TempDirGuard::create("fan_blocked_guard");
+    let hot_state = MockHardwareState {
+        telemetry_snap: TelemetrySnapshot {
+            cpu_temp_c: Some(96.0),
+            gpu_temp_c: Some(72.0),
+            chassis_temp_c: Some(41.0),
+            fan_rpms: vec![2400, 2400],
+            fan_max_rpms: vec![5200, 5200],
+            ac_connected: Some(true),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let rig = MockRig::new(hot_state);
+    let (mut engine, state) =
+        make_test_engine(&rig, AppConfig::default(), "8C99", true, None, dir.path());
+
+    for t in [0.0, 4.0, 8.0, 10.5] {
+        engine.poll_telemetry_step(t, true, true, false);
+    }
+    assert!(state.lock().unwrap().thermal_guard_active);
+    let writes_before = rig.inner.lock().unwrap().dual_fan_writes.len();
+
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+    engine.handle_command(
+        WorkerCommand::SetFanMode {
+            mode: FanMode::Auto,
+            gpu_mode: Some(FanMode::Auto),
+            manual_speed_pct: None,
+            gpu_manual_speed_pct: None,
+        },
+        &tx,
+        &None,
+        &visible,
+    );
+
+    assert_eq!(
+        rig.inner.lock().unwrap().dual_fan_writes.len(),
+        writes_before
+    );
+    assert_eq!(engine.cfg.thermal_fan.fan_mode, FanMode::Auto);
+    assert!(state.lock().unwrap().thermal_guard_active);
+}
+
+#[test]
+fn integration_coalesce_merges_partial_fan_mode_commands() {
+    let cmds = vec![
+        WorkerCommand::SetFanMode {
+            mode: FanMode::Manual,
+            gpu_mode: None,
+            manual_speed_pct: Some(65),
+            gpu_manual_speed_pct: None,
+        },
+        WorkerCommand::SetFanMode {
+            mode: FanMode::Manual,
+            gpu_mode: Some(FanMode::CustomCurve),
+            manual_speed_pct: None,
+            gpu_manual_speed_pct: Some(50),
+        },
+    ];
+    let coalesced = coalesce_worker_commands(cmds);
+    assert_eq!(coalesced.len(), 1);
+    assert!(matches!(
+        coalesced[0],
+        WorkerCommand::SetFanMode {
+            mode: FanMode::Manual,
+            gpu_mode: Some(FanMode::CustomCurve),
+            manual_speed_pct: Some(65),
+            gpu_manual_speed_pct: Some(50),
+        }
+    ));
+}
+
+#[test]
+fn integration_app_profile_rule_switch_restores_none_fields_and_gpu_baseline() {
+    let dir = TempDirGuard::create("app_profile_switch_none");
+    let mut cfg = AppConfig::default();
+    cfg.thermal_fan.performance_mode = PerformanceMode::Balanced;
+    cfg.thermal_fan.fan_mode = FanMode::Auto;
+    cfg.thermal_fan.gpu_fan_mode = FanMode::Manual;
+    cfg.thermal_fan.gpu_manual_speed_pct = 62;
+    cfg.app_profiles.enabled = true;
+    cfg.app_profiles.rules = vec![
+        AppProfileRule {
+            id: "r1".into(),
+            name: "Heavy Game".into(),
+            exe_name: "heavy.exe".into(),
+            enabled: true,
+            performance_mode: PerformanceMode::Performance,
+            fan_mode: Some(FanMode::Max),
+            curve_preset: None,
+            refresh_hz: Some(60),
+            cpu_boost_mode: Some(CpuBoostMode::Disabled),
+        },
+        AppProfileRule {
+            id: "r2".into(),
+            name: "Light App".into(),
+            exe_name: "light.exe".into(),
+            enabled: true,
+            performance_mode: PerformanceMode::Quiet,
+            fan_mode: None,
+            curve_preset: None,
+            refresh_hz: None,
+            cpu_boost_mode: None,
+        },
+    ];
+
+    let rig = MockRig::new(MockHardwareState::default());
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    {
+        let mut st = state.lock().unwrap();
+        st.cpu_boost = Some(CpuBoostMode::Aggressive);
+        st.display_mode = Some(DisplayModeInfo {
+            width: 1920,
+            height: 1080,
+            current_hz: 165,
+            supported_hz: vec![60, 165],
+        });
+    }
+    engine.poll_telemetry_step(1.0, true, false, false);
+    let expected_auto_cpu = FanCurve::preset_ogh_like().evaluate(52.0, 45.0, 40);
+
+    // Enter Rule 1
+    rig.inner.lock().unwrap().running_exes_lower = ["heavy.exe".to_string()].into_iter().collect();
+    engine.poll_app_profiles_step();
+    {
+        let g = rig.inner.lock().unwrap();
+        assert_eq!(g.perf_mode, PerformanceMode::Performance);
+        assert_eq!(g.fan_mode, FanMode::Max);
+        assert_eq!(g.cpu_boost, CpuBoostMode::Disabled);
+        assert_eq!(g.display_mode.current_hz, 60);
+    }
+
+    // Switch directly to Rule 2 (None for fan/hz/boost) -> must restore baseline instead of leaking Rule 1
+    rig.inner.lock().unwrap().running_exes_lower = ["light.exe".to_string()].into_iter().collect();
+    engine.poll_app_profiles_step();
+    {
+        let g = rig.inner.lock().unwrap();
+        assert_eq!(g.perf_mode, PerformanceMode::Quiet);
+        assert_eq!(g.cpu_boost, CpuBoostMode::Aggressive);
+        assert_eq!(g.display_mode.current_hz, 165);
+        assert_eq!(
+            g.dual_fan_writes.last().copied(),
+            Some((
+                FanMode::CustomCurve,
+                Some(expected_auto_cpu),
+                Some(62),
+                true
+            ))
+        );
+    }
+    {
+        let st = state.lock().unwrap();
+        assert_eq!(st.effective_fan_mode, FanMode::Auto);
+        assert_eq!(st.effective_gpu_fan_mode, FanMode::Manual);
+    }
+}

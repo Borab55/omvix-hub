@@ -235,7 +235,11 @@ pub fn render(
             ] {
                 let selected = draft.pending_gpu_mode.unwrap_or(cur) == mode;
                 if pill_button(ui, &i18n.t(key), selected, t).clicked() {
-                    draft.pending_gpu_mode = Some(mode);
+                    if cur == mode {
+                        draft.pending_gpu_mode = None;
+                    } else {
+                        draft.pending_gpu_mode = Some(mode);
+                    }
                 }
             }
         });

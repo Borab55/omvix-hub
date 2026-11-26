@@ -18,6 +18,9 @@ use omvix_core::{
 pub struct SettingsThemeDraft {
     pub confirm_reset: bool,
     pub scroll_to_updates: bool,
+    pub scroll_to_updates_frames: u8,
+    pub cached_log_tail: Vec<String>,
+    pub cached_log_tail_at: Option<std::time::Instant>,
 }
 
 pub struct SettingsActions {
@@ -238,6 +241,7 @@ pub fn render(
                 ui.add(Slider::new(&mut cfg.logging.max_total_mb, 5..=100).suffix(" MB"));
             if control_committed(ui, "settings_log_max_mb", &log_resp) {
                 on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
             }
         });
 
@@ -286,14 +290,20 @@ pub fn render(
         }
 
         ui.collapsing(i18n.t("logs.preview"), |ui| {
-            let lines = tail_logs(&log_dir, 30);
+            let needs_refresh = draft
+                .cached_log_tail_at
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2));
+            if needs_refresh {
+                draft.cached_log_tail = tail_logs(&log_dir, 30);
+                draft.cached_log_tail_at = Some(std::time::Instant::now());
+            }
             ScrollArea::both()
                 .id_salt("settings_log_preview_scroll")
                 .max_width(ui.available_width())
                 .max_height(160.0)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for line in lines {
+                    for line in &draft.cached_log_tail {
                         ui.monospace(line);
                     }
                 });
@@ -514,8 +524,13 @@ pub fn render(
         })
         .response;
     if draft.scroll_to_updates {
-        upd_resp.scroll_to_me(Some(egui::Align::TOP));
         draft.scroll_to_updates = false;
+        draft.scroll_to_updates_frames = 2;
+    }
+    if draft.scroll_to_updates_frames > 0 {
+        upd_resp.scroll_to_me(Some(egui::Align::TOP));
+        draft.scroll_to_updates_frames -= 1;
+        ui.ctx().request_repaint();
     }
 
     ui.add_space(8.0);

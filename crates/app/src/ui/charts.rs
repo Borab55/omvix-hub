@@ -651,8 +651,8 @@ pub fn interactive_fan_curve(
             let galley = painter.layout_no_wrap(text, FontId::proportional(11.5), Color32::WHITE);
             let pad = Vec2::new(8.0, 4.0);
             let box_size = galley.size() + pad * 2.0;
-            let tx = (center.x - box_size.x * 0.5)
-                .clamp(plot_rect.left() + 4.0, plot_rect.right() - box_size.x - 4.0);
+            let hi_x = (plot_rect.right() - box_size.x - 4.0).max(plot_rect.left() + 4.0);
+            let tx = (center.x - box_size.x * 0.5).clamp(plot_rect.left() + 4.0, hi_x);
             let ty = if center.y - box_size.y - 14.0 >= plot_rect.top() {
                 center.y - box_size.y - 14.0
             } else {

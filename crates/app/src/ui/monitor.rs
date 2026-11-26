@@ -59,7 +59,7 @@ pub fn render(
             }
             if ui
                 .add_enabled(
-                    !st.telemetry_csv_rows.is_empty(),
+                    st.has_telemetry_csv_rows(),
                     egui::Button::new(i18n.t("monitor.export_csv")),
                 )
                 .clicked()
