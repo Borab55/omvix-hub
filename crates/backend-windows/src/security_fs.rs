@@ -18,9 +18,10 @@ use windows::Win32::Security::{
     TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateDirectoryW, DeleteFileW, GetFileAttributesW, GetFileInformationByHandle,
+    CreateDirectoryW, DeleteFileW, GetFileAttributesW, GetFileInformationByHandle, MoveFileExW,
     RemoveDirectoryW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, INVALID_FILE_ATTRIBUTES,
+    MOVEFILE_DELAY_UNTIL_REBOOT,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -286,9 +287,17 @@ pub fn open_log_no_reparse(path: &Path) -> io::Result<File> {
         .open(path)?;
 
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    if unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.is_ok()
-        && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
+    if let Err(err) = unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
     {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "Failed verifying handle attributes for {}: {err}",
+                path.display()
+            ),
+        ));
+    }
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
@@ -299,6 +308,42 @@ pub fn open_log_no_reparse(path: &Path) -> io::Result<File> {
     }
 
     Ok(file)
+}
+
+pub(crate) fn schedule_delete_on_reboot(path: &Path) -> bool {
+    let wide = HSTRING::from(path.as_os_str());
+    unsafe {
+        MoveFileExW(
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    }
+    .is_ok()
+}
+
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    matches!(
+        (fs::canonicalize(a), fs::canonicalize(b)),
+        (Ok(ca), Ok(cb)) if ca == cb
+    )
+}
+
+/// Case-insensitive Windows path prefix check that enforces a directory component boundary.
+pub(crate) fn path_starts_with_dir(path: &Path, dir: &Path) -> bool {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    let p_str = norm(path);
+    let d_str = norm(dir);
+    if d_str.is_empty() {
+        return false;
+    }
+    p_str == d_str
+        || (p_str.starts_with(&d_str) && p_str.as_bytes().get(d_str.len()) == Some(&b'\\'))
 }
 
 #[cfg(test)]
@@ -335,5 +380,21 @@ mod tests {
             .contains("safe log entry"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn path_starts_with_dir_enforces_directory_boundary() {
+        assert!(path_starts_with_dir(
+            Path::new(r"C:\Program Files\OmvixHub\omvix-hub.exe"),
+            Path::new(r"c:\program files\omvixhub")
+        ));
+        assert!(path_starts_with_dir(
+            Path::new(r"C:\Program Files\OmvixHub\"),
+            Path::new(r"C:\Program Files\OmvixHub")
+        ));
+        assert!(!path_starts_with_dir(
+            Path::new(r"C:\Program Files\OmvixHub2\omvix-hub.exe"),
+            Path::new(r"C:\Program Files\OmvixHub")
+        ));
     }
 }

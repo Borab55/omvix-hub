@@ -262,7 +262,10 @@ fn launch_via_explorer_token(target: &Path, args: &str) -> Result<()> {
         .chain(std::iter::once(0))
         .collect();
     let app_wide = HSTRING::from(target.as_os_str());
-    let workdir_wide = target.parent().map(|p| HSTRING::from(p.as_os_str()));
+    let workdir_wide = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| HSTRING::from(p.as_os_str()));
     let workdir_pcwstr = workdir_wide
         .as_ref()
         .map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr()));

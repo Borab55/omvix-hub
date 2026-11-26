@@ -1,5 +1,7 @@
 use crate::paths;
-use crate::security_fs::is_reparse_point;
+use crate::security_fs::{
+    is_reparse_point, path_starts_with_dir, same_file, schedule_delete_on_reboot,
+};
 use crate::system_info::is_process_elevated;
 use omvix_core::updater::{
     evaluate_authenticode_signature, parse_github_release_json, parse_sha256_manifest, sha256_hex,
@@ -13,8 +15,6 @@ use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const HTTP_404_MARKER: &str = "OMVIX_HTTP_404";
@@ -39,17 +39,6 @@ fn hidden_powershell(script: &str, envs: &[(&str, &str)]) -> Result<Output> {
             format!("PowerShell launch failed: {e}"),
         ))
     })
-}
-
-fn schedule_delete_on_reboot(path: &Path) {
-    let wide = HSTRING::from(path.as_os_str());
-    unsafe {
-        let _ = MoveFileExW(
-            PCWSTR(wide.as_ptr()),
-            PCWSTR::null(),
-            MOVEFILE_DELAY_UNTIL_REBOOT,
-        );
-    }
 }
 
 pub fn check_latest_release(current_version: &str) -> Result<ReleaseCheckOutcome> {
@@ -127,11 +116,7 @@ fn resolve_staging_dir() -> Result<PathBuf> {
     let running_in_install_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|dir| dir.to_path_buf()))
-        .is_some_and(|dir| {
-            dir.to_string_lossy()
-                .to_ascii_lowercase()
-                .starts_with(&install_dir.to_string_lossy().to_ascii_lowercase())
-        });
+        .is_some_and(|dir| path_starts_with_dir(&dir, &install_dir));
 
     let staging = if is_process_elevated()
         && (paths::installed_gui_exe().exists() || running_in_install_dir)
@@ -561,6 +546,7 @@ fn replace_binary_verified(
 
     fs::rename(target_path, &backup_path)?;
     if let Err(err) = fs::copy(staged_path, target_path) {
+        let _ = fs::remove_file(target_path);
         let _ = fs::rename(&backup_path, target_path);
         return Err(OmvixError::Io(err));
     }
@@ -640,11 +626,7 @@ pub fn apply_staged_update(staged: &StagedUpdate, allow_unsigned_sha256: bool) -
     }
 
     let target = std::env::current_exe()?;
-    let pf_prefix = paths::program_files_dir()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let target_lower = target.to_string_lossy().to_ascii_lowercase();
-    if target_lower.starts_with(&pf_prefix) && !is_process_elevated() {
+    if path_starts_with_dir(&target, &paths::program_files_dir()) && !is_process_elevated() {
         return Err(OmvixError::PermissionDenied(
             "Administrator privileges are required to update Program Files installation.".into(),
         ));
@@ -654,9 +636,7 @@ pub fn apply_staged_update(staged: &StagedUpdate, allow_unsigned_sha256: bool) -
 
     if is_process_elevated() {
         let installed = paths::installed_gui_exe();
-        if installed.is_file()
-            && fs::canonicalize(&target).ok() != fs::canonicalize(&installed).ok()
-        {
+        if installed.is_file() && !same_file(&target, &installed) {
             if let Err(err) = crate::autostart::install_or_update_gui_copy(&target) {
                 tracing::warn!("Failed syncing Program Files copy after update: {err}");
             }

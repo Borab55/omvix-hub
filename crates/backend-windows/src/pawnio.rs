@@ -138,7 +138,7 @@ pub fn is_pawnio_driver_installed() -> bool {
     }
 
     let pf_pawnio = paths::program_files_dir().join("PawnIO");
-    pf_pawnio.join("PawnIOUtil.exe").exists() || pf_pawnio.is_dir()
+    pf_pawnio.join("PawnIOUtil.exe").exists()
 }
 
 /// Returns true when a verified `IntelMSR.bin` PawnIO module is present.

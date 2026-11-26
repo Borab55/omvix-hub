@@ -232,12 +232,13 @@ impl CpuEmiReader {
                 return None;
             }
             let mut meta_buf = vec![0u8; meta_size];
-            if !ioctl_get_metadata(handle, &mut meta_buf) {
+            let Some(meta_len) = ioctl_get_metadata(handle, &mut meta_buf) else {
                 unsafe {
                     let _ = CloseHandle(handle);
                 }
                 return None;
-            }
+            };
+            meta_buf.truncate(meta_len);
             let channels = parse_emi_v2_channels(&meta_buf);
             if channels.is_empty() {
                 unsafe {
@@ -304,28 +305,43 @@ impl CpuEmiReader {
         }
         .is_ok();
 
-        if !ok {
+        let min_bytes =
+            (self.target_channel + 1).saturating_mul(size_of::<EmiChannelMeasurementData>());
+        if !ok || (returned as usize) < min_bytes {
             return None;
         }
 
         let current = *buf.get(self.target_channel)?;
-        if let Some(prev) = self.last_sample {
-            let dt = current.absolute_time.saturating_sub(prev.absolute_time);
-            // Only advance baseline once driver publishes a new counter update (>= 50 ms)
-            // so 100 ms UI ticks never suffer divide-by-zero or stale zero deltas.
-            if dt >= 500_000 {
-                let de = current.absolute_energy.wrapping_sub(prev.absolute_energy);
-                self.last_sample = Some(current);
-                if let Some(w) = emi_delta_to_watts(de, dt) {
-                    self.last_watts = Some(w);
-                }
-            }
-        } else {
-            self.last_sample = Some(current);
-        }
-
-        self.last_watts
+        step_emi_sample(&mut self.last_sample, &mut self.last_watts, current)
     }
+}
+
+fn step_emi_sample(
+    last_sample: &mut Option<EmiChannelMeasurementData>,
+    last_watts: &mut Option<f32>,
+    current: EmiChannelMeasurementData,
+) -> Option<f32> {
+    if let Some(prev) = *last_sample {
+        if current.absolute_time < prev.absolute_time {
+            *last_sample = Some(current);
+            *last_watts = None;
+            return None;
+        }
+        let dt = current.absolute_time - prev.absolute_time;
+        // Only advance baseline once driver publishes a new counter update (>= 50 ms)
+        // so 100 ms UI ticks never suffer divide-by-zero or stale zero deltas.
+        if dt >= 500_000 {
+            let de = current.absolute_energy.wrapping_sub(prev.absolute_energy);
+            *last_sample = Some(current);
+            if let Some(w) = emi_delta_to_watts(de, dt) {
+                *last_watts = Some(w);
+            }
+        }
+    } else {
+        *last_sample = Some(current);
+    }
+
+    *last_watts
 }
 
 fn enumerate_emi_device_paths() -> Vec<Vec<u16>> {
@@ -371,12 +387,15 @@ fn enumerate_emi_device_paths() -> Vec<Vec<u16>> {
                 None,
             )
         };
-        if required_size == 0 || required_size > 16384 {
+        if (required_size as usize) < size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>()
+            || required_size > 16384
+        {
             continue;
         }
 
-        let mut detail_buf = vec![0u8; required_size as usize];
-        let p_detail = detail_buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+        let word_len = (required_size as usize).div_ceil(4);
+        let mut detail_words = vec![0u32; word_len];
+        let p_detail = detail_words.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
         unsafe {
             (*p_detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
         }
@@ -393,9 +412,11 @@ fn enumerate_emi_device_paths() -> Vec<Vec<u16>> {
         .is_ok()
         {
             let path_offset = offset_of!(SP_DEVICE_INTERFACE_DETAIL_DATA_W, DevicePath);
-            if detail_buf.len() > path_offset {
-                let u16_len = (detail_buf.len() - path_offset) / 2;
-                let ptr = unsafe { detail_buf.as_ptr().add(path_offset) as *const u16 };
+            let total_bytes = required_size as usize;
+            if total_bytes > path_offset {
+                let u16_len = (total_bytes - path_offset) / 2;
+                let ptr =
+                    unsafe { (detail_words.as_ptr() as *const u8).add(path_offset) as *const u16 };
                 let slice_w = unsafe { slice::from_raw_parts(ptr, u16_len) };
                 let nul_pos = slice_w.iter().position(|&c| c == 0).unwrap_or(u16_len);
                 let mut path_w = slice_w[..nul_pos].to_vec();
@@ -427,7 +448,7 @@ fn ioctl_get_version(handle: HANDLE) -> Option<u16> {
         )
     }
     .is_ok();
-    ok.then_some(ver)
+    (ok && (returned as usize) >= size_of::<u16>()).then_some(ver)
 }
 
 fn ioctl_get_metadata_size(handle: HANDLE) -> Option<u32> {
@@ -446,12 +467,12 @@ fn ioctl_get_metadata_size(handle: HANDLE) -> Option<u32> {
         )
     }
     .is_ok();
-    ok.then_some(sz)
+    (ok && (returned as usize) >= size_of::<u32>()).then_some(sz)
 }
 
-fn ioctl_get_metadata(handle: HANDLE, out: &mut [u8]) -> bool {
+fn ioctl_get_metadata(handle: HANDLE, out: &mut [u8]) -> Option<usize> {
     let mut returned = 0u32;
-    unsafe {
+    let ok = unsafe {
         DeviceIoControl(
             handle,
             IOCTL_EMI_GET_METADATA,
@@ -463,7 +484,8 @@ fn ioctl_get_metadata(handle: HANDLE, out: &mut [u8]) -> bool {
             None,
         )
     }
-    .is_ok()
+    .is_ok();
+    (ok && returned > 0).then(|| (returned as usize).min(out.len()))
 }
 
 #[cfg(test)]
@@ -476,6 +498,42 @@ mod tests {
         let w = emi_delta_to_watts(2_777_777_778, 10_000_000).expect("valid watts");
         assert!((w - 10.0).abs() < 0.01, "expected ~10.0W, got {w}");
         assert!(emi_delta_to_watts(100, 0).is_none());
+    }
+
+    #[test]
+    fn step_emi_sample_recovers_on_backward_timestamp_reset() {
+        let mut last_sample = None;
+        let mut last_watts = None;
+
+        let s0 = EmiChannelMeasurementData {
+            absolute_energy: 0,
+            absolute_time: 100_000_000,
+        };
+        assert_eq!(step_emi_sample(&mut last_sample, &mut last_watts, s0), None);
+
+        let s1 = EmiChannelMeasurementData {
+            absolute_energy: 2_777_777_778,
+            absolute_time: 110_000_000,
+        };
+        let w1 = step_emi_sample(&mut last_sample, &mut last_watts, s1).unwrap();
+        assert!((w1 - 10.0).abs() < 0.01);
+
+        // Counter reset after sleep/driver reload: time moves backward
+        let s_reset = EmiChannelMeasurementData {
+            absolute_energy: 1_000,
+            absolute_time: 5_000_000,
+        };
+        assert_eq!(
+            step_emi_sample(&mut last_sample, &mut last_watts, s_reset),
+            None
+        );
+
+        let s_after = EmiChannelMeasurementData {
+            absolute_energy: 2_777_778_778,
+            absolute_time: 15_000_000,
+        };
+        let w2 = step_emi_sample(&mut last_sample, &mut last_watts, s_after).unwrap();
+        assert!((w2 - 10.0).abs() < 0.01);
     }
 
     #[test]
