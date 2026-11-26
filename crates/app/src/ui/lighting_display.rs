@@ -171,6 +171,7 @@ pub fn render(
                         cfg.lighting.active_profile_id = None;
                     }
                     on_save();
+                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                 }
             }
 
@@ -350,8 +351,11 @@ pub fn apply_lighting_profile(cfg: &mut AppConfig, profile: &LightingProfile) {
 }
 
 pub fn is_lighting_profile_active(cfg: &AppConfig, profile: &LightingProfile) -> bool {
-    if cfg.lighting.active_profile_id.as_deref() == Some(&profile.id) {
-        return cfg.lighting.enabled && cfg.lighting.zones == profile.zones;
+    let base_match = cfg.lighting.enabled
+        && cfg.lighting.brightness_pct == profile.brightness_pct
+        && cfg.lighting.zones == profile.zones;
+    if let Some(ref active_id) = cfg.lighting.active_profile_id {
+        return base_match && active_id == &profile.id;
     }
-    cfg.lighting.enabled && cfg.lighting.zones == profile.zones
+    base_match
 }

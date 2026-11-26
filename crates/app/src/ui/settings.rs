@@ -254,6 +254,7 @@ pub fn render(
             } else {
                 CustomThemeConfig::preset_dark_slate()
             };
+            cfg.general.theme = "dark".to_string();
             actions.theme_changed = true;
             on_save();
         }

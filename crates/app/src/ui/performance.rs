@@ -30,6 +30,11 @@ pub fn render(
     on_save: &mut dyn FnMut(),
 ) {
     let t = &cfg.general.custom_theme.clone();
+    let (effective_perf, effective_fan) = if st.active_app_profile.is_some() {
+        (st.effective_performance_mode, st.effective_fan_mode)
+    } else {
+        (cfg.thermal_fan.performance_mode, cfg.thermal_fan.fan_mode)
+    };
 
     ui.heading(i18n.t("nav.performance_fans"));
     ui.add_space(6.0);
@@ -55,7 +60,7 @@ pub fn render(
                 (PerformanceMode::Balanced, "thermal.mode_balanced"),
                 (PerformanceMode::Performance, "thermal.mode_performance"),
             ] {
-                let selected = cfg.thermal_fan.performance_mode == mode;
+                let selected = effective_perf == mode;
                 if pill_button(ui, &i18n.t(key), selected, t).clicked() {
                     cfg.thermal_fan.performance_mode = mode;
                     on_save();
@@ -110,7 +115,7 @@ pub fn render(
                 (FanMode::Manual, "fan.mode_manual"),
                 (FanMode::CustomCurve, "fan.mode_curve"),
             ] {
-                let selected = cfg.thermal_fan.fan_mode == mode;
+                let selected = effective_fan == mode;
                 if pill_button(ui, &i18n.t(key), selected, t).clicked() {
                     cfg.thermal_fan.fan_mode = mode;
                     on_save();
@@ -170,10 +175,6 @@ pub fn render(
                 }
             });
             ui.add_space(4.0);
-            cfg.thermal_fan
-                .custom_curve
-                .points
-                .sort_by_key(|p| p.temp_c);
 
             let live_temp = effective_fan_curve_temp_c(
                 st.telemetry.cpu_temp_c,

@@ -420,6 +420,12 @@ fn request_repaint_if_visible(ctx: &Option<egui::Context>, window_visible: &Arc<
     }
 }
 
+fn request_repaint_always(ctx: &Option<egui::Context>) {
+    if let Some(c) = ctx {
+        c.request_repaint();
+    }
+}
+
 fn cool_hint_from_snapshot(snap: &TelemetrySnapshot) -> bool {
     is_system_cool_for_zero_rpm(snap.cpu_temp_c, snap.gpu_temp_c, snap.chassis_temp_c)
 }
@@ -810,7 +816,17 @@ fn run_worker_loop(
 
     loop {
         let interval_ms = engine.cfg.general.telemetry_interval_ms.clamp(100, 10_000);
-        let sleep_ms = (interval_ms / 4).clamp(20, 100);
+        let visible = window_visible.load(Ordering::Relaxed);
+        let effective_interval_ms = if visible {
+            interval_ms
+        } else {
+            interval_ms.max(1000)
+        };
+        let sleep_ms = if visible {
+            (effective_interval_ms / 4).clamp(20, 100)
+        } else {
+            (effective_interval_ms / 2).clamp(250, 500)
+        };
 
         match rx.recv_timeout(Duration::from_millis(sleep_ms)) {
             Ok(first_cmd) => {
@@ -857,6 +873,11 @@ fn run_worker_loop(
             last_telemetry = Instant::now();
             let guard_due = last_guard_eval.elapsed() >= Duration::from_millis(950);
             let curve_due = last_curve_eval.elapsed() >= Duration::from_secs(2);
+            let prev_auto_rev = engine
+                .state
+                .lock()
+                .map(|s| s.auto_applied_revision)
+                .unwrap_or(0);
             let (ran_guard, ran_curve) = engine.poll_telemetry_step(
                 started.elapsed().as_secs_f64(),
                 visible,
@@ -869,7 +890,16 @@ fn run_worker_loop(
             if ran_curve {
                 last_curve_eval = Instant::now();
             }
-            request_repaint_if_visible(&ctx, &window_visible);
+            let new_auto_rev = engine
+                .state
+                .lock()
+                .map(|s| s.auto_applied_revision)
+                .unwrap_or(prev_auto_rev);
+            if new_auto_rev != prev_auto_rev {
+                request_repaint_always(&ctx);
+            } else {
+                request_repaint_if_visible(&ctx, &window_visible);
+            }
         }
 
         // Evaluate app-based .exe profiles (skipped while Safe Mode active)
@@ -884,15 +914,42 @@ fn run_worker_loop(
                 || last_app_profile_poll.elapsed() >= app_poll_interval)
         {
             last_app_profile_poll = Instant::now();
-            engine.poll_app_profiles_step();
-            request_repaint_if_visible(&ctx, &window_visible);
+            if engine.poll_app_profiles_step() {
+                request_repaint_always(&ctx);
+            } else {
+                request_repaint_if_visible(&ctx, &window_visible);
+            }
         }
 
         // Periodic battery care poll (5s)
         if last_battery.elapsed() >= Duration::from_secs(5) {
             last_battery = Instant::now();
+            let (prev_bat_mode, prev_sync_rev) = engine
+                .state
+                .lock()
+                .map(|s| {
+                    (
+                        s.battery_status.as_ref().map(|b| b.current_mode),
+                        s.synced_config_rev,
+                    )
+                })
+                .unwrap_or((None, 0));
             if engine.poll_battery_step() {
-                request_repaint_if_visible(&ctx, &window_visible);
+                let (new_bat_mode, new_sync_rev) = engine
+                    .state
+                    .lock()
+                    .map(|s| {
+                        (
+                            s.battery_status.as_ref().map(|b| b.current_mode),
+                            s.synced_config_rev,
+                        )
+                    })
+                    .unwrap_or((prev_bat_mode, prev_sync_rev));
+                if new_bat_mode != prev_bat_mode || new_sync_rev != prev_sync_rev {
+                    request_repaint_always(&ctx);
+                } else {
+                    request_repaint_if_visible(&ctx, &window_visible);
+                }
             }
         }
 
@@ -1399,9 +1456,25 @@ impl WorkerEngine {
                         let is_cool = cool_hint_from_snapshot(&snap);
                         let rel_fan_mode =
                             effective_fan_mode(&self.cfg, self.app_profile_engine.active_rule());
+                        let target_pct = if rel_fan_mode == FanMode::CustomCurve {
+                            let active_curve = self
+                                .active_curve_override
+                                .as_ref()
+                                .unwrap_or(&self.cfg.thermal_fan.custom_curve);
+                            resolve_fan_target_pct_with_curve(
+                                active_curve,
+                                &snap,
+                                rel_fan_mode,
+                                Some(self.cfg.thermal_fan.manual_speed_pct),
+                                &mut self.prev_curve_temp,
+                                &mut self.prev_curve_speed,
+                            )
+                        } else {
+                            Some(self.cfg.thermal_fan.manual_speed_pct)
+                        };
                         if let Err(err) = self.backends.thermal.set_fan_mode_with_cool_hint(
                             rel_fan_mode,
-                            Some(self.cfg.thermal_fan.manual_speed_pct),
+                            target_pct,
                             is_cool,
                         ) {
                             tracing::warn!("Failed releasing Emergency Max Fan: {err}");
@@ -1532,7 +1605,7 @@ impl WorkerEngine {
         (ran_guard, ran_curve)
     }
 
-    fn poll_app_profiles_step(&mut self) {
+    fn poll_app_profiles_step(&mut self) -> bool {
         let running = if self.cfg.app_profiles.enabled {
             self.backends.os.running_process_names_lower()
         } else {
@@ -1563,7 +1636,12 @@ impl WorkerEngine {
                     cpu_boost_mode,
                 }
             });
+        let discrete_transition = matches!(
+            transition,
+            AppProfileTransition::Activate { .. } | AppProfileTransition::Restore(_)
+        );
         self.apply_app_profile_transition(transition);
+        discrete_transition
     }
 
     fn poll_battery_step(&mut self) -> bool {
@@ -1954,12 +2032,6 @@ impl WorkerEngine {
                     .unwrap_or_else(|| self.cfg.thermal_fan.custom_curve.clone());
                 let old_sum = format_fan_summary(prev_mode, prev_pct);
 
-                self.active_curve_override = None;
-                self.cfg.thermal_fan.fan_mode = mode;
-                if let Some(pct) = manual_speed_pct {
-                    self.cfg.thermal_fan.manual_speed_pct = pct;
-                }
-                self.retry_ctrl.reset();
                 if self.sensor_loss_guard.is_active() && mode != FanMode::Auto {
                     if let Ok(mut st) = self.state.lock() {
                         st.set_toast(
@@ -1969,17 +2041,25 @@ impl WorkerEngine {
                     }
                     return false;
                 }
+                self.active_curve_override = None;
+                self.cfg.thermal_fan.fan_mode = mode;
+                if let Some(pct) = manual_speed_pct {
+                    self.cfg.thermal_fan.manual_speed_pct = pct;
+                }
+                self.retry_ctrl.reset();
                 let snap = self
                     .state
                     .lock()
                     .map(|st| st.telemetry.clone())
                     .unwrap_or_default();
                 let is_cool = cool_hint_from_snapshot(&snap);
+                let effective_manual_pct =
+                    manual_speed_pct.or(Some(self.cfg.thermal_fan.manual_speed_pct));
                 let target_pct = resolve_fan_target_pct_with_curve(
                     &self.cfg.thermal_fan.custom_curve,
                     &snap,
                     mode,
-                    manual_speed_pct,
+                    effective_manual_pct,
                     &mut self.prev_curve_temp,
                     &mut self.prev_curve_speed,
                 );
@@ -2286,7 +2366,7 @@ impl WorkerEngine {
                     self.cfg.tuning.pl1_watts = pl1;
                     self.cfg.tuning.pl2_watts = pl2;
                     self.last_committed_power_limits = (pl1, pl2);
-                    if prev_limits.0.is_some() || prev_limits.1.is_some() {
+                    if prev_limits != (pl1, pl2) {
                         record_history_entry(
                             &mut self.change_history,
                             &self.state,
@@ -2736,8 +2816,11 @@ impl WorkerEngine {
                     ) {
                         return false;
                     }
-                    if let Some(popped) = self.change_history.pop_latest() {
-                        self.apply_undo_entry(popped);
+                    if self.apply_undo_entry(&entry) {
+                        let _ = self.change_history.pop_latest();
+                        if let Ok(mut st) = self.state.lock() {
+                            st.change_history = self.change_history.entries_vec();
+                        }
                     }
                 }
             }
@@ -2752,8 +2835,11 @@ impl WorkerEngine {
                     ) {
                         return false;
                     }
-                    if let Some(removed) = self.change_history.remove_by_id(id) {
-                        self.apply_undo_entry(removed);
+                    if self.apply_undo_entry(&entry) {
+                        let _ = self.change_history.remove_by_id(id);
+                        if let Ok(mut st) = self.state.lock() {
+                            st.change_history = self.change_history.entries_vec();
+                        }
                     }
                 }
             }
@@ -3434,14 +3520,15 @@ impl WorkerEngine {
         res
     }
 
-    fn apply_undo_entry(&mut self, entry: HardwareChangeEntry) {
-        record_hw_write_attempt(
-            &self.crash_guard,
-            &self.crash_guard_path,
-            &mut self.hw_applied_recorded,
-        );
-        let res: Result<()> = match entry.revert {
+    fn apply_undo_entry(&mut self, entry: &HardwareChangeEntry) -> bool {
+        let mut guard_blocked = false;
+        let res: Result<()> = match entry.revert.clone() {
             RevertPayload::PerformanceMode(mode) => {
+                record_hw_write_attempt(
+                    &self.crash_guard,
+                    &self.crash_guard_path,
+                    &mut self.hw_applied_recorded,
+                );
                 let r = self.backends.thermal.set_performance_mode(mode);
                 if r.is_ok() {
                     self.cfg.thermal_fan.performance_mode = mode;
@@ -3457,41 +3544,52 @@ impl WorkerEngine {
                 manual_speed_pct,
                 custom_curve,
             } => {
-                self.cfg.thermal_fan.fan_mode = mode;
-                self.cfg.thermal_fan.manual_speed_pct = manual_speed_pct;
-                self.cfg.thermal_fan.custom_curve = custom_curve;
-                self.active_curve_override = None;
-                self.retry_ctrl.reset();
                 if self.sensor_loss_guard.is_active() && mode != FanMode::Auto {
+                    guard_blocked = true;
                     Err(omvix_core::OmvixError::Config(
                         "Thermal sensors lost: Auto fallback active until sensors recover"
                             .to_string(),
                     ))
                 } else if self.thermal_guard.is_active() {
+                    guard_blocked = true;
                     Err(omvix_core::OmvixError::Config(
                         "Thermal Guard active: Max Fan remains engaged until temperatures drop"
                             .to_string(),
                     ))
                 } else {
+                    record_hw_write_attempt(
+                        &self.crash_guard,
+                        &self.crash_guard_path,
+                        &mut self.hw_applied_recorded,
+                    );
                     let snap = self
                         .state
                         .lock()
                         .map(|st| st.telemetry.clone())
                         .unwrap_or_default();
                     let is_cool = cool_hint_from_snapshot(&snap);
+                    let mut next_prev_temp = self.prev_curve_temp;
+                    let mut next_prev_speed = self.prev_curve_speed;
                     let target_pct = resolve_fan_target_pct_with_curve(
-                        &self.cfg.thermal_fan.custom_curve,
+                        &custom_curve,
                         &snap,
                         mode,
                         Some(manual_speed_pct),
-                        &mut self.prev_curve_temp,
-                        &mut self.prev_curve_speed,
+                        &mut next_prev_temp,
+                        &mut next_prev_speed,
                     );
                     let r = self
                         .backends
                         .thermal
                         .set_fan_mode_with_cool_hint(mode, target_pct, is_cool);
                     if r.is_ok() {
+                        self.cfg.thermal_fan.fan_mode = mode;
+                        self.cfg.thermal_fan.manual_speed_pct = manual_speed_pct;
+                        self.cfg.thermal_fan.custom_curve = custom_curve;
+                        self.active_curve_override = None;
+                        self.retry_ctrl.reset();
+                        self.prev_curve_temp = next_prev_temp;
+                        self.prev_curve_speed = next_prev_speed;
                         if let Ok(mut st) = self.state.lock() {
                             st.effective_fan_mode = mode;
                         }
@@ -3509,27 +3607,34 @@ impl WorkerEngine {
                 travel_charge_until_utc,
                 active_profile_id,
             } => {
-                self.cfg.battery.enabled = enabled;
-                self.cfg.battery.mode = mode;
-                self.cfg.battery.stop_threshold_pct = stop_threshold_pct;
-                self.cfg.battery.start_threshold_pct = start_threshold_pct;
-                self.cfg.battery.hold_when_shutdown = hold_when_shutdown;
-                self.cfg.battery.one_time_full_charge = one_time_full_charge;
-                self.cfg.battery.travel_charge_until_utc = travel_charge_until_utc;
-                self.cfg.battery.active_profile_id = active_profile_id;
-                let _ = self
-                    .backends
-                    .os
-                    .sync_battery_service_config(&self.cfg.battery);
+                record_hw_write_attempt(
+                    &self.crash_guard,
+                    &self.crash_guard_path,
+                    &mut self.hw_applied_recorded,
+                );
+                let mut next_battery = self.cfg.battery.clone();
+                next_battery.enabled = enabled;
+                next_battery.mode = mode;
+                next_battery.stop_threshold_pct = stop_threshold_pct;
+                next_battery.start_threshold_pct = start_threshold_pct;
+                next_battery.hold_when_shutdown = hold_when_shutdown;
+                next_battery.one_time_full_charge = one_time_full_charge;
+                next_battery.travel_charge_until_utc = travel_charge_until_utc;
+                next_battery.active_profile_id = active_profile_id;
                 match self.backends.battery.get_battery_status() {
                     Ok(bat) => {
                         let target = self.battery_engine.evaluate(
-                            &mut self.cfg.battery,
+                            &mut next_battery,
                             bat.charge_percent,
                             bat.ac_connected,
                         );
                         let r = self.backends.battery.set_charge_mode(target);
                         if r.is_ok() {
+                            self.cfg.battery = next_battery;
+                            let _ = self
+                                .backends
+                                .os
+                                .sync_battery_service_config(&self.cfg.battery);
                             self.last_applied_bat_mode = Some(target);
                             self.last_committed_battery = self.cfg.battery.clone();
                             if let Ok(refreshed) = self.backends.battery.get_battery_status() {
@@ -3569,6 +3674,11 @@ impl WorkerEngine {
                 brightness_pct,
                 zones,
             } => {
+                record_hw_write_attempt(
+                    &self.crash_guard,
+                    &self.crash_guard_path,
+                    &mut self.hw_applied_recorded,
+                );
                 let r = self
                     .backends
                     .kbd
@@ -3585,6 +3695,11 @@ impl WorkerEngine {
                 pl1_watts,
                 pl2_watts,
             } => {
+                record_hw_write_attempt(
+                    &self.crash_guard,
+                    &self.crash_guard_path,
+                    &mut self.hw_applied_recorded,
+                );
                 let needs_reset = (pl1_watts.is_none()
                     && self.last_committed_power_limits.0.is_some())
                     || (pl2_watts.is_none() && self.last_committed_power_limits.1.is_some())
@@ -3606,8 +3721,8 @@ impl WorkerEngine {
             }
         };
 
+        let ok = res.is_ok();
         if let Ok(mut st) = self.state.lock() {
-            st.change_history = self.change_history.entries_vec();
             match res {
                 Ok(()) => {
                     st.synced_config_rev = st.synced_config_rev.wrapping_add(1);
@@ -3615,11 +3730,14 @@ impl WorkerEngine {
                     st.set_toast(format!("Undid change -> {}", entry.old_summary), false);
                 }
                 Err(err) => {
-                    tracing::warn!("Undo failed: {err}");
+                    if !guard_blocked {
+                        tracing::warn!("Undo failed: {err}");
+                    }
                     st.set_toast(err.to_string(), true);
                 }
             }
         }
+        ok
     }
 }
 

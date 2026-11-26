@@ -298,6 +298,7 @@ pub fn render(
                     cfg.battery.active_profile_id = None;
                 }
                 on_save();
+                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
             }
         }
 
