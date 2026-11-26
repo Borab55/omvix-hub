@@ -1,16 +1,17 @@
 use crate::theme::{
     accent_color, clickable_status_badge, clickable_warning_badge, compact_card,
     compact_status_pill, compact_toggle_pill, detail_dial_button, fixed_color_picker_button,
-    lighting_swatch_button, muted_text, pill_button, section_title, section_toggle_button,
-    status_badge, status_err, status_ok, status_warn, tile_button, undo_button, ColorButtonStyle,
+    lighting_profile_button, lighting_swatch_button, muted_text, pill_button, section_title,
+    section_toggle_button, status_badge, status_err, status_ok, status_warn, tile_button,
+    undo_button, ColorButtonStyle,
 };
 use crate::ui::lighting_display::{apply_lighting_profile, is_lighting_profile_active};
 use crate::ui::{control_committed, Drawer, ExtraSubTab, FansPowerSubTab};
 use crate::worker::{SharedState, WorkerCommand};
 use egui::{Color32, RichText, Slider, Ui};
 use omvix_core::{
-    AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, LightingProfile,
-    PerformanceMode, RgbColor, SafeModeReason, UpdateUiStatus,
+    AppConfig, BatteryChargeMode, BatteryProfile, CpuBoostMode, FanMode, I18n, KeyboardType,
+    LightingProfile, PerformanceMode, RgbColor, SafeModeReason, UpdateUiStatus,
 };
 use std::time::Duration;
 
@@ -738,6 +739,7 @@ pub fn render(
                 });
 
                 ui.add_space(3.0);
+                let four_zone = st.keyboard_type == KeyboardType::FourZoneRgb;
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
                     for preset in LightingProfile::builtins() {
@@ -753,23 +755,21 @@ pub fn render(
                     }
                     for custom in cfg.lighting.custom_profiles.clone() {
                         let selected = is_lighting_profile_active(cfg, &custom);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 3.0;
-                            if lighting_swatch_button(ui, &custom.zones, selected, &custom.name, t)
-                                .clicked()
-                            {
-                                apply_lighting_profile(cfg, &custom);
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                on_cmd(WorkerCommand::ApplyLighting);
-                            }
-                            if pill_button(ui, &custom.name, selected, t).clicked() {
-                                apply_lighting_profile(cfg, &custom);
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                on_cmd(WorkerCommand::ApplyLighting);
-                            }
-                        });
+                        if lighting_profile_button(
+                            ui,
+                            &custom.name,
+                            &custom.zones,
+                            selected,
+                            four_zone,
+                            t,
+                        )
+                        .clicked()
+                        {
+                            apply_lighting_profile(cfg, &custom);
+                            on_save();
+                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                            on_cmd(WorkerCommand::ApplyLighting);
+                        }
                     }
                 });
 

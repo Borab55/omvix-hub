@@ -626,7 +626,7 @@ pub fn lighting_swatch_button(
     t: &CustomThemeConfig,
 ) -> Response {
     let accent = accent_color(t);
-    let size = Vec2::splat(22.0);
+    let size = Vec2::splat(26.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -643,10 +643,13 @@ pub fn lighting_swatch_button(
             let strip_w = inner.width() / 4.0;
             for (idx, z) in zones.iter().enumerate() {
                 let x0 = inner.left() + idx as f32 * strip_w;
-                let strip = egui::Rect::from_min_max(
-                    pos2(x0, inner.top()),
-                    pos2(x0 + strip_w, inner.bottom()),
-                );
+                let x1 = if idx == 3 {
+                    inner.right()
+                } else {
+                    x0 + strip_w
+                };
+                let strip =
+                    egui::Rect::from_min_max(pos2(x0, inner.top()), pos2(x1, inner.bottom()));
                 let cr = match idx {
                     0 => CornerRadius {
                         nw: 4,
@@ -695,6 +698,141 @@ pub fn lighting_swatch_button(
     }
 
     resp.on_hover_text(tooltip)
+}
+
+/// Unified keyboard lighting profile button with a top color cap directly above the profile label.
+pub fn lighting_profile_button(
+    ui: &mut Ui,
+    label: &str,
+    zones: &[RgbColor; 4],
+    selected: bool,
+    four_zone: bool,
+    t: &CustomThemeConfig,
+) -> Response {
+    let accent = accent_color(t);
+    let text_c = rgb(t.text_primary);
+    let btn_size = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Button)
+        .map(|f| f.size * 0.92)
+        .unwrap_or(12.0);
+    let mut rt = egui::RichText::new(label).size(btn_size).color(text_c);
+    if selected {
+        rt = rt.strong();
+    }
+    let galley = egui::WidgetText::from(rt).into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+
+    let cap_h = 6.0_f32;
+    let width = (galley.size().x + 18.0).ceil().max(42.0);
+    let height = 26.0_f32.max((galley.size().y + 12.0).ceil());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter_at(rect);
+        let fill = if selected {
+            let w_accent = if t.is_high_contrast() { 0.28 } else { 0.20 };
+            let mix = |bg: u8, fg: u8| -> u8 {
+                (f32::from(bg) * (1.0 - w_accent) + f32::from(fg) * w_accent)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            Color32::from_rgb(
+                mix(t.control_bg[0], t.accent[0]),
+                mix(t.control_bg[1], t.accent[1]),
+                mix(t.control_bg[2], t.accent[2]),
+            )
+        } else if resp.hovered() {
+            rgb(t.control_hover_bg)
+        } else {
+            rgb(t.control_bg)
+        };
+        p.rect_filled(rect, CornerRadius::same(7), fill);
+
+        let cap_rect = egui::Rect::from_min_max(
+            pos2(rect.left() + 1.5, rect.top() + 1.5),
+            pos2(rect.right() - 1.5, rect.top() + 1.5 + cap_h),
+        );
+        let cap_radius = CornerRadius {
+            nw: 5,
+            ne: 5,
+            sw: 0,
+            se: 0,
+        };
+        let solid = !four_zone || zones.iter().all(|z| *z == zones[0]);
+        if solid {
+            let c = Color32::from_rgb(zones[0].r, zones[0].g, zones[0].b);
+            p.rect_filled(cap_rect, cap_radius, c);
+        } else {
+            let strip_w = cap_rect.width() / 4.0;
+            for (idx, z) in zones.iter().enumerate() {
+                let x0 = cap_rect.left() + idx as f32 * strip_w;
+                let x1 = if idx == 3 {
+                    cap_rect.right()
+                } else {
+                    x0 + strip_w
+                };
+                let seg =
+                    egui::Rect::from_min_max(pos2(x0, cap_rect.top()), pos2(x1, cap_rect.bottom()));
+                let cr = match idx {
+                    0 => CornerRadius {
+                        nw: 5,
+                        ne: 0,
+                        sw: 0,
+                        se: 0,
+                    },
+                    3 => CornerRadius {
+                        nw: 0,
+                        ne: 5,
+                        sw: 0,
+                        se: 0,
+                    },
+                    _ => CornerRadius::ZERO,
+                };
+                p.rect_filled(seg, cr, Color32::from_rgb(z.r, z.g, z.b));
+            }
+        }
+
+        let sep_alpha = if t.dark_base { 90 } else { 36 };
+        p.line_segment(
+            [
+                pos2(cap_rect.left(), cap_rect.bottom()),
+                pos2(cap_rect.right(), cap_rect.bottom()),
+            ],
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0, 0, 0, sep_alpha)),
+        );
+
+        let outer_stroke = if selected {
+            Stroke::new(1.8_f32, accent)
+        } else if resp.hovered() {
+            Stroke::new(1.3_f32, accent)
+        } else {
+            Stroke::new(1.0_f32, rgb(t.card_border))
+        };
+        p.rect_stroke(
+            rect.shrink(0.5),
+            CornerRadius::same(7),
+            outer_stroke,
+            StrokeKind::Inside,
+        );
+
+        let text_center_y = ((cap_rect.bottom() + 1.0) + (rect.bottom() - 1.0)) * 0.5;
+        let text_pos = pos2(
+            rect.center().x - galley.size().x * 0.5,
+            text_center_y - galley.size().y * 0.5,
+        );
+        p.galley(text_pos, galley, text_c);
+    }
+
+    resp.on_hover_text(label)
 }
 
 #[derive(Debug, Clone, Copy)]

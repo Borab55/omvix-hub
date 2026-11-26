@@ -1,5 +1,5 @@
 use crate::theme::{
-    accent_color, card_frame, fixed_color_picker_button, lighting_swatch_button, pill_button,
+    accent_color, card_frame, fixed_color_picker_button, lighting_profile_button, pill_button,
     section_title, section_toggle_button, status_badge, status_err, status_warn, ColorButtonStyle,
 };
 use crate::ui::{control_committed, unique_profile_slug};
@@ -69,12 +69,14 @@ pub fn render(
             KeyboardType::WhiteBacklight => 0,
             _ => 1,
         };
+        let four_zone = zone_count == 4;
 
         if zone_count > 0 {
             ui.add_space(4.0);
             let mut zone_committed = false;
             ui.horizontal_wrapped(|ui| {
-                for (z, cur) in cfg.lighting.zones.iter_mut().take(zone_count).enumerate() {
+                for z in 0..zone_count {
+                    let cur = cfg.lighting.zones[z];
                     let mut srgb = [cur.r, cur.g, cur.b];
                     ui.label(i18n.t_fmt("lighting.zone", &[("index", &(z + 1).to_string())]));
                     let resp = fixed_color_picker_button(
@@ -85,11 +87,16 @@ pub fn render(
                         t,
                     );
                     if resp.changed() {
-                        *cur = RgbColor {
+                        let picked = RgbColor {
                             r: srgb[0],
                             g: srgb[1],
                             b: srgb[2],
                         };
+                        if zone_count == 1 {
+                            cfg.lighting.zones = [picked; 4];
+                        } else {
+                            cfg.lighting.zones[z] = picked;
+                        }
                         cfg.lighting.enabled = true;
                         cfg.lighting.active_profile_id = None;
                     }
@@ -110,15 +117,16 @@ pub fn render(
                 ui.label(i18n.t("lighting.presets"));
                 for preset in LightingProfile::builtins() {
                     let selected = is_lighting_profile_active(cfg, &preset);
-                    if lighting_swatch_button(ui, &preset.zones, selected, &preset.name, t)
-                        .clicked()
+                    if lighting_profile_button(
+                        ui,
+                        &preset.name,
+                        &preset.zones,
+                        selected,
+                        four_zone,
+                        t,
+                    )
+                    .clicked()
                     {
-                        apply_lighting_profile(cfg, &preset);
-                        on_save();
-                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                        on_cmd(WorkerCommand::ApplyLighting);
-                    }
-                    if pill_button(ui, &preset.name, selected, t).clicked() {
                         apply_lighting_profile(cfg, &preset);
                         on_save();
                         on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
@@ -139,15 +147,12 @@ pub fn render(
                 for (idx, prof) in cfg.lighting.custom_profiles.iter().enumerate() {
                     let is_active = is_lighting_profile_active(cfg, prof);
                     ui.horizontal_wrapped(|ui| {
-                        if lighting_swatch_button(ui, &prof.zones, is_active, &prof.name, t)
-                            .clicked()
-                        {
-                            apply_prof = Some(prof.clone());
-                        }
-                        if pill_button(
+                        if lighting_profile_button(
                             ui,
                             &format!("{} ({}%)", prof.name, prof.brightness_pct),
+                            &prof.zones,
                             is_active,
+                            four_zone,
                             t,
                         )
                         .clicked()
@@ -202,11 +207,17 @@ pub fn render(
                         cfg.lighting.custom_profiles.iter().any(|p| p.id == id)
                             || LightingProfile::builtins().iter().any(|p| p.id == id)
                     });
+                    let saved_zones = if zone_count == 1 {
+                        [cfg.lighting.zones[0]; 4]
+                    } else {
+                        cfg.lighting.zones
+                    };
+                    cfg.lighting.zones = saved_zones;
                     let prof = LightingProfile {
                         id: candidate,
                         name: final_name,
                         brightness_pct: cfg.lighting.brightness_pct,
-                        zones: cfg.lighting.zones,
+                        zones: saved_zones,
                         builtin: false,
                     };
                     apply_lighting_profile(cfg, &prof);
