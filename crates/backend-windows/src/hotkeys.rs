@@ -158,6 +158,17 @@ pub fn spawn_omen_key_listener<F>(on_press: F) -> ListenerHandle
 where
     F: Fn() + Send + 'static,
 {
+    spawn_hp_wmi_event_listener(on_press, |_, _| {})
+}
+
+/// Subscribes to `root\WMI` `hpqBEvnt` notifications, dispatching the dedicated HP Omen key
+/// (`EventData == 8613`) and forwarding other hardware events (e.g. Fn+backlight / thermal
+/// hotkeys) so callers can refresh hardware state without polling blindly.
+pub fn spawn_hp_wmi_event_listener<F, G>(on_omen_key: F, on_other_hw_event: G) -> ListenerHandle
+where
+    F: Fn() + Send + 'static,
+    G: Fn(u32, u32) + Send + 'static,
+{
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
 
@@ -165,7 +176,7 @@ where
         let mut backoff = std::time::Duration::from_secs(2);
         while !stop_flag.load(Ordering::SeqCst) {
             let Ok(wmi) = WmiConnection::connect(r"root\WMI") else {
-                tracing::debug!("Omen key listener could not connect to root\\WMI; retrying");
+                tracing::debug!("hpqBEvnt WMI listener could not connect to root\\WMI; retrying");
                 for _ in 0..(backoff.as_millis() / 200).max(1) {
                     if stop_flag.load(Ordering::SeqCst) {
                         return;
@@ -177,25 +188,25 @@ where
             };
             let Ok(enumerator) = wmi.exec_notification_query("SELECT * FROM hpqBEvnt") else {
                 tracing::info!(
-                    "Omen key WMI subscription unavailable (requires Admin or unsupported)"
+                    "hpqBEvnt WMI subscription unavailable (requires Admin or unsupported)"
                 );
                 return;
             };
 
             backoff = std::time::Duration::from_secs(2);
-            tracing::info!("Started WMI hpqBEvnt Omen key listener");
+            tracing::info!("Started WMI hpqBEvnt hardware event listener");
             while !stop_flag.load(Ordering::SeqCst) {
                 let mut row: [Option<IWbemClassObject>; 1] = [None];
                 let mut returned = 0u32;
                 let hr = unsafe { enumerator.Next(1000, &mut row, &mut returned) };
                 if hr.0 == WBEM_E_ACCESS_DENIED.0 {
-                    tracing::warn!("Omen key listener stopped due to WMI access denied");
+                    tracing::warn!("hpqBEvnt listener stopped due to WMI access denied");
                     return;
                 }
                 if hr.is_err() {
                     tracing::warn!(
                         hresult = format_args!("0x{:08X}", hr.0 as u32),
-                        "Omen key WMI listener disconnected; will retry"
+                        "hpqBEvnt WMI listener disconnected; will retry"
                     );
                     break;
                 }
@@ -205,7 +216,13 @@ where
                         let event_data = get_u32(&obj, "EventData").unwrap_or(0);
                         tracing::debug!(event_id, event_data, "Received hpqBEvnt WMI event");
                         if event_data == OMEN_KEY_EVENT_DATA {
-                            on_press();
+                            on_omen_key();
+                        } else {
+                            // TODO(hw-verify): Confirm exact HP WMI EventID/EventData codes
+                            // for Fn+backlight and other hardware switches across Victus/Omen
+                            // BIOS revisions. Until verified per model, any non-OMEN-key
+                            // hpqBEvnt event triggers a safe read-only state refresh.
+                            on_other_hw_event(event_id, event_data);
                         }
                     }
                 }

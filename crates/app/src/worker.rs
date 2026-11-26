@@ -319,6 +319,7 @@ pub enum WorkerCommand {
     DownloadAndVerifyUpdate,
     ApplyStagedUpdate,
     OpenReleasePage(String),
+    PollExternalHardwareState,
     Shutdown,
 }
 
@@ -816,6 +817,8 @@ struct WorkerEngine {
     battery_health_history: BatteryHealthHistory,
     battery_history_path: PathBuf,
     bat_limit_toast_sent: bool,
+    last_kbd_write_at: Option<Instant>,
+    keyboard_dimmed_by_auto_profile: bool,
 }
 
 #[cfg(windows)]
@@ -859,6 +862,7 @@ fn run_worker_loop(
     let mut last_curve_eval = Instant::now();
     let mut last_keep_alive = Instant::now();
     let mut last_app_profile_poll = Instant::now();
+    let mut last_ext_hw_poll = Instant::now();
     let mut stabilized_recorded = false;
     let mut last_stability_check = Instant::now();
 
@@ -998,6 +1002,19 @@ fn run_worker_loop(
                 } else {
                     request_repaint_if_visible(&ctx, &window_visible);
                 }
+            }
+        }
+
+        // Periodic external hardware sync (Fn+backlight, display rate, CPU boost, Windows power overlay)
+        let ext_poll_interval = if visible {
+            Duration::from_millis(2500)
+        } else {
+            Duration::from_secs(5)
+        };
+        if last_ext_hw_poll.elapsed() >= ext_poll_interval {
+            last_ext_hw_poll = Instant::now();
+            if engine.poll_external_hw_state_step(true) {
+                request_repaint_always(&ctx);
             }
         }
 
@@ -1184,6 +1201,8 @@ impl WorkerEngine {
             battery_health_history,
             battery_history_path,
             bat_limit_toast_sent: false,
+            last_kbd_write_at: None,
+            keyboard_dimmed_by_auto_profile: false,
         }
     }
 
@@ -1275,6 +1294,7 @@ impl WorkerEngine {
                 st.keyboard_type = kbd_type;
                 st.gpu_mode = gpu_mode;
             }
+            self.sync_keyboard_backlight_from_hw(false);
             request_repaint_if_visible(ctx, window_visible);
         }
 
@@ -1995,6 +2015,11 @@ impl WorkerEngine {
         window_visible: &Arc<AtomicBool>,
     ) -> bool {
         match cmd {
+            WorkerCommand::PollExternalHardwareState => {
+                if self.poll_external_hw_state_step(false) {
+                    request_repaint_always(ctx);
+                }
+            }
             WorkerCommand::Shutdown => {
                 tracing::info!("Background worker shutting down");
                 self.apply_off_state_safety("clean shutdown");
@@ -2014,6 +2039,7 @@ impl WorkerEngine {
             }
             WorkerCommand::SystemSuspending(ack) => {
                 tracing::info!("System suspending -> applying Fan Auto & Battery off-state safety");
+                self.sync_keyboard_backlight_from_hw(false);
                 self.apply_off_state_safety("system suspend");
                 let _ = ack.send(());
             }
@@ -2092,13 +2118,20 @@ impl WorkerEngine {
                     ) {
                         tracing::warn!("Failed restoring fan mode on resume: {err}");
                     }
-                    if self.cfg.lighting.enabled {
-                        if let Err(err) = self.backends.kbd.set_backlight(
+                    if self.cfg.lighting.enabled && !self.keyboard_dimmed_by_auto_profile {
+                        match self.backends.kbd.set_backlight(
                             true,
                             self.cfg.lighting.brightness_pct,
                             &self.cfg.lighting.zones,
                         ) {
-                            tracing::warn!("Failed restoring keyboard backlight on resume: {err}");
+                            Ok(()) => {
+                                self.last_kbd_write_at = Some(Instant::now());
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Failed restoring keyboard backlight on resume: {err}"
+                                );
+                            }
                         }
                     }
                 } else if self.safe_mode.is_some() {
@@ -2542,6 +2575,8 @@ impl WorkerEngine {
                     &self.cfg.lighting.zones,
                 );
                 if res.is_ok() {
+                    self.last_kbd_write_at = Some(Instant::now());
+                    self.keyboard_dimmed_by_auto_profile = false;
                     record_history_entry(
                         &mut self.change_history,
                         &self.state,
@@ -2947,6 +2982,8 @@ impl WorkerEngine {
                 self.last_committed_battery = BatteryConfig::default();
                 self.last_committed_lighting = LightingConfig::default();
                 self.last_committed_power_limits = (None, None);
+                self.last_kbd_write_at = None;
+                self.keyboard_dimmed_by_auto_profile = false;
                 self.thermal_guard.reset();
                 self.sensor_loss_guard.reset();
                 self.retry_ctrl.reset();
@@ -3558,6 +3595,115 @@ impl WorkerEngine {
         );
     }
 
+    fn colors_match_scaled(
+        hw_zones: &[RgbColor],
+        cfg_zones: &[RgbColor; 4],
+        brightness_pct: u8,
+    ) -> bool {
+        let factor = brightness_pct.min(100) as f32 / 100.0;
+        hw_zones.iter().enumerate().take(4).all(|(idx, hw)| {
+            let src = cfg_zones[idx];
+            let er = (src.r as f32 * factor).round().clamp(0.0, 255.0) as u8;
+            let eg = (src.g as f32 * factor).round().clamp(0.0, 255.0) as u8;
+            let eb = (src.b as f32 * factor).round().clamp(0.0, 255.0) as u8;
+            hw.r.abs_diff(er) <= 2 && hw.g.abs_diff(eg) <= 2 && hw.b.abs_diff(eb) <= 2
+        })
+    }
+
+    fn sync_keyboard_backlight_from_hw(&mut self, respect_grace: bool) -> bool {
+        if respect_grace
+            && self
+                .last_kbd_write_at
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(1200))
+        {
+            return false;
+        }
+        let Ok(Some(hw)) = self.backends.kbd.get_backlight() else {
+            return false;
+        };
+
+        if self.keyboard_dimmed_by_auto_profile {
+            if !hw.enabled {
+                // Expected auto-profile dim; keep user's saved cfg.lighting.enabled preference.
+                return false;
+            }
+            // User manually re-enabled backlight (e.g. via Fn key) while auto-profile had dimmed it.
+            self.keyboard_dimmed_by_auto_profile = false;
+        }
+
+        let mut changed = false;
+        if self.cfg.lighting.enabled != hw.enabled {
+            self.cfg.lighting.enabled = hw.enabled;
+            changed = true;
+        }
+
+        let has_non_zero_color = hw.zones.iter().any(|c| c.r != 0 || c.g != 0 || c.b != 0);
+        if hw.enabled
+            && !hw.zones.is_empty()
+            && has_non_zero_color
+            && !Self::colors_match_scaled(
+                &hw.zones,
+                &self.cfg.lighting.zones,
+                self.cfg.lighting.brightness_pct,
+            )
+        {
+            for (dst, src) in self.cfg.lighting.zones.iter_mut().zip(hw.zones.iter()) {
+                *dst = *src;
+            }
+            self.cfg.lighting.brightness_pct = 100;
+            self.cfg.lighting.active_profile_id = None;
+            changed = true;
+        }
+
+        if changed {
+            self.last_committed_lighting = self.cfg.lighting.clone();
+            if let Ok(mut st) = self.state.lock() {
+                st.synced_config_rev = st.synced_config_rev.wrapping_add(1);
+                st.synced_config = Some(self.cfg.clone());
+            }
+            tracing::info!(
+                enabled = self.cfg.lighting.enabled,
+                "Detected external keyboard backlight change; synchronized app state"
+            );
+        }
+        changed
+    }
+
+    fn poll_external_hw_state_step(&mut self, respect_kbd_grace: bool) -> bool {
+        let mut changed = self.sync_keyboard_backlight_from_hw(respect_kbd_grace);
+
+        let disp = self.backends.display.get_display_mode().ok();
+        let boost = self.backends.tuning.read_cpu_boost_mode().ok();
+        let win_overlay = self.backends.os.read_win_power_overlay();
+        if let Ok(mut st) = self.state.lock() {
+            if let Some(d) = disp {
+                let disp_changed = st.display_mode.as_ref().is_none_or(|cur| {
+                    cur.current_hz != d.current_hz
+                        || cur.width != d.width
+                        || cur.height != d.height
+                        || cur.supported_hz != d.supported_hz
+                });
+                if disp_changed {
+                    st.display_mode = Some(d);
+                    changed = true;
+                }
+            }
+            if let Some(b) = boost {
+                if st.cpu_boost != Some(b) {
+                    st.cpu_boost = Some(b);
+                    changed = true;
+                }
+            }
+            if let Some(ov) = win_overlay {
+                if st.active_win_power_mode != Some(ov) {
+                    st.active_win_power_mode = Some(ov);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     fn sync_win_power_mode_if_enabled(&self, mode: PerformanceMode) {
         if self.safe_mode.is_some() || !self.cfg.thermal_fan.sync_windows_power_mode {
             return;
@@ -3719,26 +3865,46 @@ impl WorkerEngine {
         self.apply_refresh_rate_if_set(action.refresh_hz);
 
         if self.bios_writes_allowed {
+            if !self.keyboard_dimmed_by_auto_profile {
+                self.sync_keyboard_backlight_from_hw(false);
+            }
             record_hw_write_attempt(
                 &self.crash_guard,
                 &self.crash_guard_path,
                 &mut self.hw_applied_recorded,
             );
-            let kbd_res = if action.dim_keyboard {
-                self.backends
-                    .kbd
-                    .set_backlight(false, 0, &self.cfg.lighting.zones)
-            } else if self.cfg.lighting.enabled {
-                self.backends.kbd.set_backlight(
-                    true,
-                    self.cfg.lighting.brightness_pct,
-                    &self.cfg.lighting.zones,
-                )
+            if action.dim_keyboard {
+                if self.cfg.lighting.enabled {
+                    match self
+                        .backends
+                        .kbd
+                        .set_backlight(false, 0, &self.cfg.lighting.zones)
+                    {
+                        Ok(()) => {
+                            self.keyboard_dimmed_by_auto_profile = true;
+                            self.last_kbd_write_at = Some(Instant::now());
+                        }
+                        Err(err) => {
+                            tracing::warn!("Auto-profile keyboard backlight write failed: {err}");
+                        }
+                    }
+                }
             } else {
-                Ok(())
-            };
-            if let Err(err) = kbd_res {
-                tracing::warn!("Auto-profile keyboard backlight write failed: {err}");
+                if self.keyboard_dimmed_by_auto_profile && self.cfg.lighting.enabled {
+                    match self.backends.kbd.set_backlight(
+                        true,
+                        self.cfg.lighting.brightness_pct,
+                        &self.cfg.lighting.zones,
+                    ) {
+                        Ok(()) => {
+                            self.last_kbd_write_at = Some(Instant::now());
+                        }
+                        Err(err) => {
+                            tracing::warn!("Auto-profile keyboard backlight write failed: {err}");
+                        }
+                    }
+                }
+                self.keyboard_dimmed_by_auto_profile = false;
             }
         }
 
@@ -4152,6 +4318,8 @@ impl WorkerEngine {
                     self.cfg.lighting.brightness_pct = brightness_pct;
                     self.cfg.lighting.zones = zones;
                     self.last_committed_lighting = self.cfg.lighting.clone();
+                    self.last_kbd_write_at = Some(Instant::now());
+                    self.keyboard_dimmed_by_auto_profile = false;
                 }
                 r
             }
@@ -4523,6 +4691,7 @@ fn latest_wins_kind(cmd: &WorkerCommand) -> Option<u8> {
         WorkerCommand::SetTelemetryIntervalMs(_) => Some(4),
         WorkerCommand::SetRefreshRate(_) => Some(5),
         WorkerCommand::SetCpuBoost(_) => Some(6),
+        WorkerCommand::PollExternalHardwareState => Some(7),
         _ => None,
     }
 }

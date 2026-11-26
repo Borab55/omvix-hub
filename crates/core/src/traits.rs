@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::models::{
     BatteryChargeMode, BatteryStatus, CpuBoostMode, DiagnosticReport, DisplayModeInfo, FanMode,
-    GpuMode, KeyboardType, PerformanceMode, RgbColor, TelemetrySnapshot,
+    GpuMode, KeyboardBacklightState, KeyboardType, PerformanceMode, RgbColor, TelemetrySnapshot,
 };
 
 /// Read-only hardware discovery, WMI/ACPI capability probing, and conflict scanning.
@@ -32,6 +32,12 @@ pub trait BatteryLimitBackend: Send + Sync {
 pub trait KeyboardBackend: Send + Sync {
     fn detect_keyboard_type(&self) -> Result<KeyboardType>;
     fn set_backlight(&self, enabled: bool, brightness_pct: u8, zones: &[RgbColor]) -> Result<()>;
+
+    /// Reads the current hardware keyboard backlight state when supported by firmware.
+    /// Returns `Ok(None)` when unsupported or when the raw response cannot be mapped safely.
+    fn get_backlight(&self) -> Result<Option<KeyboardBacklightState>> {
+        Ok(None)
+    }
 }
 
 /// Hardware GPU MUX switcher.

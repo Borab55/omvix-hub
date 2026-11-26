@@ -28,7 +28,7 @@ const DRAWER_SIZE: [f32; 2] = [632.0, 668.0];
 
 #[cfg(windows)]
 use omvix_windows::hotkeys::{
-    spawn_global_hotkey_listener, spawn_omen_key_listener, HotkeyBindError, ListenerHandle,
+    spawn_global_hotkey_listener, spawn_hp_wmi_event_listener, HotkeyBindError, ListenerHandle,
 };
 #[cfg(windows)]
 use omvix_windows::power_events::{spawn_power_event_listener, PowerEventHandle, SystemPowerEvent};
@@ -1350,14 +1350,19 @@ impl OmvixApp {
         {
             self.stop_hotkeys();
 
-            if self.cfg.hotkeys.capture_omen_key {
-                let tx = self.signal_tx.clone();
-                let c = ctx.clone();
-                let vis = Arc::clone(&self.window_visible);
-                let hwnd = Arc::clone(&self.hwnd_atomic);
-                let d_hwnd = Arc::clone(&self.drawer_hwnd_atomic);
-                let action_code = Arc::clone(&self.omen_action_code);
-                self.omen_listener = Some(spawn_omen_key_listener(move || {
+            let capture_omen = self.cfg.hotkeys.capture_omen_key;
+            let tx = self.signal_tx.clone();
+            let c = ctx.clone();
+            let vis = Arc::clone(&self.window_visible);
+            let hwnd = Arc::clone(&self.hwnd_atomic);
+            let d_hwnd = Arc::clone(&self.drawer_hwnd_atomic);
+            let action_code = Arc::clone(&self.omen_action_code);
+            let worker_tx = self.worker.as_ref().map(|w| w.sender_clone());
+            self.omen_listener = Some(spawn_hp_wmi_event_listener(
+                move || {
+                    if !capture_omen {
+                        return;
+                    }
                     if action_code.load(Ordering::Relaxed) == 0 {
                         if vis.load(Ordering::SeqCst) {
                             vis.store(false, Ordering::SeqCst);
@@ -1375,8 +1380,13 @@ impl OmvixApp {
                         let _ = tx.send(AppSignal::OmenKeyNonToggle);
                     }
                     c.request_repaint();
-                }));
-            }
+                },
+                move |_event_id, _event_data| {
+                    if let Some(ref wtx) = worker_tx {
+                        let _ = wtx.send(WorkerCommand::PollExternalHardwareState);
+                    }
+                },
+            ));
 
             if !self.hotkey_capture_active.load(Ordering::Relaxed)
                 && !self.cfg.hotkeys.global_toggle_shortcut.trim().is_empty()

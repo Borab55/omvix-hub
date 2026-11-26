@@ -1,7 +1,9 @@
 use crate::system_info::collect_system_identity;
 use crate::wmi_bios::{describe_wmi_return_code, HpWmiBios, OutputSize};
 use omvix_core::boards::lookup_board;
-use omvix_core::{KeyboardBackend, KeyboardType, OmvixError, Result, RgbColor};
+use omvix_core::{
+    KeyboardBackend, KeyboardBacklightState, KeyboardType, OmvixError, Result, RgbColor,
+};
 
 /// Windows HP WMI `0x20009` keyboard backlight & RGB controller.
 #[derive(Debug, Default)]
@@ -19,6 +21,38 @@ impl WindowsKeyboardBackend {
             (c.g as f32 * factor).round().clamp(0.0, 255.0) as u8,
             (c.b as f32 * factor).round().clamp(0.0, 255.0) as u8,
         )
+    }
+
+    /// Decodes the raw power-state payload returned by HP WMI `0x20009 / 0x04`.
+    ///
+    /// Returns `None` for any unrecognized byte instead of guessing unverified BIOS encodings.
+    pub(crate) fn decode_backlight_power(data: &[u8]) -> Option<bool> {
+        // Verified on live 8C99 Victus 16-r1 (BIOS F.19): 0x20009/0x04 returns [0xE4, 0, 0, 0] when ON,
+        // matching the 0xE4 write byte sent via 0x20009/0x05.
+        // TODO(hw-verify): Confirm the exact OFF byte (expected 0x64) and white-backlight level bytes
+        // from live 0x20009/0x04 probes after Fn+F4/Fn+Space hardware toggles across Victus/Omen models.
+        match *data.first()? {
+            0xE4 => Some(true),
+            0x64 => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Extracts up to 4 zone `[R, G, B]` triplets from HP WMI `0x20009 / 0x02` (`KeyboardColorTable`).
+    pub(crate) fn parse_color_table_zones(data: &[u8]) -> Vec<RgbColor> {
+        if data.len() < 37 {
+            return Vec::new();
+        }
+        (0..4)
+            .map(|zone_idx| {
+                let offset = 25 + zone_idx * 3;
+                RgbColor {
+                    r: data[offset],
+                    g: data[offset + 1],
+                    b: data[offset + 2],
+                }
+            })
+            .collect()
     }
 }
 
@@ -120,5 +154,95 @@ impl KeyboardBackend for WindowsKeyboardBackend {
             );
             Ok(())
         })
+    }
+
+    fn get_backlight(&self) -> Result<Option<KeyboardBacklightState>> {
+        HpWmiBios::with_cached(|bios| {
+            let power_resp = bios.execute(0x20009, 0x04, &[0u8; 4], OutputSize::Size4)?;
+            if power_resp.return_code != 0 {
+                tracing::debug!(
+                    rc = power_resp.return_code,
+                    "KeyboardBacklightGet (0x20009/0x04) unavailable or failed"
+                );
+                return Ok(None);
+            }
+
+            let Some(enabled) = Self::decode_backlight_power(&power_resp.data) else {
+                tracing::debug!(
+                    raw_power_bytes = format_args!("{:02X?}", power_resp.data),
+                    "Unmapped KeyboardBacklightGet response byte"
+                );
+                return Ok(None);
+            };
+
+            let zones = if enabled {
+                let table_resp = bios.execute(0x20009, 0x02, &[0u8; 4], OutputSize::Size128)?;
+                if table_resp.return_code == 0 {
+                    Self::parse_color_table_zones(&table_resp.data)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            Ok(Some(KeyboardBacklightState { enabled, zones }))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_known_backlight_power_bytes_and_rejects_unknown() {
+        assert_eq!(
+            WindowsKeyboardBackend::decode_backlight_power(&[0xE4, 0, 0, 0]),
+            Some(true)
+        );
+        assert_eq!(
+            WindowsKeyboardBackend::decode_backlight_power(&[0x64, 0, 0, 0]),
+            Some(false)
+        );
+        assert_eq!(
+            WindowsKeyboardBackend::decode_backlight_power(&[0x00, 0, 0, 0]),
+            None
+        );
+        assert_eq!(
+            WindowsKeyboardBackend::decode_backlight_power(&[0xFF, 0, 0, 0]),
+            None
+        );
+        assert_eq!(WindowsKeyboardBackend::decode_backlight_power(&[]), None);
+    }
+
+    #[test]
+    fn parses_8c99_color_table_zones_at_offset_25() {
+        let mut table = [0u8; 128];
+        for i in 0..4 {
+            let off = 25 + i * 3;
+            table[off] = 0x22;
+            table[off + 1] = 0xC5;
+            table[off + 2] = 0x5E + i as u8;
+        }
+        let zones = WindowsKeyboardBackend::parse_color_table_zones(&table);
+        assert_eq!(zones.len(), 4);
+        assert_eq!(
+            zones[0],
+            RgbColor {
+                r: 0x22,
+                g: 0xC5,
+                b: 0x5E
+            }
+        );
+        assert_eq!(
+            zones[3],
+            RgbColor {
+                r: 0x22,
+                g: 0xC5,
+                b: 0x61
+            }
+        );
+        assert!(WindowsKeyboardBackend::parse_color_table_zones(&table[..36]).is_empty());
     }
 }

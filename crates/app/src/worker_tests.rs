@@ -2,7 +2,7 @@ use super::*;
 use chrono::Utc;
 use omvix_core::app_profiles::AppProfileRule;
 use omvix_core::OmvixError;
-use omvix_core::{FanCurvePreset, SystemIdentity};
+use omvix_core::{FanCurvePreset, KeyboardBacklightState, SystemIdentity};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
@@ -20,6 +20,7 @@ struct MockHardwareState {
     keep_alive_count: usize,
     battery_status: BatteryStatus,
     battery_mode_writes: Vec<BatteryChargeMode>,
+    kbd_backlight: Option<KeyboardBacklightState>,
     lighting_writes: Vec<(bool, u8, [RgbColor; 4])>,
     display_mode: DisplayModeInfo,
     refresh_writes: Vec<u32>,
@@ -101,6 +102,10 @@ impl Default for MockHardwareState {
                 ..Default::default()
             },
             battery_mode_writes: Vec::new(),
+            kbd_backlight: Some(KeyboardBacklightState {
+                enabled: true,
+                zones: vec![RgbColor::default(); 4],
+            }),
             lighting_writes: Vec::new(),
             display_mode: DisplayModeInfo {
                 current_hz: 144,
@@ -283,10 +288,28 @@ impl KeyboardBackend for MockRig {
         for (dst, src) in arr.iter_mut().zip(zones.iter()) {
             *dst = *src;
         }
+        if let Some(ref mut kbd) = g.kbd_backlight {
+            kbd.enabled = enabled;
+            if enabled {
+                let factor = brightness_pct.min(100) as f32 / 100.0;
+                kbd.zones = arr
+                    .iter()
+                    .map(|c| RgbColor {
+                        r: (c.r as f32 * factor).round().clamp(0.0, 255.0) as u8,
+                        g: (c.g as f32 * factor).round().clamp(0.0, 255.0) as u8,
+                        b: (c.b as f32 * factor).round().clamp(0.0, 255.0) as u8,
+                    })
+                    .collect();
+            }
+        }
         g.lighting_writes.push((enabled, brightness_pct, arr));
         g.event_log
             .push(format!("lighting:{enabled}:{brightness_pct}"));
         Ok(())
+    }
+
+    fn get_backlight(&self) -> Result<Option<KeyboardBacklightState>> {
+        Ok(self.inner.lock().unwrap().kbd_backlight.clone())
     }
 }
 
@@ -1636,4 +1659,142 @@ fn integration_app_profile_rule_switch_restores_none_fields_and_gpu_baseline() {
         assert_eq!(st.effective_fan_mode, FanMode::Auto);
         assert_eq!(st.effective_gpu_fan_mode, FanMode::Manual);
     }
+}
+
+#[test]
+fn integration_external_keyboard_off_syncs_state_and_survives_resume() {
+    let dir = TempDirGuard::create("ext_kbd_resume");
+    let rig = MockRig::new(MockHardwareState::default());
+    let cfg = AppConfig::default();
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+
+    // External Fn+F4 turn-off: hardware reports OFF
+    {
+        let mut g = rig.inner.lock().unwrap();
+        g.kbd_backlight = Some(KeyboardBacklightState {
+            enabled: false,
+            zones: Vec::new(),
+        });
+    }
+    engine.handle_command(
+        WorkerCommand::PollExternalHardwareState,
+        &tx,
+        &None,
+        &visible,
+    );
+    assert!(!engine.cfg.lighting.enabled);
+    {
+        let st = state.lock().unwrap();
+        assert_eq!(st.synced_config_rev, 1);
+        assert!(!st.synced_config.as_ref().unwrap().lighting.enabled);
+    }
+
+    // Resuming from sleep must NOT re-enable keyboard light that user turned off externally
+    engine.handle_command(WorkerCommand::SystemResumed, &tx, &None, &visible);
+    assert!(rig.inner.lock().unwrap().lighting_writes.is_empty());
+
+    // External Fn key turns keyboard back ON with updated RGB color
+    let ext_color = RgbColor {
+        r: 255,
+        g: 40,
+        b: 20,
+    };
+    {
+        let mut g = rig.inner.lock().unwrap();
+        g.kbd_backlight = Some(KeyboardBacklightState {
+            enabled: true,
+            zones: vec![ext_color; 4],
+        });
+    }
+    engine.handle_command(
+        WorkerCommand::PollExternalHardwareState,
+        &tx,
+        &None,
+        &visible,
+    );
+    assert!(engine.cfg.lighting.enabled);
+    assert_eq!(engine.cfg.lighting.brightness_pct, 100);
+    assert_eq!(engine.cfg.lighting.zones, [ext_color; 4]);
+}
+
+#[test]
+fn integration_auto_profile_respects_external_keyboard_off_and_restores_own_dim() {
+    let dir = TempDirGuard::create("ext_kbd_auto_profile");
+    let rig = MockRig::new(MockHardwareState::default());
+    let mut cfg = AppConfig::default();
+    cfg.auto_profile.enabled = true;
+    cfg.auto_profile.dim_keyboard_on_battery = true;
+    let (mut engine, _state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+    let (tx, _rx) = mpsc::channel();
+    let visible = Arc::new(AtomicBool::new(true));
+
+    // Initial AC poll establishes AC baseline without writing lighting
+    engine.poll_telemetry_step(0.1, true, false, false);
+    assert!(rig.inner.lock().unwrap().lighting_writes.is_empty());
+
+    // Switch to DC -> auto-profile dims keyboard, preserving user's lighting.enabled = true preference
+    rig.inner.lock().unwrap().telemetry_snap.ac_connected = Some(false);
+    engine.poll_telemetry_step(1.0, true, false, false);
+    assert!(!rig.inner.lock().unwrap().lighting_writes.last().unwrap().0);
+    assert!(engine.keyboard_dimmed_by_auto_profile);
+    assert!(!engine.sync_keyboard_backlight_from_hw(false));
+    assert!(engine.cfg.lighting.enabled);
+
+    // Return to AC -> auto-profile restores its own dim back ON
+    rig.inner.lock().unwrap().telemetry_snap.ac_connected = Some(true);
+    engine.poll_telemetry_step(2.0, true, false, false);
+    assert!(rig.inner.lock().unwrap().lighting_writes.last().unwrap().0);
+    assert!(!engine.keyboard_dimmed_by_auto_profile);
+
+    // Now user turns off keyboard externally via Fn key
+    rig.inner.lock().unwrap().lighting_writes.clear();
+    rig.inner.lock().unwrap().kbd_backlight = Some(KeyboardBacklightState {
+        enabled: false,
+        zones: Vec::new(),
+    });
+    engine.handle_command(
+        WorkerCommand::PollExternalHardwareState,
+        &tx,
+        &None,
+        &visible,
+    );
+    assert!(!engine.cfg.lighting.enabled);
+
+    // DC -> AC transitions must keep keyboard OFF and not override user's external OFF
+    rig.inner.lock().unwrap().telemetry_snap.ac_connected = Some(false);
+    engine.poll_telemetry_step(3.0, true, false, false);
+    rig.inner.lock().unwrap().telemetry_snap.ac_connected = Some(true);
+    engine.poll_telemetry_step(4.0, true, false, false);
+    assert!(rig.inner.lock().unwrap().lighting_writes.is_empty());
+    assert!(!engine.cfg.lighting.enabled);
+}
+
+#[test]
+fn integration_external_display_boost_and_power_overlay_sync_on_poll() {
+    let dir = TempDirGuard::create("ext_os_poll");
+    let rig = MockRig::new(MockHardwareState::default());
+    let cfg = AppConfig::default();
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+
+    {
+        let mut g = rig.inner.lock().unwrap();
+        g.display_mode.current_hz = 60;
+        g.cpu_boost = CpuBoostMode::Disabled;
+        g.win_overlay = Some(WindowsPowerOverlay::BestPowerEfficiency);
+    }
+
+    assert!(engine.poll_external_hw_state_step(true));
+    {
+        let st = state.lock().unwrap();
+        assert_eq!(st.display_mode.as_ref().map(|d| d.current_hz), Some(60));
+        assert_eq!(st.cpu_boost, Some(CpuBoostMode::Disabled));
+        assert_eq!(
+            st.active_win_power_mode,
+            Some(WindowsPowerOverlay::BestPowerEfficiency)
+        );
+    }
+    // Second poll with identical hardware values should report no change
+    assert!(!engine.poll_external_hw_state_step(true));
 }

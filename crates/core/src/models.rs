@@ -547,6 +547,14 @@ impl Default for RgbColor {
     }
 }
 
+/// Hardware backlight state read back from the keyboard controller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardBacklightState {
+    pub enabled: bool,
+    /// Zone RGB triplets read back from the color table (empty if unavailable/white-only).
+    pub zones: Vec<RgbColor>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum GpuMode {
     #[default]
