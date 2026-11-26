@@ -7,7 +7,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::System::Wmi::{IWbemClassObject, WBEM_E_ACCESS_DENIED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+    MOD_SHIFT, MOD_WIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, PeekMessageW, PostThreadMessageW, MSG, PM_NOREMOVE, WM_HOTKEY, WM_QUIT,
@@ -75,6 +76,11 @@ pub fn parse_shortcut(spec: &str) -> Result<(HOT_KEY_MODIFIERS, u32)> {
             "alt" => mods |= MOD_ALT,
             "win" | "super" => mods |= MOD_WIN,
             other => {
+                if vk.is_some() {
+                    return Err(OmvixError::Config(format!(
+                        "Shortcut `{spec}` contains multiple keys (`{token}`)"
+                    )));
+                }
                 vk = Some(parse_virtual_key(other).ok_or_else(|| {
                     OmvixError::Config(format!("Unsupported hotkey key token: `{token}`"))
                 })?);
@@ -141,6 +147,9 @@ impl Drop for ListenerHandle {
                 let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
             }
         }
+        if let Some(handle) = self.join.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -153,38 +162,51 @@ where
     let stop_flag = Arc::clone(&stop);
 
     let join = thread::spawn(move || {
-        let Ok(wmi) = WmiConnection::connect(r"root\WMI") else {
-            tracing::warn!("Omen key listener could not connect to root\\WMI");
-            return;
-        };
-        let Ok(enumerator) = wmi.exec_notification_query("SELECT * FROM hpqBEvnt") else {
-            tracing::info!("Omen key WMI subscription unavailable (requires Admin or unsupported)");
-            return;
-        };
-
-        tracing::info!("Started WMI hpqBEvnt Omen key listener");
+        let mut backoff = std::time::Duration::from_secs(2);
         while !stop_flag.load(Ordering::SeqCst) {
-            let mut row: [Option<IWbemClassObject>; 1] = [None];
-            let mut returned = 0u32;
-            let hr = unsafe { enumerator.Next(1000, &mut row, &mut returned) };
-            if hr.0 == WBEM_E_ACCESS_DENIED.0 {
-                tracing::warn!("Omen key listener stopped due to WMI access denied");
-                break;
-            }
-            if hr.is_err() {
-                tracing::warn!(
-                    hresult = format_args!("0x{:08X}", hr.0 as u32),
-                    "Omen key WMI listener stopped due to query error"
+            let Ok(wmi) = WmiConnection::connect(r"root\WMI") else {
+                tracing::debug!("Omen key listener could not connect to root\\WMI; retrying");
+                for _ in 0..(backoff.as_millis() / 200).max(1) {
+                    if stop_flag.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(200));
+                }
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+                continue;
+            };
+            let Ok(enumerator) = wmi.exec_notification_query("SELECT * FROM hpqBEvnt") else {
+                tracing::info!(
+                    "Omen key WMI subscription unavailable (requires Admin or unsupported)"
                 );
-                break;
-            }
-            if returned > 0 {
-                if let Some(obj) = row[0].take() {
-                    let event_id = get_u32(&obj, "EventID").unwrap_or(0);
-                    let event_data = get_u32(&obj, "EventData").unwrap_or(0);
-                    tracing::debug!(event_id, event_data, "Received hpqBEvnt WMI event");
-                    if event_data == OMEN_KEY_EVENT_DATA {
-                        on_press();
+                return;
+            };
+
+            backoff = std::time::Duration::from_secs(2);
+            tracing::info!("Started WMI hpqBEvnt Omen key listener");
+            while !stop_flag.load(Ordering::SeqCst) {
+                let mut row: [Option<IWbemClassObject>; 1] = [None];
+                let mut returned = 0u32;
+                let hr = unsafe { enumerator.Next(1000, &mut row, &mut returned) };
+                if hr.0 == WBEM_E_ACCESS_DENIED.0 {
+                    tracing::warn!("Omen key listener stopped due to WMI access denied");
+                    return;
+                }
+                if hr.is_err() {
+                    tracing::warn!(
+                        hresult = format_args!("0x{:08X}", hr.0 as u32),
+                        "Omen key WMI listener disconnected; will retry"
+                    );
+                    break;
+                }
+                if returned > 0 {
+                    if let Some(obj) = row[0].take() {
+                        let event_id = get_u32(&obj, "EventID").unwrap_or(0);
+                        let event_data = get_u32(&obj, "EventData").unwrap_or(0);
+                        tracing::debug!(event_id, event_data, "Received hpqBEvnt WMI event");
+                        if event_data == OMEN_KEY_EVENT_DATA {
+                            on_press();
+                        }
                     }
                 }
             }
@@ -215,7 +237,7 @@ where
 
     let join = thread::spawn(move || {
         let tid = unsafe { GetCurrentThreadId() };
-        let reg_res = unsafe { RegisterHotKey(HWND::default(), 1, mods, vk) };
+        let reg_res = unsafe { RegisterHotKey(HWND::default(), 1, mods | MOD_NOREPEAT, vk) };
         if let Err(err) = reg_res {
             let classified =
                 classify_register_hotkey_hresult(&spec_owned, err.code().0, err.to_string());
@@ -272,6 +294,7 @@ mod tests {
 
         assert!(parse_shortcut("Ctrl+").is_err());
         assert!(parse_shortcut("Ctrl+InvalidKeyName").is_err());
+        assert!(parse_shortcut("Ctrl+A+B").is_err());
     }
 
     #[test]

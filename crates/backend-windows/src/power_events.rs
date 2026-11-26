@@ -1,5 +1,5 @@
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
@@ -50,15 +50,11 @@ impl PowerEventHandle {
 
 impl Drop for PowerEventHandle {
     fn drop(&mut self) {
-        if let Some(tid) = self.thread_id.take() {
-            unsafe {
-                let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
-            }
-        }
+        self.signal_and_join();
     }
 }
 
-type PowerCallback = Box<dyn Fn(SystemPowerEvent) + Send + 'static>;
+type PowerCallback = Arc<dyn Fn(SystemPowerEvent) + Send + Sync + 'static>;
 
 static POWER_CALLBACK: OnceLock<Mutex<Option<PowerCallback>>> = OnceLock::new();
 static LAST_RESUME_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
@@ -101,10 +97,9 @@ fn dispatch_power_event(ev: SystemPowerEvent) {
     let Some(lock) = POWER_CALLBACK.get() else {
         return;
     };
-    if let Ok(guard) = lock.lock() {
-        if let Some(cb) = guard.as_ref() {
-            cb(ev);
-        }
+    let cb = lock.lock().ok().and_then(|guard| guard.clone());
+    if let Some(cb) = cb {
+        cb(ev);
     }
 }
 
@@ -134,11 +129,11 @@ unsafe extern "system" fn power_wnd_proc(
 /// Hibernate, Resume, and Windows Shutdown/Logoff broadcasts.
 pub fn spawn_power_event_listener<F>(on_event: F) -> PowerEventHandle
 where
-    F: Fn(SystemPowerEvent) + Send + 'static,
+    F: Fn(SystemPowerEvent) + Send + Sync + 'static,
 {
     let cb_slot = POWER_CALLBACK.get_or_init(|| Mutex::new(None));
     if let Ok(mut guard) = cb_slot.lock() {
-        *guard = Some(Box::new(on_event));
+        *guard = Some(Arc::new(on_event));
     }
 
     let (tid_tx, tid_rx) = mpsc::channel::<Option<u32>>();

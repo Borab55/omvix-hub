@@ -291,7 +291,11 @@ pub fn install_or_update_gui_copy(source_exe: &Path) -> Result<PathBuf> {
             return Ok(target);
         }
         let backup_path = if old_base.exists() {
-            dir.join(format!("omvix-hub.exe.old.{}", std::process::id()))
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            dir.join(format!("omvix-hub.exe.old.{}.{nanos}", std::process::id()))
         } else {
             old_base
         };

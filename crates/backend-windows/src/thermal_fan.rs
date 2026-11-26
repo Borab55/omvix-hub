@@ -17,6 +17,7 @@ struct ThermalFanState {
     gpu_manual_speed_pct: u8,
     allow_zero_rpm: bool,
     max_fan_levels: (u8, u8),
+    max_fan_levels_loaded: bool,
 }
 
 /// Restores BIOS automatic fan control over a brand-new WMI connection without acquiring any cached
@@ -56,6 +57,7 @@ pub fn restore_fan_auto_fresh_wmi() -> Result<()> {
 /// Windows HP WMI BIOS thermal profile and fan controller.
 pub struct WindowsThermalFanBackend {
     state: Mutex<ThermalFanState>,
+    wmi_op_lock: Mutex<()>,
 }
 
 impl Default for WindowsThermalFanBackend {
@@ -75,7 +77,9 @@ impl WindowsThermalFanBackend {
                 gpu_manual_speed_pct: 50,
                 allow_zero_rpm: false,
                 max_fan_levels: (DEFAULT_MAX_FAN_LEVEL, DEFAULT_MAX_FAN_LEVEL),
+                max_fan_levels_loaded: false,
             }),
+            wmi_op_lock: Mutex::new(()),
         }
     }
 
@@ -103,8 +107,12 @@ impl WindowsThermalFanBackend {
         gpu_speed_pct: Option<u8>,
         allow_zero_rpm: bool,
     ) -> Result<()> {
+        let _wmi_op = self
+            .wmi_op_lock
+            .lock()
+            .map_err(|_| OmvixError::Config("Thermal WMI operation mutex poisoned".to_string()))?;
         let scheme = self.detect_scheme();
-        let (perf_mode, fallback_cpu, fallback_gpu) = self
+        let (perf_mode, fallback_cpu, fallback_gpu, cached_max_levels, max_loaded) = self
             .state
             .lock()
             .map(|g| {
@@ -112,14 +120,26 @@ impl WindowsThermalFanBackend {
                     g.performance_mode,
                     g.manual_speed_pct,
                     g.gpu_manual_speed_pct,
+                    g.max_fan_levels,
+                    g.max_fan_levels_loaded,
                 )
             })
-            .unwrap_or((PerformanceMode::Balanced, 50, 50));
+            .unwrap_or((
+                PerformanceMode::Balanced,
+                50,
+                50,
+                (DEFAULT_MAX_FAN_LEVEL, DEFAULT_MAX_FAN_LEVEL),
+                false,
+            ));
         let eff_cpu = cpu_speed_pct.or(Some(fallback_cpu));
         let eff_gpu = gpu_speed_pct.or(Some(fallback_gpu));
 
-        let max_levels = HpWmiBios::with_cached(|bios| {
-            let max_levels = Self::query_max_fan_levels(bios);
+        let (max_levels, loaded_now) = HpWmiBios::with_cached(|bios| {
+            let (max_levels, loaded_now) = if max_loaded {
+                (cached_max_levels, true)
+            } else {
+                Self::query_max_fan_levels(bios)
+            };
             Self::apply_fan_commands(
                 bios,
                 mode,
@@ -130,12 +150,13 @@ impl WindowsThermalFanBackend {
                 scheme,
                 perf_mode,
             )?;
-            Ok(max_levels)
+            Ok((max_levels, loaded_now))
         })?;
 
         if let Ok(mut guard) = self.state.lock() {
             guard.fan_mode = mode;
             guard.max_fan_levels = max_levels;
+            guard.max_fan_levels_loaded = loaded_now;
             guard.allow_zero_rpm = allow_zero_rpm;
             if let Some(pct) = cpu_speed_pct {
                 guard.manual_speed_pct = pct.clamp(0, 100);
@@ -157,6 +178,10 @@ impl WindowsThermalFanBackend {
 
     /// Refreshes the HP BIOS 120-second user-defined fan state timer with the latest cool hint.
     pub fn keep_alive_tick_with_cool_hint(&self, allow_zero_rpm: bool) -> Result<()> {
+        let _wmi_op = self
+            .wmi_op_lock
+            .lock()
+            .map_err(|_| OmvixError::Config("Thermal WMI operation mutex poisoned".to_string()))?;
         let scheme = self.detect_scheme();
         let (fan_mode, manual_speed_pct, gpu_manual_speed_pct, max_levels, perf_mode) = {
             let mut guard = self
@@ -215,16 +240,16 @@ impl WindowsThermalFanBackend {
         detected
     }
 
-    fn query_max_fan_levels(bios: &HpWmiBios) -> (u8, u8) {
+    fn query_max_fan_levels(bios: &HpWmiBios) -> ((u8, u8), bool) {
         if let Ok(resp) = bios.execute(0x20008, 0x2F, &[0u8; 4], OutputSize::Size128) {
             if resp.return_code == 0 {
                 let parsed = HpWmiBios::parse_max_fan_levels_from_table(&resp.data);
                 let f1 = parsed.first().copied().unwrap_or(DEFAULT_MAX_FAN_LEVEL);
                 let f2 = parsed.get(1).copied().unwrap_or(f1);
-                return (f1, f2);
+                return ((f1, f2), !parsed.is_empty());
             }
         }
-        (DEFAULT_MAX_FAN_LEVEL, DEFAULT_MAX_FAN_LEVEL)
+        ((DEFAULT_MAX_FAN_LEVEL, DEFAULT_MAX_FAN_LEVEL), false)
     }
 
     fn write_bios_checked(
@@ -286,6 +311,10 @@ impl WindowsThermalFanBackend {
 
 impl ThermalFanBackend for WindowsThermalFanBackend {
     fn set_performance_mode(&self, mode: PerformanceMode) -> Result<()> {
+        let _wmi_op = self
+            .wmi_op_lock
+            .lock()
+            .map_err(|_| OmvixError::Config("Thermal WMI operation mutex poisoned".to_string()))?;
         let scheme = self.detect_scheme();
         let mode_byte = thermal_profile_byte(scheme, mode);
         let fan_mode = self

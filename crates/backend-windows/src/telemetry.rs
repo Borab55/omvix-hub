@@ -373,6 +373,10 @@ impl GpuSampleSmoother {
         }
     }
 
+    pub fn cached_name(&self) -> Option<&str> {
+        self.cached_name.as_deref()
+    }
+
     pub fn recommended_nvml_poll_interval(&self, visible: bool) -> Duration {
         if !visible && self.consecutive_idle_polls >= 3 {
             Duration::from_secs(10)
@@ -479,6 +483,12 @@ impl GpuSampleSmoother {
 /// Fast (< 0.1 ms) Win32 battery charge percentage lookup without slow WMI queries.
 pub fn read_fast_battery_pct() -> Option<u8> {
     WindowsTelemetryBackend::read_win32_power().1
+}
+
+/// Fast (< 0.1 ms) Win32 AC power and battery charge percentage lookup.
+pub fn read_fast_battery_ac_and_pct() -> (Option<bool>, Option<u8>) {
+    let (ac, pct, _) = WindowsTelemetryBackend::read_win32_power();
+    (ac, pct)
 }
 
 /// Dual-tier Windows telemetry provider:
@@ -818,11 +828,12 @@ impl WindowsTelemetryBackend {
                     guard.pawnio_last_attempt,
                     Duration::from_secs(30),
                 )
-                && crate::pawnio::has_intel_msr_module()
             {
                 guard.pawnio_attempts = guard.pawnio_attempts.saturating_add(1);
                 guard.pawnio_last_attempt = Some(Instant::now());
-                guard.pawnio = PawnIoCpuTempReader::open();
+                if crate::pawnio::has_intel_msr_module() {
+                    guard.pawnio = PawnIoCpuTempReader::open();
+                }
             }
             let cpu_temp_c = guard.pawnio.as_mut().and_then(|p| p.read_package_temp_c());
 
@@ -882,59 +893,87 @@ impl WindowsTelemetryBackend {
                             guard.gpu_smoother.on_nvml_paused(false)
                         } else {
                             let mut raw = RawGpuSample::default();
+                            let cached_gpu_name = guard.gpu_smoother.cached_name().is_some();
+                            let mut nvml_lost = false;
                             if let Some(nvml) = &guard.nvml {
-                                if let Ok(device) = nvml.device_by_index(0) {
-                                    raw.name = device.name().ok();
-                                    raw.temp_c = device
-                                        .temperature(TemperatureSensor::Gpu)
-                                        .ok()
-                                        .and_then(|t| sanitize_nvml_temp_c(t as f32));
-                                    raw.usage_pct = match device.utilization_rates() {
-                                        Ok(u) => sanitize_nvml_usage_pct(u.gpu),
-                                        Err(err) => {
-                                            tracing::debug!(
-                                                "NVML utilization_rates unavailable: {err}"
-                                            );
-                                            None
+                                match nvml.device_by_index(0) {
+                                    Ok(device) => {
+                                        if !cached_gpu_name {
+                                            raw.name = device.name().ok();
                                         }
-                                    };
-                                    raw.power_limit_w = device
-                                        .enforced_power_limit()
-                                        .or_else(|_| device.power_management_limit())
-                                        .ok()
-                                        .map(|mw| mw as f32 / 1000.0)
-                                        .filter(|w| w.is_finite() && (10.0..=600.0).contains(w));
-                                    raw.power_w = device.power_usage().ok().and_then(|mw| {
-                                        let raw_w = mw as f32 / 1000.0;
-                                        let valid = sanitize_nvml_power_w(raw_w, raw.power_limit_w);
-                                        if valid.is_none() {
-                                            tracing::debug!(
-                                                raw_w,
-                                                power_limit_w = ?raw.power_limit_w,
-                                                "Discarded implausible NVML GPU power sample"
-                                            );
+                                        raw.temp_c = device
+                                            .temperature(TemperatureSensor::Gpu)
+                                            .ok()
+                                            .and_then(|t| sanitize_nvml_temp_c(t as f32));
+                                        raw.usage_pct = match device.utilization_rates() {
+                                            Ok(u) => sanitize_nvml_usage_pct(u.gpu),
+                                            Err(err) => {
+                                                tracing::debug!(
+                                                    "NVML utilization_rates unavailable: {err}"
+                                                );
+                                                None
+                                            }
+                                        };
+                                        raw.power_limit_w = device
+                                            .enforced_power_limit()
+                                            .or_else(|_| device.power_management_limit())
+                                            .ok()
+                                            .map(|mw| mw as f32 / 1000.0)
+                                            .filter(|w| {
+                                                w.is_finite() && (10.0..=600.0).contains(w)
+                                            });
+                                        raw.power_w = device.power_usage().ok().and_then(|mw| {
+                                            let raw_w = mw as f32 / 1000.0;
+                                            let valid =
+                                                sanitize_nvml_power_w(raw_w, raw.power_limit_w);
+                                            if valid.is_none() {
+                                                tracing::debug!(
+                                                    raw_w,
+                                                    power_limit_w = ?raw.power_limit_w,
+                                                    "Discarded implausible NVML GPU power sample"
+                                                );
+                                            }
+                                            valid
+                                        });
+                                        raw.clock_mhz = device.clock_info(Clock::Graphics).ok();
+                                        raw.mem_clock_mhz = device.clock_info(Clock::Memory).ok();
+                                        if let Ok(mem) = device.memory_info() {
+                                            raw.mem_used_mb =
+                                                Some((mem.used / (1024 * 1024)) as u32);
+                                            raw.mem_total_mb =
+                                                Some((mem.total / (1024 * 1024)) as u32);
                                         }
-                                        valid
-                                    });
-                                    raw.clock_mhz = device.clock_info(Clock::Graphics).ok();
-                                    raw.mem_clock_mhz = device.clock_info(Clock::Memory).ok();
-                                    if let Ok(mem) = device.memory_info() {
-                                        raw.mem_used_mb = Some((mem.used / (1024 * 1024)) as u32);
-                                        raw.mem_total_mb = Some((mem.total / (1024 * 1024)) as u32);
+                                        raw.pstate = device
+                                            .performance_state()
+                                            .ok()
+                                            .map(|p| format_pstate(&p));
+                                        if let Ok(reasons) = device.current_throttle_reasons() {
+                                            let (reason, is_thermal) = filter_throttle_reasons(
+                                                reasons,
+                                                raw.usage_pct,
+                                                raw.power_w,
+                                                raw.temp_c,
+                                            );
+                                            raw.throttle_reason = reason;
+                                            raw.throttle_is_thermal = is_thermal;
+                                        }
                                     }
-                                    raw.pstate =
-                                        device.performance_state().ok().map(|p| format_pstate(&p));
-                                    if let Ok(reasons) = device.current_throttle_reasons() {
-                                        let (reason, is_thermal) = filter_throttle_reasons(
-                                            reasons,
-                                            raw.usage_pct,
-                                            raw.power_w,
-                                            raw.temp_c,
-                                        );
-                                        raw.throttle_reason = reason;
-                                        raw.throttle_is_thermal = is_thermal;
+                                    Err(err) => {
+                                        tracing::debug!("NVML device_by_index(0) error: {err}");
+                                        if matches!(
+                                            err,
+                                            nvml_wrapper::error::NvmlError::GpuLost
+                                                | nvml_wrapper::error::NvmlError::Uninitialized
+                                        ) {
+                                            nvml_lost = true;
+                                        }
                                     }
                                 }
+                            }
+                            if nvml_lost {
+                                guard.nvml = None;
+                                guard.nvml_attempts = 0;
+                                guard.nvml_last_attempt = Some(Instant::now());
                             }
                             guard.last_nvml_poll = Some(Instant::now());
                             guard.gpu_smoother.on_awake_sample(raw)
@@ -946,6 +985,9 @@ impl WindowsTelemetryBackend {
             let need_ec_poll = guard
                 .last_ec_poll
                 .is_none_or(|t| t.elapsed() >= EC_POLL_INTERVAL);
+            if need_ec_poll {
+                guard.last_ec_poll = Some(Instant::now());
+            }
 
             (
                 cpu_usage_pct,
