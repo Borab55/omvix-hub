@@ -208,18 +208,15 @@ pub fn render(
                 let del_tip = i18n.t("settings.delete_theme_tooltip");
                 for (idx, saved) in cfg.general.custom_themes.iter().enumerate() {
                     let active = cfg.general.custom_theme == *saved;
-                    let chip_action = ui
-                        .push_id(("inline_saved_theme", idx), |ui| {
-                            saved_theme_chip(
-                                ui,
-                                &saved.name,
-                                rgb(saved.accent),
-                                active,
-                                &del_tip,
-                                &theme_snapshot,
-                            )
-                        })
-                        .inner;
+                    let chip_action = saved_theme_chip(
+                        ui,
+                        ("inline_saved_theme", idx),
+                        &saved.name,
+                        rgb(saved.accent),
+                        active,
+                        &del_tip,
+                        &theme_snapshot,
+                    );
                     match chip_action {
                         SavedChipAction::Apply => apply_saved = Some(saved.clone()),
                         SavedChipAction::Delete => delete_saved = Some(idx),

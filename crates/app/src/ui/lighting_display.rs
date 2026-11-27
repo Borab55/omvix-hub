@@ -30,6 +30,9 @@ pub fn render(
 
     // Keyboard Backlight & RGB Card
     card_frame(t).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         ui.horizontal_wrapped(|ui| {
             if section_toggle_button(
                 ui,
@@ -119,6 +122,7 @@ pub fn render(
 
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                 ui.label(i18n.t("lighting.presets"));
                 for preset in LightingProfile::builtins() {
                     let selected = is_lighting_profile_active(cfg, &preset);
@@ -233,6 +237,9 @@ pub fn render(
 
     // Display Refresh Rate Card
     card_frame(t).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("display.refresh_rate"), t);
         if let Some(disp) = &st.display_mode {
             ui.label(format!(

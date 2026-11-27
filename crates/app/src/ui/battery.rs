@@ -263,6 +263,9 @@ pub fn render(
 
     // Custom User Profiles Card
     card_frame(t).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("battery.custom_profiles"), t);
         ui.add_space(4.0);
 
