@@ -1,5 +1,8 @@
 use crate::boards::lookup_board;
-use crate::models::{FanMode, PerformanceMode, ThermalProfileScheme};
+use crate::models::{
+    FanCurve, FanMode, PerformanceMode, ThermalProfileScheme, FAN_CURVE_SAFETY_FLOOR_SPEED_PCT,
+    FAN_CURVE_SAFETY_FLOOR_TEMP_C,
+};
 
 /// Default maximum WMI fan level step when firmware `FanMaxGet` (0x26) is unavailable.
 pub const DEFAULT_MAX_FAN_LEVEL: u8 = 55;
@@ -82,6 +85,342 @@ pub fn smart_manual_wmi_level(speed_pct: u8, max_level: u8, allow_zero_rpm: bool
     } else {
         safe_manual_wmi_level(speed_pct, max_level)
     }
+}
+
+/// Fan curve smoothing & slew-rate constants.
+pub const CURVE_DT_MIN_SECS: f32 = 0.05;
+pub const CURVE_DT_MAX_SECS: f32 = 5.0;
+pub const CURVE_TAU_DOWN_SECS: f32 = 7.0;
+pub const CURVE_CPU_TAU_UP_LOW_POWER_SECS: f32 = 5.5;
+pub const CURVE_CPU_TAU_UP_HIGH_LOAD_SECS: f32 = 2.2;
+pub const CURVE_CPU_TAU_UP_DEFAULT_SECS: f32 = 3.2;
+pub const CURVE_GPU_TAU_UP_SLEEPING_SECS: f32 = 6.0;
+pub const CURVE_GPU_TAU_UP_NORMAL_SECS: f32 = 3.0;
+pub const CURVE_GPU_TAU_UP_HOT_SECS: f32 = 2.0;
+pub const CURVE_MAX_RAMP_UP_PCT_PER_2S: f32 = 7.0;
+pub const CURVE_MAX_RAMP_DOWN_PCT_PER_2S: f32 = 3.0;
+pub const CURVE_CPU_RAMP_BYPASS_RAW_C: f32 = 85.0;
+pub const CURVE_GPU_RAMP_BYPASS_RAW_C: f32 = 82.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveChannel {
+    Cpu,
+    Gpu,
+}
+
+/// Time-step-independent asymmetric EMA + symmetric deadband + asymmetric slew-rate limiter
+/// for smooth, acoustic-friendly custom fan curves.
+#[derive(Debug, Clone)]
+pub struct CurveSmoother {
+    channel: CurveChannel,
+    ema_temp_c: Option<f32>,
+    anchor_temp_c: Option<f32>,
+    held_target_pct: Option<f32>,
+    current_speed_pct: f32,
+    seeded: bool,
+}
+
+impl CurveSmoother {
+    pub fn new(channel: CurveChannel) -> Self {
+        Self {
+            channel,
+            ema_temp_c: None,
+            anchor_temp_c: None,
+            held_target_pct: None,
+            current_speed_pct: 40.0,
+            seeded: false,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.ema_temp_c = None;
+        self.anchor_temp_c = None;
+        self.held_target_pct = None;
+        self.current_speed_pct = 40.0;
+        self.seeded = false;
+    }
+
+    pub fn is_seeded(&self) -> bool {
+        self.seeded
+    }
+
+    pub fn filtered_temp_c(&self) -> Option<f32> {
+        self.ema_temp_c
+    }
+
+    pub fn current_speed_pct(&self) -> u8 {
+        self.current_speed_pct.round().clamp(0.0, 100.0) as u8
+    }
+
+    /// Clears the deadband anchor when the user edits curve points while preserving the thermal EMA
+    /// and current physical fan speed baseline for a smooth transition.
+    pub fn clear_deadband_anchor(&mut self) {
+        self.anchor_temp_c = None;
+        self.held_target_pct = None;
+    }
+
+    /// Seeds the smoother bumplessly from the current physical fan speed (or initial curve point)
+    /// so entering `CustomCurve` / waking from sleep never slams fans from 0%.
+    pub fn seed_bumpless(&mut self, temp_c: Option<f32>, speed_pct: u8, reset_ema: bool) {
+        if reset_ema || self.ema_temp_c.is_none() {
+            self.ema_temp_c = temp_c.filter(|t| t.is_finite());
+        }
+        self.current_speed_pct = f32::from(speed_pct.clamp(0, 100));
+        self.anchor_temp_c = None;
+        self.held_target_pct = None;
+        self.seeded = true;
+    }
+
+    fn select_tau_secs(
+        &self,
+        raw: f32,
+        prev_ema: f32,
+        cpu_power_w: Option<f32>,
+        chassis_temp_c: Option<f32>,
+        gpu_sleeping: bool,
+    ) -> f32 {
+        if raw < prev_ema {
+            return CURVE_TAU_DOWN_SECS;
+        }
+        match self.channel {
+            CurveChannel::Cpu => {
+                let pwr = cpu_power_w.filter(|w| w.is_finite());
+                let ch = chassis_temp_c.filter(|c| c.is_finite());
+                if raw >= 82.0 || pwr.is_some_and(|w| w >= 50.0) {
+                    CURVE_CPU_TAU_UP_HIGH_LOAD_SECS
+                } else if ch.is_none_or(|c| c < 42.0) {
+                    match pwr {
+                        Some(w) if w < 28.0 => CURVE_CPU_TAU_UP_LOW_POWER_SECS,
+                        Some(w) => {
+                            let ratio = ((w - 28.0) / (50.0 - 28.0)).clamp(0.0, 1.0);
+                            CURVE_CPU_TAU_UP_LOW_POWER_SECS
+                                + ratio
+                                    * (CURVE_CPU_TAU_UP_HIGH_LOAD_SECS
+                                        - CURVE_CPU_TAU_UP_LOW_POWER_SECS)
+                        }
+                        None => CURVE_CPU_TAU_UP_DEFAULT_SECS,
+                    }
+                } else {
+                    CURVE_CPU_TAU_UP_DEFAULT_SECS
+                }
+            }
+            CurveChannel::Gpu => {
+                if gpu_sleeping {
+                    CURVE_GPU_TAU_UP_SLEEPING_SECS
+                } else if raw >= 78.0 {
+                    CURVE_GPU_TAU_UP_HOT_SECS
+                } else {
+                    CURVE_GPU_TAU_UP_NORMAL_SECS
+                }
+            }
+        }
+    }
+
+    /// Updates the asymmetric time-constant EMA temperature filter and returns the smoothed temp.
+    pub fn update_temp(
+        &mut self,
+        raw_temp_c: Option<f32>,
+        cpu_power_w: Option<f32>,
+        chassis_temp_c: Option<f32>,
+        gpu_sleeping: bool,
+        dt_secs: f32,
+    ) -> Option<f32> {
+        let Some(raw) = raw_temp_c.filter(|t| t.is_finite()) else {
+            return self.ema_temp_c;
+        };
+        let Some(prev_ema) = self.ema_temp_c else {
+            self.ema_temp_c = Some(raw);
+            return self.ema_temp_c;
+        };
+        let dt = dt_secs.clamp(CURVE_DT_MIN_SECS, CURVE_DT_MAX_SECS);
+        let tau = self.select_tau_secs(raw, prev_ema, cpu_power_w, chassis_temp_c, gpu_sleeping);
+        let alpha = 1.0 - (-dt / tau).exp();
+        let next = prev_ema + alpha * (raw - prev_ema);
+        self.ema_temp_c = Some(next);
+        self.ema_temp_c
+    }
+
+    /// Evaluates one fan-curve control step using the smoothed temperature, symmetric deadband
+    /// around the last accepted anchor temperature (avoiding peak lock), and asymmetric slew limits.
+    pub fn evaluate_step(
+        &mut self,
+        curve: &FanCurve,
+        raw_temp_c: Option<f32>,
+        gpu_sleeping: bool,
+        step_dt_secs: f32,
+    ) -> u8 {
+        let raw_finite = raw_temp_c.filter(|t| t.is_finite());
+        let Some(filtered) = self.ema_temp_c.or(raw_finite) else {
+            return self.current_speed_pct();
+        };
+
+        let bypass = match self.channel {
+            CurveChannel::Cpu => raw_finite.is_some_and(|t| t >= CURVE_CPU_RAMP_BYPASS_RAW_C),
+            CurveChannel::Gpu => {
+                !gpu_sleeping && raw_finite.is_some_and(|t| t >= CURVE_GPU_RAMP_BYPASS_RAW_C)
+            }
+        };
+        if bypass {
+            let eval_temp = raw_finite.map_or(filtered, |r| r.max(filtered));
+            let target = f32::from(curve.interpolate(eval_temp)).max(self.current_speed_pct);
+            self.current_speed_pct = target;
+            self.anchor_temp_c = Some(filtered);
+            self.held_target_pct = Some(target);
+            self.seeded = true;
+            return self.current_speed_pct();
+        }
+
+        let mut curve_target = f32::from(curve.interpolate(filtered));
+        let raw_floor_applies = match self.channel {
+            CurveChannel::Cpu => {
+                raw_finite.is_some_and(|t| t >= FAN_CURVE_SAFETY_FLOOR_TEMP_C as f32)
+            }
+            CurveChannel::Gpu => {
+                !gpu_sleeping
+                    && raw_finite.is_some_and(|t| t >= FAN_CURVE_SAFETY_FLOOR_TEMP_C as f32)
+            }
+        };
+        if raw_floor_applies {
+            curve_target = curve_target.max(f32::from(FAN_CURVE_SAFETY_FLOOR_SPEED_PCT));
+        }
+
+        let half_hyst = (f32::from(curve.hysteresis_c.clamp(1, 10)) * 0.5).max(0.5);
+        let desired_target = match (self.anchor_temp_c, self.held_target_pct) {
+            (Some(anchor), Some(held))
+                if (filtered - anchor).abs() < half_hyst
+                    && curve_target > 0.0
+                    && curve_target < 100.0 =>
+            {
+                held
+            }
+            _ => {
+                self.anchor_temp_c = Some(filtered);
+                self.held_target_pct = Some(curve_target);
+                curve_target
+            }
+        };
+
+        let step_dt = step_dt_secs.clamp(0.5, 5.0);
+        if !self.seeded {
+            self.current_speed_pct = desired_target;
+            self.seeded = true;
+        } else if desired_target > self.current_speed_pct {
+            let max_up = (CURVE_MAX_RAMP_UP_PCT_PER_2S * (step_dt / 2.0)).clamp(3.0, 20.0);
+            self.current_speed_pct = (self.current_speed_pct + max_up).min(desired_target);
+        } else if desired_target < self.current_speed_pct {
+            let max_down = (CURVE_MAX_RAMP_DOWN_PCT_PER_2S * (step_dt / 2.0)).clamp(1.0, 10.0);
+            self.current_speed_pct = (self.current_speed_pct - max_down).max(desired_target);
+        }
+
+        self.current_speed_pct()
+    }
+}
+
+/// Dual-threshold Schmitt trigger preventing rapid `0 RPM <-> 1800 RPM` toggling near 65°C.
+#[derive(Debug, Clone, Default)]
+pub struct ZeroRpmCoolLatch {
+    initialized: bool,
+    allow_zero_rpm: bool,
+}
+
+impl ZeroRpmCoolLatch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&mut self) {
+        self.initialized = false;
+        self.allow_zero_rpm = false;
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    pub fn allow_zero_rpm(&self) -> bool {
+        self.allow_zero_rpm
+    }
+
+    pub fn evaluate(
+        &mut self,
+        filtered_cpu_c: Option<f32>,
+        raw_cpu_c: Option<f32>,
+        filtered_gpu_c: Option<f32>,
+        raw_gpu_c: Option<f32>,
+        chassis_c: Option<f32>,
+    ) -> bool {
+        let f_cpu = filtered_cpu_c.filter(|t| t.is_finite());
+        let r_cpu = raw_cpu_c.filter(|t| t.is_finite());
+        let f_gpu = filtered_gpu_c.filter(|t| t.is_finite());
+        let r_gpu = raw_gpu_c.filter(|t| t.is_finite());
+        let ch = chassis_c.filter(|t| t.is_finite());
+
+        if f_cpu.is_none() && r_cpu.is_none() && f_gpu.is_none() && r_gpu.is_none() && ch.is_none()
+        {
+            self.initialized = true;
+            self.allow_zero_rpm = false;
+            return false;
+        }
+
+        let hot_disable = f_cpu.is_some_and(|t| t >= 68.0)
+            || r_cpu.is_some_and(|t| t >= 75.0)
+            || f_gpu.is_some_and(|t| t >= 62.0)
+            || r_gpu.is_some_and(|t| t >= 68.0)
+            || ch.is_some_and(|t| t >= 47.0);
+
+        if !self.initialized {
+            self.initialized = true;
+            self.allow_zero_rpm =
+                !hot_disable && is_system_cool_for_zero_rpm(f_cpu.or(r_cpu), f_gpu.or(r_gpu), ch);
+            return self.allow_zero_rpm;
+        }
+
+        if hot_disable {
+            self.allow_zero_rpm = false;
+        } else if !self.allow_zero_rpm {
+            let cool_re_enable = f_cpu.is_none_or(|t| t <= 60.0)
+                && f_gpu.is_none_or(|t| t <= 56.0)
+                && ch.is_none_or(|t| t <= 44.0)
+                && r_cpu.is_none_or(|t| t < 75.0)
+                && r_gpu.is_none_or(|t| t < 68.0);
+            if cool_re_enable {
+                self.allow_zero_rpm = true;
+            }
+        }
+
+        self.allow_zero_rpm
+    }
+}
+
+/// Estimates current fan duty percentage (`0..=100`) from live RPM & `FanMaxGet` RPM for bumpless seeding.
+pub fn estimate_fan_speed_pct_from_rpm(rpm: Option<u32>, max_rpm: Option<u32>) -> Option<u8> {
+    let r = rpm?;
+    let m = max_rpm.filter(|&m| m >= 1000)?;
+    let pct = ((r as f32 / m as f32) * 100.0).round().clamp(0.0, 100.0) as u8;
+    Some(pct)
+}
+
+/// Returns `true` when writing `next_pct` materially changes the hardware WMI step (`>= 2%` and
+/// distinct `0x2E` level), hits an endpoint (`0%` or `100%`), or changes the `allow_zero_rpm` latch.
+pub fn fan_channel_exceeds_wmi_deadband(
+    last_written_pct: Option<u8>,
+    next_pct: u8,
+    max_level: u8,
+    last_allow_zero_rpm: Option<bool>,
+    next_allow_zero_rpm: bool,
+) -> bool {
+    let Some(prev) = last_written_pct else {
+        return true;
+    };
+    if last_allow_zero_rpm != Some(next_allow_zero_rpm) {
+        return true;
+    }
+    if next_pct == 0 || next_pct == 100 {
+        return next_pct != prev;
+    }
+    smart_manual_wmi_level(prev, max_level, next_allow_zero_rpm)
+        != smart_manual_wmi_level(next_pct, max_level, next_allow_zero_rpm)
+        && next_pct.abs_diff(prev) >= 2
 }
 
 /// Maps HP EC chassis / IR sensor (`0x23`) readings to conservative CPU-curve thermal demand (°C).
@@ -1051,5 +1390,183 @@ mod tests {
             ),
             ThermalGuardDecision::NoChange
         );
+    }
+
+    #[test]
+    fn curve_smoother_suppresses_low_power_turbo_spike_and_recovers() {
+        let mut s = CurveSmoother::new(CurveChannel::Cpu);
+        let curve = FanCurve::preset_balanced();
+        s.seed_bumpless(Some(55.0), curve.interpolate(55.0), true);
+        let baseline = s.current_speed_pct();
+
+        // 2-second 18W single-core Turbo spike: 55 -> 78 -> 78 -> 55
+        s.update_temp(Some(78.0), Some(18.0), Some(38.0), false, 1.0);
+        let s1 = s.evaluate_step(&curve, Some(78.0), false, 2.0);
+        assert!(
+            s1 <= baseline + 7,
+            "2s low-watt spike must stay slew-limited (got {s1}% vs baseline {baseline}%)"
+        );
+
+        s.update_temp(Some(78.0), Some(18.0), Some(38.0), false, 1.0);
+        s.evaluate_step(&curve, Some(78.0), false, 2.0);
+        assert!(
+            s.filtered_temp_c().unwrap() < 64.0,
+            "EMA at 18W should remain well below raw 78C: {:?}",
+            s.filtered_temp_c()
+        );
+
+        // Return to 55C: must ramp down smoothly without getting stuck at peak
+        for _ in 0..20 {
+            s.update_temp(Some(55.0), Some(16.0), Some(37.0), false, 2.0);
+            s.evaluate_step(&curve, Some(55.0), false, 2.0);
+        }
+        assert!(
+            s.current_speed_pct() <= baseline + 2,
+            "fan speed must return to baseline {baseline}%, got {}%",
+            s.current_speed_pct()
+        );
+    }
+
+    #[test]
+    fn curve_smoother_responds_quickly_to_high_watt_load_and_bypasses_above_85c() {
+        let mut s = CurveSmoother::new(CurveChannel::Cpu);
+        let curve = FanCurve::preset_balanced();
+        s.seed_bumpless(Some(55.0), curve.interpolate(55.0), true);
+
+        for _ in 0..8 {
+            s.update_temp(Some(80.0), Some(65.0), Some(43.0), false, 2.0);
+            s.evaluate_step(&curve, Some(80.0), false, 2.0);
+        }
+        assert!(
+            s.current_speed_pct() >= curve.interpolate(78.0),
+            "sustained 65W load should ramp cleanly, got {}%",
+            s.current_speed_pct()
+        );
+
+        // Raw CPU >= 85C immediately bypasses slew-rate limits
+        let emergency_pct = s.evaluate_step(&curve, Some(88.0), false, 2.0);
+        assert!(emergency_pct >= curve.interpolate(88.0));
+
+        // Raw GPU >= 82C while awake bypasses GPU slew-rate limits
+        let mut gs = CurveSmoother::new(CurveChannel::Gpu);
+        gs.seed_bumpless(Some(55.0), curve.interpolate(55.0), true);
+        let gpu_emerg = gs.evaluate_step(&curve, Some(83.0), false, 2.0);
+        assert_eq!(gpu_emerg, curve.interpolate(83.0));
+    }
+
+    #[test]
+    fn curve_smoother_deadband_avoids_peak_lock() {
+        let mut s = CurveSmoother::new(CurveChannel::Cpu);
+        let mut curve = FanCurve::preset_balanced();
+        curve.hysteresis_c = 4; // half_hyst = 2.0C
+        s.seed_bumpless(Some(60.0), curve.interpolate(60.0), true);
+        let speed_60 = curve.interpolate(60.0);
+        assert_eq!(s.evaluate_step(&curve, Some(60.0), false, 2.0), speed_60);
+
+        // Rise to 64C -> commits new anchor at 64C
+        for _ in 0..10 {
+            s.update_temp(Some(64.0), Some(60.0), Some(43.0), false, 2.0);
+            s.evaluate_step(&curve, Some(64.0), false, 2.0);
+        }
+        assert!(s.current_speed_pct() > speed_60);
+
+        // Cool back to 62C (< 64 - 2) and then 60C -> must release back down to 60C target
+        for _ in 0..25 {
+            s.update_temp(Some(60.0), Some(15.0), Some(38.0), false, 2.0);
+            s.evaluate_step(&curve, Some(60.0), false, 2.0);
+        }
+        assert_eq!(s.current_speed_pct(), speed_60);
+    }
+
+    #[test]
+    fn gpu_smoother_handles_optimus_sleep_transitions() {
+        let mut gs = CurveSmoother::new(CurveChannel::Gpu);
+        let curve = FanCurve::preset_aggressive();
+        gs.seed_bumpless(Some(68.0), curve.interpolate(68.0), true);
+        let start_pct = gs.current_speed_pct();
+
+        // GPU enters sleep and sensor hands off to chassis 38C -> single step drops <= 3%
+        gs.update_temp(Some(38.0), None, Some(38.0), true, 1.0);
+        let step1 = gs.evaluate_step(&curve, Some(38.0), true, 2.0);
+        assert!(start_pct - step1 <= 3);
+
+        // Short wake spike while dGPU waking must not jump abruptly
+        gs.update_temp(Some(62.0), None, Some(39.0), false, 1.0);
+        let step2 = gs.evaluate_step(&curve, Some(62.0), false, 2.0);
+        assert!(step2.abs_diff(step1) <= 7);
+    }
+
+    #[test]
+    fn zero_rpm_cool_latch_schmitt_trigger_prevents_oscillation() {
+        let mut latch = ZeroRpmCoolLatch::new();
+        assert!(latch.evaluate(Some(58.0), Some(59.0), Some(45.0), Some(45.0), Some(38.0)));
+
+        // Oscillating between 64C and 66C stays latched cool (no flapping!)
+        assert!(latch.evaluate(Some(66.0), Some(66.0), Some(48.0), Some(48.0), Some(40.0)));
+        assert!(latch.evaluate(Some(64.0), Some(64.0), Some(48.0), Some(48.0), Some(40.0)));
+
+        // Crossing upper threshold (filtered >= 68C or raw >= 75C) disables 0 RPM
+        assert!(!latch.evaluate(Some(68.0), Some(69.0), Some(48.0), Some(48.0), Some(40.0)));
+        // Stays disabled inside hysteresis band (62C)
+        assert!(!latch.evaluate(Some(62.0), Some(62.0), Some(48.0), Some(48.0), Some(40.0)));
+        // Re-enables once all channels cool below lower bounds (<=60 / <=56 / <=44)
+        assert!(latch.evaluate(Some(60.0), Some(60.0), Some(56.0), Some(56.0), Some(44.0)));
+
+        // Raw CPU >= 75C even with low filtered temp immediately disables 0 RPM
+        assert!(!latch.evaluate(Some(58.0), Some(75.0), Some(45.0), Some(45.0), Some(38.0)));
+    }
+
+    #[test]
+    fn wmi_deadband_and_rpm_seed_helpers_behave_accurately() {
+        assert_eq!(
+            estimate_fan_speed_pct_from_rpm(Some(2600), Some(5200)),
+            Some(50)
+        );
+        assert_eq!(
+            estimate_fan_speed_pct_from_rpm(Some(0), Some(5200)),
+            Some(0)
+        );
+        assert_eq!(estimate_fan_speed_pct_from_rpm(Some(2000), Some(0)), None);
+
+        assert!(fan_channel_exceeds_wmi_deadband(None, 40, 58, None, false));
+        // 1% change stays inside deadband
+        assert!(!fan_channel_exceeds_wmi_deadband(
+            Some(40),
+            41,
+            58,
+            Some(false),
+            false
+        ));
+        // >= 2% with WMI step delta exceeds deadband
+        assert!(fan_channel_exceeds_wmi_deadband(
+            Some(40),
+            42,
+            58,
+            Some(false),
+            false
+        ));
+        // Endpoints 0% and 100% always bypass deadband when changing from non-endpoint
+        assert!(fan_channel_exceeds_wmi_deadband(
+            Some(1),
+            0,
+            58,
+            Some(true),
+            true
+        ));
+        assert!(fan_channel_exceeds_wmi_deadband(
+            Some(99),
+            100,
+            58,
+            Some(false),
+            false
+        ));
+        // Latch edge triggers write even at identical speed
+        assert!(fan_channel_exceeds_wmi_deadband(
+            Some(10),
+            10,
+            58,
+            Some(true),
+            false
+        ));
     }
 }

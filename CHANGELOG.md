@@ -6,6 +6,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Acoustically Smooth Custom Fan Curves (`omvix-core`, `omvix-hub`):**
+  - Added time-step-independent asymmetric EMA filtering (`CurveSmoother` in `omvix-core::thermal`), weighting CPU ramp-up `tau` by package power (`cpu_power_w` / `chassis_temp_c`) to ignore 1–2s low-Watt Turbo spikes while responding rapidly to sustained loads, and smoothing GPU Optimus (`gpu_sleeping`) sensor handoffs.
+  - Added dual-threshold Schmitt trigger hysteresis (`ZeroRpmCoolLatch`) around `0 RPM <-> 1800 RPM` (`>= 68°C CPU / 62°C GPU / 47°C Chassis` or raw `>= 75°C` to disable; `<= 60°C / 56°C / 44°C` to re-enable).
+  - Replaced peak-locking hysteresis on `WorkerEngine` with symmetric deadband anchors, asymmetric slew-rate limits (`+7%` up / `-3%` down per 2s step, bypassed above `85°C` raw CPU or `82°C` raw GPU), bumpless RPM seeding (`estimate_fan_speed_pct_from_rpm`), and WMI step deadband gating (`fan_channel_exceeds_wmi_deadband`) while keeping raw `TelemetrySnapshot` and `ThermalSafetyGuard` unchanged.
 - **External Keyboard & Hardware State Sync (`omvix-core`, `omvix-windows`, `omvix-hub`):**
   - Added read-only `KeyboardBackend::get_backlight` (`0x20009 / 0x04` power status + `0x20009 / 0x02` 4-zone RGB color table on supported HP firmware, falling back to `None` without guessing unrecognized BIOS response bytes).
   - Generalized `spawn_hp_wmi_event_listener` on `root\WMI` `hpqBEvnt` notifications and added low-overhead worker synchronization (`PollExternalHardwareState` + periodic polling) for external `Fn` keyboard backlight toggles/colors as well as external display refresh rate, CPU Boost, and Windows Power Mode changes.

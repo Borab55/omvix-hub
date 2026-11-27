@@ -182,6 +182,56 @@ impl FanCurve {
         self.points != prev_points || self.hysteresis_c != prev_hyst
     }
 
+    /// Returns the raw linearly interpolated fan speed percentage (0..=100) for `current_temp_c`
+    /// without hysteresis, enforcing the `>= 80°C` safety floor.
+    pub fn interpolate(&self, current_temp_c: f32) -> u8 {
+        if !current_temp_c.is_finite() {
+            return FAN_CURVE_SAFETY_FLOOR_SPEED_PCT;
+        }
+        let floor_if_hot = |pct: u8| -> u8 {
+            if current_temp_c >= FAN_CURVE_SAFETY_FLOOR_TEMP_C as f32 {
+                pct.max(FAN_CURVE_SAFETY_FLOOR_SPEED_PCT)
+            } else {
+                pct
+            }
+        };
+        if self.points.is_empty() {
+            return floor_if_hot(FAN_CURVE_SAFETY_FLOOR_SPEED_PCT);
+        }
+
+        let mut sorted = self.points.clone();
+        sorted.sort_by_key(|p| p.temp_c);
+
+        let first = sorted[0];
+        let last = sorted[sorted.len() - 1];
+        let curve_pct = if current_temp_c <= first.temp_c as f32 {
+            first.speed_pct.clamp(0, 100)
+        } else if current_temp_c >= last.temp_c as f32 {
+            last.speed_pct.clamp(0, 100)
+        } else {
+            let mut resolved = first.speed_pct.clamp(0, 100);
+            for pair in sorted.windows(2) {
+                let low = pair[0];
+                let high = pair[1];
+                if current_temp_c >= low.temp_c as f32 && current_temp_c <= high.temp_c as f32 {
+                    let span = (high.temp_c - low.temp_c) as f32;
+                    if span <= f32::EPSILON {
+                        resolved = high.speed_pct.clamp(0, 100);
+                    } else {
+                        let ratio = (current_temp_c - low.temp_c as f32) / span;
+                        let interp = low.speed_pct as f32
+                            + ratio * (high.speed_pct as f32 - low.speed_pct as f32);
+                        resolved = interp.round().clamp(0.0, 100.0) as u8;
+                    }
+                    break;
+                }
+            }
+            resolved
+        };
+
+        floor_if_hot(curve_pct)
+    }
+
     /// Evaluates target fan speed percentage with linear interpolation and downward hysteresis.
     /// When temperature drops within `hysteresis_c` of `prev_temp_c`, keeps `prev_speed_pct`
     /// (unless the curve demands an even higher speed) to avoid rapid fan oscillation.
@@ -205,35 +255,7 @@ impl FanCurve {
             return floor_if_hot(prev_speed_pct.clamp(0, 100));
         }
 
-        let mut sorted = self.points.clone();
-        sorted.sort_by_key(|p| p.temp_c);
-
-        let first = sorted[0];
-        let last = sorted[sorted.len() - 1];
-        let curve_pct = if current_temp_c <= first.temp_c as f32 {
-            first.speed_pct.clamp(0, 100)
-        } else if current_temp_c >= last.temp_c as f32 {
-            last.speed_pct.clamp(0, 100)
-        } else {
-            let mut resolved = prev_speed_pct.clamp(0, 100);
-            for pair in sorted.windows(2) {
-                let low = pair[0];
-                let high = pair[1];
-                if current_temp_c >= low.temp_c as f32 && current_temp_c <= high.temp_c as f32 {
-                    let span = (high.temp_c - low.temp_c) as f32;
-                    if span <= f32::EPSILON {
-                        resolved = high.speed_pct.clamp(0, 100);
-                    } else {
-                        let ratio = (current_temp_c - low.temp_c as f32) / span;
-                        let interp = low.speed_pct as f32
-                            + ratio * (high.speed_pct as f32 - low.speed_pct as f32);
-                        resolved = interp.round().clamp(0.0, 100.0) as u8;
-                    }
-                    break;
-                }
-            }
-            resolved
-        };
+        let curve_pct = self.interpolate(current_temp_c);
 
         // Downward hysteresis guard: hold previous higher speed against minor cooling jitter,
         // without blocking upward ramps if the curve itself demands more airflow.

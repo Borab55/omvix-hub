@@ -1206,14 +1206,26 @@ fn integration_thermal_guard_release_resolves_custom_curve_target() {
     engine.poll_telemetry_step(25.0, true, true, false);
 
     assert!(!state.lock().unwrap().thermal_guard_active);
-    let expected_curve_pct = FanCurvePreset::Aggressive
-        .to_curve()
-        .evaluate(62.0, 62.0, 0);
+    let expected_curve_pct = FanCurvePreset::Aggressive.to_curve().interpolate(62.0);
     assert_ne!(expected_curve_pct, 12);
+    // Initial release write starts bumplessly from live ~5000 RPM (96% -> 93%) rather than jumping to 12% or 0%
     let writes = rig.inner.lock().unwrap().fan_writes.clone();
     assert!(writes
         .iter()
-        .any(|&(mode, pct, _)| mode == FanMode::CustomCurve && pct == Some(expected_curve_pct)));
+        .any(|&(mode, pct, _)| mode == FanMode::CustomCurve
+            && pct.is_some_and(|p| p > expected_curve_pct)));
+    // Subsequent curve steps converge down smoothly to the target for 62C
+    for i in 1..=20 {
+        engine.poll_telemetry_step(25.0 + (i as f64) * 2.0, true, false, true);
+    }
+    let last_pct = rig
+        .inner
+        .lock()
+        .unwrap()
+        .fan_writes
+        .last()
+        .and_then(|w| w.1);
+    assert_eq!(last_pct, Some(expected_curve_pct));
 }
 
 #[test]
@@ -1366,35 +1378,50 @@ fn integration_independent_cpu_and_gpu_fans_manual_and_curves() {
         &None,
         &visible,
     );
-    let expected_cpu = FanCurvePreset::Quiet.to_curve().evaluate(48.0, 48.0, 0);
-    let expected_gpu = FanCurvePreset::Aggressive
-        .to_curve()
-        .evaluate(72.0, 72.0, 0);
+    let expected_cpu = FanCurvePreset::Quiet.to_curve().interpolate(48.0);
+    let expected_gpu = FanCurvePreset::Aggressive.to_curve().interpolate(72.0);
     assert_ne!(expected_cpu, expected_gpu);
     {
+        // Bumpless transfer ramps from prior Manual (40%, 75%) rather than snapping instantaneously
         let g = rig.inner.lock().unwrap();
         assert_eq!(
             g.dual_fan_writes.last().copied(),
-            Some((
-                FanMode::CustomCurve,
-                Some(expected_cpu),
-                Some(expected_gpu),
-                false
-            ))
+            Some((FanMode::CustomCurve, Some(37), Some(82), false))
         );
     }
+    for i in 1..=8 {
+        engine.poll_telemetry_step(1.0 + (i as f64) * 2.0, true, false, true);
+    }
+    assert_eq!(engine.cpu_curve_smoother.current_speed_pct(), expected_cpu);
+    assert_eq!(engine.gpu_curve_smoother.current_speed_pct(), expected_gpu);
+    {
+        let g = rig.inner.lock().unwrap();
+        let last = g.dual_fan_writes.last().copied().unwrap();
+        assert_eq!(last.0, FanMode::CustomCurve);
+        // With GPU at 72C (allow_zero_rpm=false), <=34% maps identically to MIN_SAFE_FAN_LEVEL (18)
+        assert_eq!(
+            omvix_core::thermal::smart_manual_wmi_level(last.1.unwrap(), 52, last.3),
+            omvix_core::thermal::smart_manual_wmi_level(expected_cpu, 52, last.3)
+        );
+        assert_eq!(last.2, Some(expected_gpu));
+    }
 
-    // 3. When GPU enters sleep & temps drop, telemetry curve poll updates GPU speed independently
+    // 3. When GPU enters sleep & temps drop, telemetry curve poll ramps GPU speed down smoothly
     {
         let mut g = rig.inner.lock().unwrap();
         g.telemetry_snap.gpu_sleeping = true;
         g.telemetry_snap.gpu_temp_c = None;
         g.telemetry_snap.chassis_temp_c = Some(36.0);
     }
-    engine.poll_telemetry_step(4.0, true, false, true);
-    let expected_gpu_sleep = FanCurvePreset::Aggressive
-        .to_curve()
-        .evaluate(36.0, 36.0, 0);
+    for i in 1..=25 {
+        engine.poll_telemetry_step(18.0 + (i as f64) * 2.0, true, false, true);
+    }
+    let expected_gpu_sleep = FanCurvePreset::Aggressive.to_curve().interpolate(36.0);
+    let gpu_final = engine.gpu_curve_smoother.current_speed_pct();
+    assert!(
+        gpu_final <= expected_gpu_sleep + 2,
+        "GPU should ramp down smoothly from 86% toward {expected_gpu_sleep}%, got {gpu_final}%"
+    );
     let last = rig
         .inner
         .lock()
@@ -1404,8 +1431,11 @@ fn integration_independent_cpu_and_gpu_fans_manual_and_curves() {
         .copied()
         .unwrap();
     assert_eq!(last.0, FanMode::CustomCurve);
-    assert_eq!(last.1, Some(expected_cpu));
-    assert_eq!(last.2, Some(expected_gpu_sleep));
+    assert_eq!(
+        omvix_core::thermal::smart_manual_wmi_level(last.1.unwrap(), 52, last.3),
+        omvix_core::thermal::smart_manual_wmi_level(expected_cpu, 52, last.3)
+    );
+    assert!(last.2.is_some_and(|p| p <= expected_gpu_sleep + 2));
 }
 
 #[test]
@@ -1439,24 +1469,34 @@ fn integration_independent_cpu_and_gpu_fan_modes_mixed_and_auto() {
         &None,
         &visible,
     );
-    let expected_auto_cpu = FanCurve::preset_ogh_like().evaluate(46.0, 46.0, 0);
+    let expected_auto_cpu = FanCurve::preset_ogh_like().interpolate(46.0);
     assert_ne!(expected_auto_cpu, 75);
     {
         let st = state.lock().unwrap();
         assert_eq!(st.effective_fan_mode, FanMode::Auto);
         assert_eq!(st.effective_gpu_fan_mode, FanMode::Manual);
     }
+    // Bumpless seed from live 2200/5200 RPM (42%) ramps smoothly toward expected_auto_cpu while GPU=75
+    assert_eq!(
+        rig.inner.lock().unwrap().dual_fan_writes.last().copied(),
+        Some((FanMode::CustomCurve, Some(39), Some(75), false))
+    );
+    for i in 1..=8 {
+        engine.poll_telemetry_step(1.0 + (i as f64) * 2.0, true, false, true);
+    }
+    assert_eq!(
+        engine.cpu_curve_smoother.current_speed_pct(),
+        expected_auto_cpu
+    );
     {
         let g = rig.inner.lock().unwrap();
+        let last = g.dual_fan_writes.last().copied().unwrap();
+        assert_eq!(last.0, FanMode::CustomCurve);
         assert_eq!(
-            g.dual_fan_writes.last().copied(),
-            Some((
-                FanMode::CustomCurve,
-                Some(expected_auto_cpu),
-                Some(75),
-                false
-            ))
+            omvix_core::thermal::smart_manual_wmi_level(last.1.unwrap(), 52, last.3),
+            omvix_core::thermal::smart_manual_wmi_level(expected_auto_cpu, 52, last.3)
         );
+        assert_eq!(last.2, Some(75));
     }
 
     // 2. CPU = CustomCurve, GPU = Max -> CPU from curve, GPU = 100%
@@ -1471,16 +1511,28 @@ fn integration_independent_cpu_and_gpu_fan_modes_mixed_and_auto() {
         &None,
         &visible,
     );
-    let expected_curve_cpu = FanCurvePreset::Quiet.to_curve().evaluate(46.0, 46.0, 0);
+    let expected_curve_cpu = FanCurvePreset::Quiet.to_curve().interpolate(46.0);
+    for i in 1..=3 {
+        engine.poll_telemetry_step(17.0 + (i as f64) * 2.0, true, false, true);
+    }
     assert_eq!(
-        rig.inner.lock().unwrap().dual_fan_writes.last().copied(),
-        Some((
-            FanMode::CustomCurve,
-            Some(expected_curve_cpu),
-            Some(100),
-            false
-        ))
+        engine.cpu_curve_smoother.current_speed_pct(),
+        expected_curve_cpu
     );
+    let last2 = rig
+        .inner
+        .lock()
+        .unwrap()
+        .dual_fan_writes
+        .last()
+        .copied()
+        .unwrap();
+    assert_eq!(last2.0, FanMode::CustomCurve);
+    assert_eq!(
+        omvix_core::thermal::smart_manual_wmi_level(last2.1.unwrap(), 52, last2.3),
+        omvix_core::thermal::smart_manual_wmi_level(expected_curve_cpu, 52, last2.3)
+    );
+    assert_eq!(last2.2, Some(100));
 
     // 3. Reverting both to Auto restores native BIOS Auto (None, None)
     engine.handle_command(
@@ -1623,7 +1675,7 @@ fn integration_app_profile_rule_switch_restores_none_fields_and_gpu_baseline() {
         });
     }
     engine.poll_telemetry_step(1.0, true, false, false);
-    let expected_auto_cpu = FanCurve::preset_ogh_like().evaluate(52.0, 45.0, 40);
+    let expected_auto_cpu = FanCurve::preset_ogh_like().interpolate(52.0);
 
     // Enter Rule 1
     rig.inner.lock().unwrap().running_exes_lower = ["heavy.exe".to_string()].into_iter().collect();
@@ -1644,6 +1696,17 @@ fn integration_app_profile_rule_switch_restores_none_fields_and_gpu_baseline() {
         assert_eq!(g.perf_mode, PerformanceMode::Quiet);
         assert_eq!(g.cpu_boost, CpuBoostMode::Aggressive);
         assert_eq!(g.display_mode.current_hz, 165);
+        // Immediate restore preserves GPU Manual 62% and steps CPU bumplessly down from 100% (97%)
+        assert_eq!(
+            g.dual_fan_writes.last().copied(),
+            Some((FanMode::CustomCurve, Some(97), Some(62), true))
+        );
+    }
+    for i in 1..=25 {
+        engine.poll_telemetry_step(1.0 + (i as f64) * 2.0, true, false, true);
+    }
+    {
+        let g = rig.inner.lock().unwrap();
         assert_eq!(
             g.dual_fan_writes.last().copied(),
             Some((
@@ -1858,4 +1921,83 @@ fn integration_startup_restores_saved_settings_and_respects_safe_mode() {
     assert!(sg.cpu_boost_writes.is_empty());
     assert!(sg.power_limits_writes.is_empty());
     assert!(sg.battery_mode_writes.is_empty());
+}
+
+#[test]
+fn integration_custom_curve_smoothing_raw_guard_priority_and_wmi_deadband() {
+    let dir = TempDirGuard::create("curve_smooth_guard_deadband");
+    let mut cfg = AppConfig::default();
+    cfg.thermal_fan.fan_mode = FanMode::CustomCurve;
+    cfg.thermal_fan.gpu_fan_mode = FanMode::CustomCurve;
+    cfg.thermal_fan.custom_curve = FanCurve::preset_balanced();
+    cfg.thermal_fan.gpu_custom_curve = FanCurve::preset_balanced();
+    cfg.thermal_fan.guard_cpu_temp_c = 95;
+    cfg.thermal_fan.guard_sustain_secs = 10;
+
+    let mut mock = MockHardwareState::default();
+    mock.telemetry_snap.cpu_temp_c = Some(55.0);
+    mock.telemetry_snap.gpu_temp_c = Some(46.0);
+    mock.telemetry_snap.chassis_temp_c = Some(37.0);
+    mock.telemetry_snap.cpu_power_w = Some(16.0);
+    mock.telemetry_snap.fan_rpms = vec![1800, 1800];
+    mock.telemetry_snap.fan_max_rpms = vec![5200, 5200];
+
+    let rig = MockRig::new(mock);
+    let (mut engine, state) = make_test_engine(&rig, cfg, "8C99", true, None, dir.path());
+
+    // Settle baseline at 55C
+    for t in [1.0, 3.0, 5.0] {
+        engine.poll_telemetry_step(t, true, false, t == 3.0 || t == 5.0);
+    }
+    let baseline_writes = rig.inner.lock().unwrap().dual_fan_writes.len();
+    let baseline_cpu = rig
+        .inner
+        .lock()
+        .unwrap()
+        .dual_fan_writes
+        .last()
+        .and_then(|w| w.1)
+        .unwrap();
+
+    // Calling additional curve steps at steady 55C must NOT emit redundant WMI writes (deadband)
+    engine.poll_telemetry_step(7.0, true, false, true);
+    engine.poll_telemetry_step(9.0, true, false, true);
+    assert_eq!(
+        rig.inner.lock().unwrap().dual_fan_writes.len(),
+        baseline_writes
+    );
+
+    // 2-second low-watt 18W Turbo spike to 78C, then back to 55C: must not jump to 78C fan speed
+    {
+        let mut g = rig.inner.lock().unwrap();
+        g.telemetry_snap.cpu_temp_c = Some(78.0);
+        g.telemetry_snap.cpu_power_w = Some(18.0);
+    }
+    engine.poll_telemetry_step(10.0, true, false, false);
+    engine.poll_telemetry_step(11.0, true, false, true);
+    let spike_cpu = rig
+        .inner
+        .lock()
+        .unwrap()
+        .dual_fan_writes
+        .last()
+        .and_then(|w| w.1)
+        .unwrap();
+    let unsmoothed_78 = FanCurve::preset_balanced().interpolate(78.0);
+    assert!(
+        spike_cpu < unsmoothed_78 && spike_cpu <= baseline_cpu + 7,
+        "2s Turbo spike wrote {spike_cpu}% (baseline {baseline_cpu}%, unsmoothed {unsmoothed_78}%)"
+    );
+
+    // Raw 96C still triggers ThermalSafetyGuard immediately using raw temperature regardless of EMA
+    {
+        let mut g = rig.inner.lock().unwrap();
+        g.telemetry_snap.cpu_temp_c = Some(96.0);
+        g.telemetry_snap.cpu_power_w = Some(70.0);
+    }
+    for t in [12.0, 16.0, 20.0, 22.5] {
+        engine.poll_telemetry_step(t, true, true, false);
+    }
+    assert!(state.lock().unwrap().thermal_guard_active);
+    assert_eq!(rig.inner.lock().unwrap().fan_mode, FanMode::Max);
 }
