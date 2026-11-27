@@ -1,9 +1,9 @@
 use crate::theme::{
     accent_color, clickable_status_badge, clickable_warning_badge, compact_card,
     compact_toggle_pill, detail_dial_button, fixed_color_picker_button, footer_text_button,
-    lighting_profile_button, lighting_swatch_button, mode_tile_button, muted_text, pill_button,
-    section_title, section_toggle_button, status_badge, status_err, status_ok, status_warn,
-    tile_button, undo_text_button, ColorButtonStyle, TileIcon,
+    lighting_profile_chip, lighting_swatch_button, mode_tile_button, muted_text, pill_button,
+    saved_pill_chip, section_title, section_toggle_button, status_badge, status_err, status_ok,
+    status_warn, tile_button, undo_text_button, ColorButtonStyle, SavedChipAction, TileIcon,
 };
 use crate::ui::lighting_display::{apply_lighting_profile, is_lighting_profile_active};
 use crate::ui::{control_committed, Drawer, ExtraSubTab, FansPowerSubTab};
@@ -762,20 +762,48 @@ pub fn render(
 
                 if !cfg.battery.custom_profiles.is_empty() {
                     ui.add_space(3.0);
+                    let del_tip = i18n.t("battery.delete");
+                    let mut apply_custom = None;
+                    let mut delete_idx: Option<usize> = None;
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
-                        for custom in cfg.battery.custom_profiles.clone() {
+                        for (idx, custom) in cfg.battery.custom_profiles.iter().enumerate() {
                             let selected =
                                 cfg.battery.active_profile_id.as_deref() == Some(&custom.id);
                             let label = format!("{} ({}%)", custom.name, custom.stop_threshold_pct);
-                            if pill_button(ui, &label, selected, t).clicked() {
-                                apply_battery_profile(cfg, &custom);
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                on_cmd(WorkerCommand::ApplyBatteryNow);
+                            let tip = format!(
+                                "{}% / {}%  •  {:?}",
+                                custom.stop_threshold_pct, custom.start_threshold_pct, custom.mode
+                            );
+                            match saved_pill_chip(
+                                ui,
+                                ("cockpit_bat", &custom.id, idx),
+                                &label,
+                                selected,
+                                Some(&tip),
+                                &del_tip,
+                                t,
+                            ) {
+                                SavedChipAction::Apply => apply_custom = Some(custom.clone()),
+                                SavedChipAction::Delete => delete_idx = Some(idx),
+                                SavedChipAction::None => {}
                             }
                         }
                     });
+                    if let Some(custom) = apply_custom {
+                        apply_battery_profile(cfg, &custom);
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyBatteryNow);
+                    }
+                    if let Some(idx) = delete_idx {
+                        let removed = cfg.battery.custom_profiles.remove(idx);
+                        if cfg.battery.active_profile_id.as_deref() == Some(&removed.id) {
+                            cfg.battery.active_profile_id = None;
+                        }
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    }
                 }
             });
 
@@ -853,22 +881,40 @@ pub fn render(
                             on_cmd(WorkerCommand::ApplyLighting);
                         }
                     }
-                    for custom in cfg.lighting.custom_profiles.clone() {
-                        let selected = is_lighting_profile_active(cfg, &custom);
-                        if lighting_profile_button(
-                            ui,
-                            &custom.name,
-                            &custom.zones,
-                            selected,
-                            four_zone,
-                            t,
-                        )
-                        .clicked()
-                        {
+                    if !cfg.lighting.custom_profiles.is_empty() {
+                        let del_tip = i18n.t("lighting.delete_profile");
+                        let mut apply_prof = None;
+                        let mut delete_idx: Option<usize> = None;
+                        for (idx, custom) in cfg.lighting.custom_profiles.iter().enumerate() {
+                            let selected = is_lighting_profile_active(cfg, custom);
+                            match lighting_profile_chip(
+                                ui,
+                                ("cockpit_kbd", &custom.id, idx),
+                                &custom.name,
+                                &custom.zones,
+                                selected,
+                                four_zone,
+                                &del_tip,
+                                t,
+                            ) {
+                                SavedChipAction::Apply => apply_prof = Some(custom.clone()),
+                                SavedChipAction::Delete => delete_idx = Some(idx),
+                                SavedChipAction::None => {}
+                            }
+                        }
+                        if let Some(custom) = apply_prof {
                             apply_lighting_profile(cfg, &custom);
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::ApplyLighting);
+                        }
+                        if let Some(idx) = delete_idx {
+                            let removed = cfg.lighting.custom_profiles.remove(idx);
+                            if cfg.lighting.active_profile_id.as_deref() == Some(&removed.id) {
+                                cfg.lighting.active_profile_id = None;
+                            }
+                            on_save();
+                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                         }
                     }
                 });

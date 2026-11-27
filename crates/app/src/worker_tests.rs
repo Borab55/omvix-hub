@@ -1798,3 +1798,64 @@ fn integration_external_display_boost_and_power_overlay_sync_on_poll() {
     // Second poll with identical hardware values should report no change
     assert!(!engine.poll_external_hw_state_step(true));
 }
+
+#[test]
+fn integration_startup_restores_saved_settings_and_respects_safe_mode() {
+    let dir = TempDirGuard::create("startup_restore");
+    let rig = MockRig::new(MockHardwareState::default());
+    let mut cfg = AppConfig::default();
+    cfg.auto_profile.enabled = false;
+    cfg.thermal_fan.performance_mode = PerformanceMode::Quiet;
+    cfg.thermal_fan.fan_mode = FanMode::Manual;
+    cfg.thermal_fan.gpu_fan_mode = FanMode::Manual;
+    cfg.thermal_fan.manual_speed_pct = 55;
+    cfg.thermal_fan.gpu_manual_speed_pct = 62;
+    cfg.tuning.cpu_boost_mode = Some(CpuBoostMode::Disabled);
+    cfg.tuning.pl1_watts = Some(45);
+    cfg.tuning.pl2_watts = Some(75);
+    cfg.battery.enabled = true;
+    cfg.battery.stop_threshold_pct = 60;
+    cfg.battery.start_threshold_pct = 55;
+
+    // 1. Normal startup applies all saved hardware settings immediately
+    let (mut engine, state) = make_test_engine(&rig, cfg.clone(), "8C99", true, None, dir.path());
+    engine.apply_startup_saved_settings();
+    {
+        let g = rig.inner.lock().unwrap();
+        assert_eq!(g.perf_mode, PerformanceMode::Quiet);
+        assert_eq!(
+            g.dual_fan_writes.last().copied(),
+            Some((FanMode::Manual, Some(55), Some(62), false))
+        );
+        assert_eq!(g.cpu_boost, CpuBoostMode::Disabled);
+        assert_eq!(g.cpu_boost_writes, vec![CpuBoostMode::Disabled]);
+        assert_eq!(g.power_limits_writes, vec![(Some(45), Some(75))]);
+        assert!(!g.battery_mode_writes.is_empty());
+        assert_eq!(
+            g.win_overlay,
+            Some(WindowsPowerOverlay::BestPowerEfficiency)
+        );
+    }
+    assert_eq!(
+        state.lock().unwrap().cpu_boost,
+        Some(CpuBoostMode::Disabled)
+    );
+
+    // 2. Safe Mode blocks all startup hardware writes
+    let safe_rig = MockRig::new(MockHardwareState::default());
+    let (mut safe_engine, _) = make_test_engine(
+        &safe_rig,
+        cfg,
+        "8C99",
+        true,
+        Some(SafeModeReason::CliFlag),
+        dir.path(),
+    );
+    safe_engine.apply_startup_saved_settings();
+    let sg = safe_rig.inner.lock().unwrap();
+    assert_eq!(sg.perf_mode, PerformanceMode::Balanced);
+    assert!(sg.dual_fan_writes.is_empty());
+    assert!(sg.cpu_boost_writes.is_empty());
+    assert!(sg.power_limits_writes.is_empty());
+    assert!(sg.battery_mode_writes.is_empty());
+}

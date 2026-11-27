@@ -1,6 +1,7 @@
 use crate::theme::{
-    accent_color, card_frame, feature_toggle_button, muted_text, pill_button, section_title,
-    section_toggle_button, status_badge, status_err, status_ok, status_warn,
+    accent_color, card_frame, feature_toggle_button, muted_text, pill_button, saved_pill_chip,
+    section_title, section_toggle_button, status_badge, status_err, status_ok, status_warn,
+    SavedChipAction,
 };
 use crate::ui::charts::battery_health_chart;
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
@@ -270,24 +271,32 @@ pub fn render(
         } else {
             let mut apply_profile: Option<BatteryProfile> = None;
             let mut delete_idx: Option<usize> = None;
+            let del_tip = i18n.t("battery.delete");
 
-            for (idx, prof) in cfg.battery.custom_profiles.iter().enumerate() {
-                let is_active = cfg.battery.active_profile_id.as_deref() == Some(&prof.id);
-                ui.push_id(&prof.id, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        if pill_button(ui, &prof.name, is_active, t).clicked() {
-                            apply_profile = Some(prof.clone());
-                        }
-                        ui.weak(format!(
-                            "{}% / {}%  •  {:?}",
-                            prof.stop_threshold_pct, prof.start_threshold_pct, prof.mode
-                        ));
-                        if ui.button(i18n.t("battery.delete")).clicked() {
-                            delete_idx = Some(idx);
-                        }
-                    });
-                });
-            }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                for (idx, prof) in cfg.battery.custom_profiles.iter().enumerate() {
+                    let is_active = cfg.battery.active_profile_id.as_deref() == Some(&prof.id);
+                    let label = format!("{} ({}%)", prof.name, prof.stop_threshold_pct);
+                    let tip = format!(
+                        "{}% / {}%  •  {:?}",
+                        prof.stop_threshold_pct, prof.start_threshold_pct, prof.mode
+                    );
+                    match saved_pill_chip(
+                        ui,
+                        (&prof.id, idx),
+                        &label,
+                        is_active,
+                        Some(&tip),
+                        &del_tip,
+                        t,
+                    ) {
+                        SavedChipAction::Apply => apply_profile = Some(prof.clone()),
+                        SavedChipAction::Delete => delete_idx = Some(idx),
+                        SavedChipAction::None => {}
+                    }
+                }
+            });
 
             if let Some(p) = apply_profile {
                 apply_battery_profile(cfg, &p);

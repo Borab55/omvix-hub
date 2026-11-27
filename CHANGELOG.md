@@ -17,6 +17,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 - **Unified `Eco` + `Quiet` into Single `Quiet` Mode (`omvix-core`, `omvix-cli`, `omvix-hub`, `locales`):** Removed `PerformanceMode::Eco` (`CliPerfMode::Eco`, tray/cockpit/drawer controls, and `mode_eco` locale keys) while keeping `#[serde(alias = "Eco")]` on `PerformanceMode::Quiet` for seamless backwards-compatible loading of existing `config.toml` files without `.bad` quarantine, preserving HP BIOS (`0x50` / `0x02`) and `WindowsPowerOverlay::BestPowerEfficiency` mappings.
 
 ### Fixed
+- **UI & Profiles (`omvix-hub`):**
+  - Rendered saved custom themes inline right alongside built-in theme presets in **Extra -> Appearance & Theme** instead of a separate `My Saved Themes` section, and removed now-unused locale keys symmetrically (`en.json` / `tr.json`).
+  - Added hover-revealed circular `×` delete chips (`saved_pill_chip`, `lighting_profile_chip`) across all custom profile lists (Custom Battery Profiles in both Cockpit & Battery Care, and Custom Lighting Profiles inline next to color presets in Cockpit & Lighting/Display).
+- **Display Refresh Rate & Startup Restore (`omvix-windows`, `omvix-hub`):**
+  - Fixed Windows display detection/switching (`WindowsDisplayBackend`) to resolve the active internal panel via Win32 `QueryDisplayConfig` (`CCD`), preventing hybrid/dual-GPU virtual display topologies from misreporting `60 Hz` when the panel actually runs at `144 Hz` (and refreshing display/OS state on sleep resume).
+  - Added `WorkerEngine::apply_startup_saved_settings` to restore saved performance mode, non-Auto dual fan settings, CPU Turbo Boost, PL1/PL2 power limits, and battery care thresholds on launch (while respecting Safe Mode).
 - **Core & CLI (`omvix-core`, `omvix-cli`):**
   - Made `ThermalSafetyGuard::evaluate` (both engagement and release) **channel-aware** (`fan_rpms[0]` for CPU/chassis load, `fan_rpms[1]` for GPU load) and filtered `NaN`/infinite temperatures, eliminating false emergency Max Fan trips when CPU load is warm while an idle/sleeping GPU fan runs below `1800 RPM` (observed in `omvix.log`).
   - Fixed `CrashGuardState::record_launch_start` evicting the newly pushed launch record once 10 healthy launches accumulated, which previously disabled crash-loop detection.

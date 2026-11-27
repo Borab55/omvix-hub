@@ -1295,6 +1295,7 @@ impl WorkerEngine {
                 st.gpu_mode = gpu_mode;
             }
             self.sync_keyboard_backlight_from_hw(false);
+            self.apply_startup_saved_settings();
             request_repaint_if_visible(ctx, window_visible);
         }
 
@@ -2143,6 +2144,7 @@ impl WorkerEngine {
                     st.thermal_guard_active = false;
                     st.sensor_loss_active = false;
                 }
+                self.poll_external_hw_state_step(false);
                 tracing::info!("Re-applied thermal, fan, and lighting state after system resume");
             }
             WorkerCommand::UpdateConfig(mut new_cfg) => {
@@ -3702,6 +3704,113 @@ impl WorkerEngine {
             }
         }
         changed
+    }
+
+    fn apply_startup_saved_settings(&mut self) {
+        if self.safe_mode.is_some() {
+            tracing::info!("Safe Mode active; skipping saved startup hardware restore");
+            return;
+        }
+
+        let (snap, cur_boost) = self
+            .state
+            .lock()
+            .map(|st| (st.telemetry.clone(), st.cpu_boost))
+            .unwrap_or_else(|_| (TelemetrySnapshot::default(), None));
+
+        if !self.cfg.auto_profile.enabled && self.bios_writes_allowed {
+            record_hw_write_attempt(
+                &self.crash_guard,
+                &self.crash_guard_path,
+                &mut self.hw_applied_recorded,
+            );
+            let mode = self.cfg.thermal_fan.performance_mode;
+            if let Err(err) = self.backends.thermal.set_performance_mode(mode) {
+                tracing::warn!(?mode, "Startup performance mode restore failed: {err}");
+            }
+            self.sync_win_power_mode_if_enabled(mode);
+        }
+
+        if self.bios_writes_allowed {
+            let eff_cpu = self.cfg.thermal_fan.fan_mode;
+            let eff_gpu = effective_gpu_fan_mode(&self.cfg, None);
+            if eff_cpu != FanMode::Auto || eff_gpu != FanMode::Auto {
+                let cpu_curve = self.cfg.thermal_fan.custom_curve.clone();
+                let gpu_curve = self.cfg.thermal_fan.gpu_custom_curve.clone();
+                let (hw_mode, cpu_target_pct, gpu_target_pct) =
+                    resolve_independent_dual_fan_targets(
+                        eff_cpu,
+                        eff_gpu,
+                        &snap,
+                        &cpu_curve,
+                        &gpu_curve,
+                        Some(self.cfg.thermal_fan.manual_speed_pct),
+                        Some(self.cfg.thermal_fan.gpu_manual_speed_pct),
+                        self.cfg.thermal_fan.link_cpu_gpu_fans,
+                        &mut self.prev_curve_temp,
+                        &mut self.prev_curve_speed,
+                        &mut self.prev_gpu_curve_temp,
+                        &mut self.prev_gpu_curve_speed,
+                    );
+                record_hw_write_attempt(
+                    &self.crash_guard,
+                    &self.crash_guard_path,
+                    &mut self.hw_applied_recorded,
+                );
+                let cool_hint = cool_hint_from_snapshot(&snap);
+                match self.backends.thermal.set_dual_fan_mode_with_cool_hint(
+                    hw_mode,
+                    cpu_target_pct,
+                    gpu_target_pct,
+                    cool_hint,
+                ) {
+                    Ok(()) => {
+                        self.prev_curve_applied =
+                            eff_cpu == FanMode::CustomCurve || eff_gpu == FanMode::CustomCurve;
+                        self.prev_curve_cool_hint = Some(cool_hint);
+                    }
+                    Err(err) => {
+                        tracing::warn!("Startup fan mode restore failed: {err}");
+                    }
+                }
+            }
+        }
+
+        if let Some(boost) = self.cfg.tuning.cpu_boost_mode {
+            if cur_boost != Some(boost) {
+                match self.backends.tuning.set_cpu_boost_mode(boost) {
+                    Ok(()) => {
+                        if let Ok(mut st) = self.state.lock() {
+                            st.cpu_boost = Some(boost);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(?boost, "Startup CPU boost restore failed: {err}");
+                    }
+                }
+            }
+        }
+
+        if self.bios_writes_allowed
+            && (self.cfg.tuning.pl1_watts.is_some() || self.cfg.tuning.pl2_watts.is_some())
+        {
+            record_hw_write_attempt(
+                &self.crash_guard,
+                &self.crash_guard_path,
+                &mut self.hw_applied_recorded,
+            );
+            if let Err(err) = self
+                .backends
+                .tuning
+                .set_power_limits(self.cfg.tuning.pl1_watts, self.cfg.tuning.pl2_watts)
+            {
+                tracing::warn!("Startup PL1/PL2 power limits restore failed: {err}");
+            }
+        }
+
+        if self.cfg.battery.enabled {
+            self.poll_battery_step();
+        }
     }
 
     fn sync_win_power_mode_if_enabled(&self, mode: PerformanceMode) {

@@ -1768,7 +1768,6 @@ pub fn saved_theme_chip(
     t: &CustomThemeConfig,
 ) -> SavedChipAction {
     let accent = accent_color(t);
-    let err_c = status_err(t);
     let (_, _, text_c) = button_palette(active, t);
     let btn_size = ui
         .style()
@@ -1852,33 +1851,7 @@ pub fn saved_theme_chip(
         p.galley(text_pos, galley, text_c);
 
         if chip_hovered || del_resp.hovered() {
-            let x_bg = if del_resp.hovered() {
-                Color32::from_rgba_unmultiplied(err_c.r(), err_c.g(), err_c.b(), 64)
-            } else {
-                Color32::from_rgba_unmultiplied(text_c.r(), text_c.g(), text_c.b(), 24)
-            };
-            let x_fg = if del_resp.hovered() {
-                err_c
-            } else {
-                muted_text(t)
-            };
-            p.circle_filled(close_center, close_d * 0.48, x_bg);
-            let r = 3.1_f32;
-            let xs = Stroke::new(1.4_f32, x_fg);
-            p.line_segment(
-                [
-                    pos2(close_center.x - r, close_center.y - r),
-                    pos2(close_center.x + r, close_center.y + r),
-                ],
-                xs,
-            );
-            p.line_segment(
-                [
-                    pos2(close_center.x + r, close_center.y - r),
-                    pos2(close_center.x - r, close_center.y + r),
-                ],
-                xs,
-            );
+            paint_hover_close_x(&p, close_center, close_d, del_resp.hovered(), t);
         }
     }
 
@@ -1889,6 +1862,310 @@ pub fn saved_theme_chip(
     } else {
         SavedChipAction::None
     }
+}
+
+fn paint_hover_close_x(
+    p: &egui::Painter,
+    close_center: egui::Pos2,
+    close_d: f32,
+    del_hovered: bool,
+    t: &CustomThemeConfig,
+) {
+    let err_c = status_err(t);
+    let text_c = rgb(t.text_primary);
+    let x_bg = if del_hovered {
+        Color32::from_rgba_unmultiplied(err_c.r(), err_c.g(), err_c.b(), 64)
+    } else {
+        Color32::from_rgba_unmultiplied(text_c.r(), text_c.g(), text_c.b(), 24)
+    };
+    let x_fg = if del_hovered { err_c } else { muted_text(t) };
+    p.circle_filled(close_center, close_d * 0.48, x_bg);
+    let r = (close_d * 0.19).clamp(2.5, 3.4);
+    let xs = Stroke::new(1.4_f32, x_fg);
+    p.line_segment(
+        [
+            pos2(close_center.x - r, close_center.y - r),
+            pos2(close_center.x + r, close_center.y + r),
+        ],
+        xs,
+    );
+    p.line_segment(
+        [
+            pos2(close_center.x + r, close_center.y - r),
+            pos2(close_center.x - r, close_center.y + r),
+        ],
+        xs,
+    );
+}
+
+/// Compact pill chip with fixed width and inline circular `×` delete button revealed on hover.
+pub fn saved_pill_chip(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash,
+    label: &str,
+    active: bool,
+    hover_tooltip: Option<&str>,
+    delete_tooltip: &str,
+    t: &CustomThemeConfig,
+) -> SavedChipAction {
+    ui.push_id(id_salt, |ui| {
+        let accent = accent_color(t);
+        let (_, _, text_c) = button_palette(active, t);
+        let btn_size = ui
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .map(|f| f.size * 0.95)
+            .unwrap_or(12.5);
+        let mut rt = egui::RichText::new(label).size(btn_size).color(text_c);
+        if active {
+            rt = rt.strong();
+        }
+        let galley = egui::WidgetText::from(rt).into_galley(
+            ui,
+            Some(TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Button,
+        );
+
+        let pad_l = 10.0_f32;
+        let pad_r = 6.0_f32;
+        let gap = 6.0_f32;
+        let close_d = 16.0_f32;
+        let width = (pad_l + galley.size().x + gap + close_d + pad_r).ceil();
+        let height = 26.0_f32;
+
+        let (pill_rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        let close_center = pos2(
+            pill_rect.right() - pad_r - close_d * 0.5,
+            pill_rect.center().y,
+        );
+        let close_rect = egui::Rect::from_center_size(close_center, Vec2::splat(close_d));
+        let apply_rect = egui::Rect::from_min_max(
+            pill_rect.min,
+            pos2(close_rect.left() - 2.0, pill_rect.bottom()),
+        );
+
+        let mut apply_resp =
+            ui.interact(apply_rect, ui.id().with("pill_chip_apply"), Sense::click());
+        if let Some(tip) = hover_tooltip {
+            apply_resp = apply_resp.on_hover_text(tip);
+        }
+        let del_resp = ui
+            .interact(close_rect, ui.id().with("pill_chip_del"), Sense::click())
+            .on_hover_text(delete_tooltip);
+
+        let chip_hovered = ui.rect_contains_pointer(pill_rect);
+        if apply_resp.hovered() || del_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        if ui.is_rect_visible(pill_rect) {
+            let p = ui.painter_at(pill_rect);
+            let (base_fill, base_stroke, _) = button_palette(active, t);
+            let fill = if !active && chip_hovered {
+                rgb(t.control_hover_bg)
+            } else {
+                base_fill
+            };
+            let stroke = if active || chip_hovered {
+                Stroke::new(1.3_f32, accent)
+            } else {
+                base_stroke
+            };
+            let cr = control_corner_radius(t);
+            p.rect_filled(pill_rect, cr, fill);
+            p.rect_stroke(pill_rect.shrink(0.5), cr, stroke, StrokeKind::Inside);
+
+            let text_pos = pos2(
+                pill_rect.left() + pad_l,
+                pill_rect.center().y - galley.size().y * 0.5,
+            );
+            p.galley(text_pos, galley, text_c);
+
+            if chip_hovered || del_resp.hovered() {
+                paint_hover_close_x(&p, close_center, close_d, del_resp.hovered(), t);
+            }
+        }
+
+        if del_resp.clicked() {
+            SavedChipAction::Delete
+        } else if apply_resp.clicked() {
+            SavedChipAction::Apply
+        } else {
+            SavedChipAction::None
+        }
+    })
+    .inner
+}
+
+/// Custom keyboard lighting profile chip with top color cap and hover-revealed `×` delete button.
+#[allow(clippy::too_many_arguments)]
+pub fn lighting_profile_chip(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash,
+    label: &str,
+    zones: &[RgbColor; 4],
+    selected: bool,
+    four_zone: bool,
+    delete_tooltip: &str,
+    t: &CustomThemeConfig,
+) -> SavedChipAction {
+    ui.push_id(id_salt, |ui| {
+        let accent = accent_color(t);
+        let text_c = rgb(t.text_primary);
+        let btn_size = ui
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .map(|f| f.size * 0.92)
+            .unwrap_or(12.0);
+        let mut rt = egui::RichText::new(label).size(btn_size).color(text_c);
+        if selected {
+            rt = rt.strong();
+        }
+        let galley = egui::WidgetText::from(rt).into_galley(
+            ui,
+            Some(TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Button,
+        );
+
+        let cap_h = 5.0_f32;
+        let pad_l = 9.0_f32;
+        let pad_r = 5.0_f32;
+        let gap = 5.0_f32;
+        let close_d = 15.0_f32;
+        let width = (pad_l + galley.size().x + gap + close_d + pad_r)
+            .ceil()
+            .max(54.0);
+        let height = 26.0_f32.max((galley.size().y + 12.0).ceil());
+
+        let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        let cap_bottom = rect.top() + 1.5 + cap_h;
+        let text_center_y = ((cap_bottom + 0.5) + (rect.bottom() - 2.5)) * 0.5;
+        let close_center = pos2(rect.right() - pad_r - close_d * 0.5, text_center_y);
+        let close_rect = egui::Rect::from_center_size(close_center, Vec2::splat(close_d));
+        let apply_rect =
+            egui::Rect::from_min_max(rect.min, pos2(close_rect.left() - 2.0, rect.bottom()));
+
+        let apply_resp = ui
+            .interact(apply_rect, ui.id().with("kbd_chip_apply"), Sense::click())
+            .on_hover_text(label);
+        let del_resp = ui
+            .interact(close_rect, ui.id().with("kbd_chip_del"), Sense::click())
+            .on_hover_text(delete_tooltip);
+
+        let chip_hovered = ui.rect_contains_pointer(rect);
+        if apply_resp.hovered() || del_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter_at(rect);
+            let fill = if selected {
+                let w_accent = if t.is_high_contrast() { 0.28 } else { 0.20 };
+                let mix = |bg: u8, fg: u8| -> u8 {
+                    (f32::from(bg) * (1.0 - w_accent) + f32::from(fg) * w_accent)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
+                Color32::from_rgb(
+                    mix(t.control_bg[0], t.accent[0]),
+                    mix(t.control_bg[1], t.accent[1]),
+                    mix(t.control_bg[2], t.accent[2]),
+                )
+            } else if chip_hovered {
+                rgb(t.control_hover_bg)
+            } else {
+                rgb(t.control_bg)
+            };
+            let outer_r = control_corner_radius(t);
+            let cap_r_val = t.control_radius.clamp(0, 12).saturating_sub(1);
+            p.rect_filled(rect, outer_r, fill);
+
+            let cap_rect = egui::Rect::from_min_max(
+                pos2(rect.left() + 1.5, rect.top() + 1.5),
+                pos2(rect.right() - 1.5, cap_bottom),
+            );
+            let cap_radius = CornerRadius {
+                nw: cap_r_val,
+                ne: cap_r_val,
+                sw: 0,
+                se: 0,
+            };
+            let solid = !four_zone || zones.iter().all(|z| *z == zones[0]);
+            if solid {
+                let c = Color32::from_rgb(zones[0].r, zones[0].g, zones[0].b);
+                p.rect_filled(cap_rect, cap_radius, c);
+            } else {
+                let strip_w = cap_rect.width() / 4.0;
+                for (idx, z) in zones.iter().enumerate() {
+                    let x0 = cap_rect.left() + idx as f32 * strip_w;
+                    let x1 = if idx == 3 {
+                        cap_rect.right()
+                    } else {
+                        x0 + strip_w
+                    };
+                    let seg = egui::Rect::from_min_max(
+                        pos2(x0, cap_rect.top()),
+                        pos2(x1, cap_rect.bottom()),
+                    );
+                    let cr = match idx {
+                        0 => CornerRadius {
+                            nw: cap_r_val,
+                            ne: 0,
+                            sw: 0,
+                            se: 0,
+                        },
+                        3 => CornerRadius {
+                            nw: 0,
+                            ne: cap_r_val,
+                            sw: 0,
+                            se: 0,
+                        },
+                        _ => CornerRadius::ZERO,
+                    };
+                    p.rect_filled(seg, cr, Color32::from_rgb(z.r, z.g, z.b));
+                }
+            }
+
+            let sep_alpha = if t.dark_base { 90 } else { 36 };
+            p.line_segment(
+                [
+                    pos2(cap_rect.left(), cap_rect.bottom()),
+                    pos2(cap_rect.right(), cap_rect.bottom()),
+                ],
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0, 0, 0, sep_alpha)),
+            );
+
+            let border_w = border_stroke_width(t);
+            let outer_stroke = if selected {
+                Stroke::new((border_w + 0.8).max(1.8), accent)
+            } else if chip_hovered {
+                Stroke::new((border_w + 0.3).max(1.3), accent)
+            } else {
+                Stroke::new(border_w, rgb(t.card_border))
+            };
+            p.rect_stroke(rect.shrink(0.5), outer_r, outer_stroke, StrokeKind::Inside);
+
+            let text_pos = pos2(rect.left() + pad_l, text_center_y - galley.size().y * 0.5);
+            p.galley(text_pos, galley, text_c);
+
+            if chip_hovered || del_resp.hovered() {
+                paint_hover_close_x(&p, close_center, close_d, del_resp.hovered(), t);
+            }
+        }
+
+        if del_resp.clicked() {
+            SavedChipAction::Delete
+        } else if apply_resp.clicked() {
+            SavedChipAction::Apply
+        } else {
+            SavedChipAction::None
+        }
+    })
+    .inner
 }
 
 #[cfg(test)]
