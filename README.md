@@ -1,4 +1,4 @@
-# Omvix Hub (`v0.7.0`)
+# Omvix Hub (`v0.8.0`)
 
 **HP Victus & OMEN** dizüstü bilgisayarlar için **Rust** ile geliştirilmiş; hafif, telemetrisiz (sıfır telemetry/bulut bağlantısı), güvenli donanım koruma katmanlarına sahip performans, bağımsız CPU/GPU fan, batarya sağlığı, klavye aydınlatma ve ekran kontrol merkezi.
 
@@ -23,7 +23,7 @@
 ## Öne Çıkan Özellikler
 
 - **Minimal G-Helper Tarzı Kokpit:** Tek pencerede Performans Modu, bağımsız/bağlı CPU & GPU fan kontrolü, hızlı CPU Boost & Hz seçimi, Batarya Şarj Limiti, 4 bölgeli Klavye RGB aydınlatma ve canlı CPU/GPU sıcaklık/RPM göstergeleri.
-- **Bağımsız Çift Fan Kontrolü (CPU & GPU):** CPU ve GPU fanları için ayrı **Otomatik**, **Maksimum**, **Sabit %** ve **8 Noktalı Özel Eğri** desteği (`0x2E [CPU, GPU]`) ve isteğe bağlı **Fanları Bağla** anahtarı.
+- **Bağımsız Çift Fan Kontrolü (CPU & GPU):** CPU ve GPU fanları için ayrı **Otomatik**, **Maksimum**, **Sabit %** ve güç duyarlı EMA yumuşatmalı, `0 RPM <-> 1800 RPM` Schmitt tetikli ve hız değişim sınırlamalı (Turbo Boost iğnelerini süzgeçleyen) **8 Noktalı Özel Eğri** desteği (`0x2E [CPU, GPU]`) ve isteğe bağlı **Fanları Bağla** anahtarı.
 - **Otonom Batarya Bakımı ve Arka Plan Servisi:** `60%` Masaüstü, `80%` Dengeli, `90%` Seyahat veya özel eşikler, tek seferlik **%100 Seyahat Şarjı** (otomatik zaman/dolum sıfırlamalı), uyku/kapanmada **Kilitli Beklet (`Hold`)** ve uygulama kapalıyken çalışan **OmvixBatteryService**.
 - **Gelişmiş Tema & Görünüm Motoru:** Hazır koyu/açık/yüksek kontrast temalar, 12 renkli özel tema paleti, köşe yuvarlaklığı (`card_radius`, `control_radius`) ve çerçeve kalınlığı ayarları, `OMVIX2|...` tema paylaşım kodları.
 - **Otomasyon:** Priz/Pil (AC/DC) geçiş profilleri ve `.exe` algılamalı Uygulama Profilleri.

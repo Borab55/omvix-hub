@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-27
+
 ### Added
 - **Acoustically Smooth Custom Fan Curves (`omvix-core`, `omvix-hub`):**
   - Added time-step-independent asymmetric EMA filtering (`CurveSmoother` in `omvix-core::thermal`), weighting CPU ramp-up `tau` by package power (`cpu_power_w` / `chassis_temp_c`) to ignore 1–2s low-Watt Turbo spikes while responding rapidly to sustained loads, and smoothing GPU Optimus (`gpu_sleeping`) sensor handoffs.
@@ -15,7 +17,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
   - Generalized `spawn_hp_wmi_event_listener` on `root\WMI` `hpqBEvnt` notifications and added low-overhead worker synchronization (`PollExternalHardwareState` + periodic polling) for external `Fn` keyboard backlight toggles/colors as well as external display refresh rate, CPU Boost, and Windows Power Mode changes.
   - Guarded `SystemResumed` and AC/DC Auto-Profile transitions (`keyboard_dimmed_by_auto_profile`) so lights turned off externally by the user remain off instead of being overridden.
 - **Theme Shape & Dedicated Appearance Tab (`omvix-core`, `omvix-hub`):** Moved theme, custom color palette, accessibility font scaling, and High Contrast controls into a dedicated **Extra -> Appearance & Theme** tab (`ExtraSubTab::Appearance`), added customizable **Card Corner Radius**, **Button/Control Radius**, and **Border Width** sliders (`CustomThemeConfig` shape fields, `CURRENT_CONFIG_VERSION = 9`), `OMVIX2|...|shape=...|` share-code roundtrip, and borderless compact cockpit footer actions (`vX.Y.Z` clickable update shortcut, `Undo`, `Hide`, `Exit`).
-- **Regression & Integration Tests (`omvix-core`, `omvix-windows`, `omvix-hub`):** Added tests for `CrashGuardState` eviction after >10 healthy launches, channel-aware `ThermalSafetyGuard` + non-finite temp filtering, `AppConfig::sanitize` PL1<=PL2 & duplicate theme deduplication, I/O error quarantine preservation, locale placeholder parity, duplicate hotkey token rejection, `SetFanMode` blocking during active Thermal Guard, partial `SetFanMode` command coalescing, App Profile rule-to-rule baseline restoration, legacy `"Eco"` -> `Quiet` config deserialization, `0x20009` backlight response & color-table parsing, external keyboard OFF/resume & auto-profile dim preservation, and external OS state sync (166 workspace tests passing).
+- **Regression & Integration Tests (`omvix-core`, `omvix-windows`, `omvix-hub`):** Added tests for `CrashGuardState` eviction after >10 healthy launches, channel-aware `ThermalSafetyGuard` + non-finite temp filtering, `AppConfig::sanitize` PL1<=PL2 & duplicate theme deduplication, I/O error quarantine preservation, locale placeholder parity, duplicate hotkey token rejection, `SetFanMode` blocking during active Thermal Guard, partial `SetFanMode` command coalescing, App Profile rule-to-rule baseline restoration, legacy `"Eco"` -> `Quiet` config deserialization, `0x20009` backlight response & color-table parsing, external keyboard OFF/resume & auto-profile dim preservation, external OS state sync, and `CurveSmoother` / `ZeroRpmCoolLatch` / slew-rate / WMI deadband fan curve stabilization (175 workspace tests passing).
 
 ### Changed
 - **Unified `Eco` + `Quiet` into Single `Quiet` Mode (`omvix-core`, `omvix-cli`, `omvix-hub`, `locales`):** Removed `PerformanceMode::Eco` (`CliPerfMode::Eco`, tray/cockpit/drawer controls, and `mode_eco` locale keys) while keeping `#[serde(alias = "Eco")]` on `PerformanceMode::Quiet` for seamless backwards-compatible loading of existing `config.toml` files without `.bad` quarantine, preserving HP BIOS (`0x50` / `0x02`) and `WindowsPowerOverlay::BestPowerEfficiency` mappings.
@@ -24,6 +26,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 - **UI & Profiles (`omvix-hub`):**
   - Rendered saved custom themes inline right alongside built-in theme presets in **Extra -> Appearance & Theme** instead of a separate `My Saved Themes` section, and removed now-unused locale keys symmetrically (`en.json` / `tr.json`).
   - Added hover-revealed circular `×` delete chips (`saved_pill_chip`, `lighting_profile_chip`) across all custom profile lists (Custom Battery Profiles in both Cockpit & Battery Care, and Custom Lighting Profiles inline next to color presets in Cockpit & Lighting/Display).
+  - Removed `push_id` wrappers inside `horizontal_wrapped` rows and constrained card widths to prevent horizontal profile chip overflow.
 - **Display Refresh Rate & Startup Restore (`omvix-windows`, `omvix-hub`):**
   - Fixed Windows display detection/switching (`WindowsDisplayBackend`) to resolve the active internal panel via Win32 `QueryDisplayConfig` (`CCD`), preventing hybrid/dual-GPU virtual display topologies from misreporting `60 Hz` when the panel actually runs at `144 Hz` (and refreshing display/OS state on sleep resume).
   - Added `WorkerEngine::apply_startup_saved_settings` to restore saved performance mode, non-Auto dual fan settings, CPU Turbo Boost, PL1/PL2 power limits, and battery care thresholds on launch (while respecting Safe Mode).
