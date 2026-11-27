@@ -21,7 +21,6 @@ pub enum TrayAction {
 /// Returns `(ring_rgb, core_rgb)` accent colors reflecting the active thermal performance mode.
 pub fn performance_mode_ring_rgb(mode: PerformanceMode) -> ([u8; 3], [u8; 3]) {
     match mode {
-        PerformanceMode::Eco => ([34, 197, 94], [110, 231, 183]),
         PerformanceMode::Quiet => ([45, 212, 191], [153, 246, 228]),
         PerformanceMode::Balanced => ([0, 196, 235], [56, 224, 255]),
         PerformanceMode::Performance => ([239, 68, 68], [252, 165, 165]),
@@ -99,7 +98,6 @@ pub struct TrayController {
     _tray: TrayIcon,
     item_toggle: MenuItem,
     sub_perf: Submenu,
-    item_mode_eco: CheckMenuItem,
     item_mode_quiet: CheckMenuItem,
     item_mode_balanced: CheckMenuItem,
     item_mode_perf: CheckMenuItem,
@@ -115,7 +113,7 @@ pub struct TrayController {
     item_bat_100: CheckMenuItem,
     item_quit: MenuItem,
     last_icon_state: Option<(PerformanceMode, BatteryChargeMode)>,
-    last_checked_state: Option<(PerformanceMode, FanMode, bool, u8)>,
+    last_checked_state: Option<(PerformanceMode, Option<FanMode>, bool, u8)>,
 }
 
 impl TrayController {
@@ -126,13 +124,6 @@ impl TrayController {
         let item_toggle =
             MenuItem::with_id(MenuId::new("toggle"), i18n.t("app.tray.show"), true, None);
 
-        let item_mode_eco = CheckMenuItem::with_id(
-            MenuId::new("mode_eco"),
-            i18n.t("app.tray.mode_eco"),
-            true,
-            false,
-            None,
-        );
         let item_mode_quiet = CheckMenuItem::with_id(
             MenuId::new("mode_quiet"),
             i18n.t("app.tray.mode_quiet"),
@@ -155,7 +146,6 @@ impl TrayController {
             None,
         );
         let sub_perf = Submenu::new(i18n.t("thermal.mode"), true);
-        let _ = sub_perf.append(&item_mode_eco);
         let _ = sub_perf.append(&item_mode_quiet);
         let _ = sub_perf.append(&item_mode_balanced);
         let _ = sub_perf.append(&item_mode_perf);
@@ -251,7 +241,6 @@ impl TrayController {
             _tray: tray,
             item_toggle,
             sub_perf,
-            item_mode_eco,
             item_mode_quiet,
             item_mode_balanced,
             item_mode_perf,
@@ -278,7 +267,7 @@ impl TrayController {
     pub fn update_visual_state(
         &mut self,
         perf_mode: PerformanceMode,
-        fan_mode: FanMode,
+        fan_mode: Option<FanMode>,
         bat_enabled: bool,
         bat_stop_pct: u8,
         bat_hw_mode: BatteryChargeMode,
@@ -296,7 +285,6 @@ impl TrayController {
                 let _ = self._tray.set_icon(Some(icon));
             }
             let mode_name = match perf_mode {
-                PerformanceMode::Eco => i18n.t("thermal.mode_eco"),
                 PerformanceMode::Quiet => i18n.t("thermal.mode_quiet"),
                 PerformanceMode::Balanced => i18n.t("thermal.mode_balanced"),
                 PerformanceMode::Performance => i18n.t("thermal.mode_performance"),
@@ -314,8 +302,6 @@ impl TrayController {
         let check_key = (perf_mode, fan_mode, bat_enabled, bat_stop_pct);
         if self.last_checked_state != Some(check_key) {
             self.last_checked_state = Some(check_key);
-            self.item_mode_eco
-                .set_checked(perf_mode == PerformanceMode::Eco);
             self.item_mode_quiet
                 .set_checked(perf_mode == PerformanceMode::Quiet);
             self.item_mode_balanced
@@ -323,12 +309,14 @@ impl TrayController {
             self.item_mode_perf
                 .set_checked(perf_mode == PerformanceMode::Performance);
 
-            self.item_fan_auto.set_checked(fan_mode == FanMode::Auto);
-            self.item_fan_max.set_checked(fan_mode == FanMode::Max);
+            self.item_fan_auto
+                .set_checked(fan_mode == Some(FanMode::Auto));
+            self.item_fan_max
+                .set_checked(fan_mode == Some(FanMode::Max));
             self.item_fan_manual
-                .set_checked(fan_mode == FanMode::Manual);
+                .set_checked(fan_mode == Some(FanMode::Manual));
             self.item_fan_curve
-                .set_checked(fan_mode == FanMode::CustomCurve);
+                .set_checked(fan_mode == Some(FanMode::CustomCurve));
 
             self.item_bat_60
                 .set_checked(bat_enabled && bat_stop_pct == 60);
@@ -348,7 +336,6 @@ impl TrayController {
             i18n.t("app.tray.show")
         });
         self.sub_perf.set_text(i18n.t("thermal.mode"));
-        self.item_mode_eco.set_text(i18n.t("app.tray.mode_eco"));
         self.item_mode_quiet.set_text(i18n.t("app.tray.mode_quiet"));
         self.item_mode_balanced
             .set_text(i18n.t("app.tray.mode_balanced"));
@@ -377,7 +364,6 @@ impl TrayController {
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             match ev.id.0.as_str() {
                 "toggle" => actions.push(TrayAction::ToggleWindow),
-                "mode_eco" => actions.push(TrayAction::SetPerformance(PerformanceMode::Eco)),
                 "mode_quiet" => actions.push(TrayAction::SetPerformance(PerformanceMode::Quiet)),
                 "mode_balanced" => {
                     actions.push(TrayAction::SetPerformance(PerformanceMode::Balanced))
@@ -489,7 +475,6 @@ mod tests {
         let corner_idx = ((24 * 32 + 24) * 4) as usize;
 
         for mode in [
-            PerformanceMode::Eco,
             PerformanceMode::Quiet,
             PerformanceMode::Balanced,
             PerformanceMode::Performance,

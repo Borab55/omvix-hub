@@ -5,6 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en.json/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-27
+
+### Added
+- **Acoustically Smooth Custom Fan Curves (`omvix-core`, `omvix-hub`):**
+  - Added time-step-independent asymmetric EMA filtering (`CurveSmoother` in `omvix-core::thermal`), weighting CPU ramp-up `tau` by package power (`cpu_power_w` / `chassis_temp_c`) to ignore 1–2s low-Watt Turbo spikes while responding rapidly to sustained loads, and smoothing GPU Optimus (`gpu_sleeping`) sensor handoffs.
+  - Added dual-threshold Schmitt trigger hysteresis (`ZeroRpmCoolLatch`) around `0 RPM <-> 1800 RPM` (`>= 68°C CPU / 62°C GPU / 47°C Chassis` or raw `>= 75°C` to disable; `<= 60°C / 56°C / 44°C` to re-enable).
+  - Replaced peak-locking hysteresis on `WorkerEngine` with symmetric deadband anchors, asymmetric slew-rate limits (`+7%` up / `-3%` down per 2s step, bypassed above `85°C` raw CPU or `82°C` raw GPU), bumpless RPM seeding (`estimate_fan_speed_pct_from_rpm`), and WMI step deadband gating (`fan_channel_exceeds_wmi_deadband`) while keeping raw `TelemetrySnapshot` and `ThermalSafetyGuard` unchanged.
+- **External Keyboard & Hardware State Sync (`omvix-core`, `omvix-windows`, `omvix-hub`):**
+  - Added read-only `KeyboardBackend::get_backlight` (`0x20009 / 0x04` power status + `0x20009 / 0x02` 4-zone RGB color table on supported HP firmware, falling back to `None` without guessing unrecognized BIOS response bytes).
+  - Generalized `spawn_hp_wmi_event_listener` on `root\WMI` `hpqBEvnt` notifications and added low-overhead worker synchronization (`PollExternalHardwareState` + periodic polling) for external `Fn` keyboard backlight toggles/colors as well as external display refresh rate, CPU Boost, and Windows Power Mode changes.
+  - Guarded `SystemResumed` and AC/DC Auto-Profile transitions (`keyboard_dimmed_by_auto_profile`) so lights turned off externally by the user remain off instead of being overridden.
+- **Theme Shape & Dedicated Appearance Tab (`omvix-core`, `omvix-hub`):** Moved theme, custom color palette, accessibility font scaling, and High Contrast controls into a dedicated **Extra -> Appearance & Theme** tab (`ExtraSubTab::Appearance`), added customizable **Card Corner Radius**, **Button/Control Radius**, and **Border Width** sliders (`CustomThemeConfig` shape fields, `CURRENT_CONFIG_VERSION = 9`), `OMVIX2|...|shape=...|` share-code roundtrip, and borderless compact cockpit footer actions (`vX.Y.Z` clickable update shortcut, `Undo`, `Hide`, `Exit`).
+- **Regression & Integration Tests (`omvix-core`, `omvix-windows`, `omvix-hub`):** Added tests for `CrashGuardState` eviction after >10 healthy launches, channel-aware `ThermalSafetyGuard` + non-finite temp filtering, `AppConfig::sanitize` PL1<=PL2 & duplicate theme deduplication, I/O error quarantine preservation, locale placeholder parity, duplicate hotkey token rejection, `SetFanMode` blocking during active Thermal Guard, partial `SetFanMode` command coalescing, App Profile rule-to-rule baseline restoration, legacy `"Eco"` -> `Quiet` config deserialization, `0x20009` backlight response & color-table parsing, external keyboard OFF/resume & auto-profile dim preservation, external OS state sync, and `CurveSmoother` / `ZeroRpmCoolLatch` / slew-rate / WMI deadband fan curve stabilization (175 workspace tests passing).
+
+### Changed
+- **Unified `Eco` + `Quiet` into Single `Quiet` Mode (`omvix-core`, `omvix-cli`, `omvix-hub`, `locales`):** Removed `PerformanceMode::Eco` (`CliPerfMode::Eco`, tray/cockpit/drawer controls, and `mode_eco` locale keys) while keeping `#[serde(alias = "Eco")]` on `PerformanceMode::Quiet` for seamless backwards-compatible loading of existing `config.toml` files without `.bad` quarantine, preserving HP BIOS (`0x50` / `0x02`) and `WindowsPowerOverlay::BestPowerEfficiency` mappings.
+
+### Fixed
+- **UI & Profiles (`omvix-hub`):**
+  - Rendered saved custom themes inline right alongside built-in theme presets in **Extra -> Appearance & Theme** instead of a separate `My Saved Themes` section, and removed now-unused locale keys symmetrically (`en.json` / `tr.json`).
+  - Added hover-revealed circular `×` delete chips (`saved_pill_chip`, `lighting_profile_chip`) across all custom profile lists (Custom Battery Profiles in both Cockpit & Battery Care, and Custom Lighting Profiles inline next to color presets in Cockpit & Lighting/Display).
+  - Removed `push_id` wrappers inside `horizontal_wrapped` rows and constrained card widths to prevent horizontal profile chip overflow.
+- **Display Refresh Rate & Startup Restore (`omvix-windows`, `omvix-hub`):**
+  - Fixed Windows display detection/switching (`WindowsDisplayBackend`) to resolve the active internal panel via Win32 `QueryDisplayConfig` (`CCD`), preventing hybrid/dual-GPU virtual display topologies from misreporting `60 Hz` when the panel actually runs at `144 Hz` (and refreshing display/OS state on sleep resume).
+  - Added `WorkerEngine::apply_startup_saved_settings` to restore saved performance mode, non-Auto dual fan settings, CPU Turbo Boost, PL1/PL2 power limits, and battery care thresholds on launch (while respecting Safe Mode).
+- **Core & CLI (`omvix-core`, `omvix-cli`):**
+  - Made `ThermalSafetyGuard::evaluate` (both engagement and release) **channel-aware** (`fan_rpms[0]` for CPU/chassis load, `fan_rpms[1]` for GPU load) and filtered `NaN`/infinite temperatures, eliminating false emergency Max Fan trips when CPU load is warm while an idle/sleeping GPU fan runs below `1800 RPM` (observed in `omvix.log`).
+  - Fixed `CrashGuardState::record_launch_start` evicting the newly pushed launch record once 10 healthy launches accumulated, which previously disabled crash-loop detection.
+  - Fixed `FanCurve::normalize` (deduplicate equal temperatures preferring higher fan speed and preserve hottest point when capping at 8) and `FanCurve::evaluate` (ensure downward hysteresis never blocks upward curve ramps).
+  - Preserved `config.toml` untouched on transient `OmvixError::Io` read failures instead of renaming to `.bad`, enforced `PL1 <= PL2`, deduplicated saved themes, cleared `0 Hz` overrides, rejected non-manual `--speed` in `omvix-cli fan set`, warned to `stderr` on config parse fallback, preserved log level verbosity with `-v`, and created missing parent directories on `export-diagnostics`.
+- **Windows Backend (`omvix-windows`):**
+  - Fixed `PawnIoCpuTempReader` retry cooldown updates when `IntelMSR.bin` is absent (eliminating 10 Hz filesystem stat polling), cached GPU adapter name once, recovered `Nvml` automatically on `GpuLost`/`Uninitialized`, and reserved `last_ec_poll` under lock to prevent concurrent EC/WMI double polls.
+  - Replaced `WBEM_INFINITE` WMI query waits with a 10-second `WBEM_S_TIMEDOUT` timeout, converted COM/WMI thread caching flags to refcounted depth (`Cell<usize>`) with `try_borrow_mut()` reentrancy fallbacks, and validated 1D `SAFEARRAY` bounds cleanly.
+  - Added WMI operation serialization mutex (`wmi_op_lock`) and cached `0x2F` max fan level queries in `WindowsThermalFanBackend`, capped `IntelMSR.bin` reads at 4 MiB + hardened PawnIO PowerShell downloads (`-NonInteractive`, `-UseBasicParsing`, TLS 1.2/1.3).
+  - Fixed `BatteryServiceConfig::save_to_path` retry/temp cleanup, hysteresis reset when service is disabled, timeout error return on `wait_until_running`, duplicate `schedule_delete_on_reboot` call, atomic `last_cfg_mtime` updates on reload, `ListenerHandle::drop` / `PowerEventHandle::drop` thread joins, `MOD_NOREPEAT` + duplicate-key rejection + WMI OMEN-key reconnect backoff, Win32 OSD panic cleanup & `SetTimer` failure guard, and collision-free `.old` autostart backup naming.
+- **Desktop App & UI (`omvix-hub`):**
+  - Enforced `ThermalSafetyGuard` priority in `WorkerCommand::SetFanMode`, cleared `ThermalSafetyGuard` cleanly upon `SensorLossDecision::EngageAutoFallback`, committed fan config mutations only after hardware writes succeed, preserved partial CPU/GPU fan fields during `coalesce_segment`, tracked initial curve application (`prev_curve_applied` + cool-hint edge tracking), stored `link_cpu_gpu_fans` in `RevertPayload::FanMode`, moved `telemetry_csv_rows` behind `Arc<Mutex<_>>` (eliminating 60 Hz VecDeque cloning), offloaded Support Bundle ZIP packing to a background thread, synced `self.cfg` on `RestoreAllDefaults`, and restored `None`-valued overrides + GPU fan baselines when switching directly between App Profile rules.
+  - Added bounded startup retry loop (15 attempts / 30s) when Windows Shell notification tray initialization transiently fails (`os error -2147467259`), cleared ambiguous tray fan checkmarks on mixed CPU/GPU modes, guarded tray hardware writes cleanly, and relaxed tray quit watchdog from `1.75s` to `4.5s`.
+  - Fixed Battery Care service path button overlap, chart tooltip `clamp` panic bounds on narrow widths, 2-second TTL log preview caching + 2-frame update scroll reliability in Settings, no-op clicks on already active GPU MUX modes, horizontal scroll on battery history table, `push_id` on battery custom profile rows, and synced active custom theme names on save.
+  - Removed 5 dead translation keys symmetrically from `locales/en.json` and `locales/tr.json` and extended `i18n` parity tests to validate `{placeholder}` consistency.
+
 ## [0.7.0] - 2026-11-26
 
 ### Added

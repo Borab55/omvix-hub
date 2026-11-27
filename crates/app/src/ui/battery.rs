@@ -1,6 +1,7 @@
 use crate::theme::{
-    accent_color, card_frame, feature_toggle_button, muted_text, pill_button, section_title,
-    section_toggle_button, status_badge, status_err, status_ok, status_warn,
+    accent_color, card_frame, feature_toggle_button, muted_text, pill_button, saved_pill_chip,
+    section_title, section_toggle_button, status_badge, status_err, status_ok, status_warn,
+    SavedChipAction,
 };
 use crate::ui::charts::battery_health_chart;
 use crate::ui::cockpit::{apply_battery_profile, is_profile_active};
@@ -197,26 +198,30 @@ pub fn render(
             );
             ui.add_space(4.0);
             ui.collapsing(i18n.t("battery.health_history_table"), |ui| {
-                egui::Grid::new("battery_health_history_grid")
-                    .striped(true)
-                    .num_columns(4)
-                    .spacing([14.0, 4.0])
+                egui::ScrollArea::horizontal()
+                    .id_salt("battery_health_history_hscroll")
                     .show(ui, |ui| {
-                        ui.strong(i18n.t("battery.history_date"));
-                        ui.strong(i18n.t("battery.history_capacity"));
-                        ui.strong(i18n.t("battery.health"));
-                        ui.strong(i18n.t("battery.wear_level"));
-                        ui.end_row();
-                        for rec in st.battery_health_history.iter().rev().take(16) {
-                            ui.monospace(&rec.date_label);
-                            ui.monospace(format!(
-                                "{} / {} mWh",
-                                rec.full_charge_capacity_mwh, rec.design_capacity_mwh
-                            ));
-                            ui.label(format!("{:.1}%", rec.health_pct));
-                            ui.label(format!("{:.1}%", rec.wear_pct));
-                            ui.end_row();
-                        }
+                        egui::Grid::new("battery_health_history_grid")
+                            .striped(true)
+                            .num_columns(4)
+                            .spacing([14.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong(i18n.t("battery.history_date"));
+                                ui.strong(i18n.t("battery.history_capacity"));
+                                ui.strong(i18n.t("battery.health"));
+                                ui.strong(i18n.t("battery.wear_level"));
+                                ui.end_row();
+                                for rec in st.battery_health_history.iter().rev().take(16) {
+                                    ui.monospace(&rec.date_label);
+                                    ui.monospace(format!(
+                                        "{} / {} mWh",
+                                        rec.full_charge_capacity_mwh, rec.design_capacity_mwh
+                                    ));
+                                    ui.label(format!("{:.1}%", rec.health_pct));
+                                    ui.label(format!("{:.1}%", rec.wear_pct));
+                                    ui.end_row();
+                                }
+                            });
                     });
             });
         }
@@ -258,6 +263,9 @@ pub fn render(
 
     // Custom User Profiles Card
     card_frame(t).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("battery.custom_profiles"), t);
         ui.add_space(4.0);
 
@@ -266,22 +274,32 @@ pub fn render(
         } else {
             let mut apply_profile: Option<BatteryProfile> = None;
             let mut delete_idx: Option<usize> = None;
+            let del_tip = i18n.t("battery.delete");
 
-            for (idx, prof) in cfg.battery.custom_profiles.iter().enumerate() {
-                let is_active = cfg.battery.active_profile_id.as_deref() == Some(&prof.id);
-                ui.horizontal_wrapped(|ui| {
-                    if pill_button(ui, &prof.name, is_active, t).clicked() {
-                        apply_profile = Some(prof.clone());
-                    }
-                    ui.weak(format!(
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                for (idx, prof) in cfg.battery.custom_profiles.iter().enumerate() {
+                    let is_active = cfg.battery.active_profile_id.as_deref() == Some(&prof.id);
+                    let label = format!("{} ({}%)", prof.name, prof.stop_threshold_pct);
+                    let tip = format!(
                         "{}% / {}%  •  {:?}",
                         prof.stop_threshold_pct, prof.start_threshold_pct, prof.mode
-                    ));
-                    if ui.button(i18n.t("battery.delete")).clicked() {
-                        delete_idx = Some(idx);
+                    );
+                    match saved_pill_chip(
+                        ui,
+                        (&prof.id, idx),
+                        &label,
+                        is_active,
+                        Some(&tip),
+                        &del_tip,
+                        t,
+                    ) {
+                        SavedChipAction::Apply => apply_profile = Some(prof.clone()),
+                        SavedChipAction::Delete => delete_idx = Some(idx),
+                        SavedChipAction::None => {}
                     }
-                });
-            }
+                }
+            });
 
             if let Some(p) = apply_profile {
                 apply_battery_profile(cfg, &p);
@@ -525,48 +543,64 @@ pub fn render(
             .as_deref()
             .unwrap_or(&svc.installed_exe_path);
 
-        egui::Grid::new("battery_service_paths_grid")
-            .num_columns(2)
-            .spacing([14.0, 4.0])
-            .show(ui, |ui| {
-                ui.label(i18n.t("battery.service_name_label"));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("{}  (LocalSystem · AutoStart)", svc.service_name))
-                            .monospace(),
-                    )
-                    .wrap(),
-                );
-                ui.end_row();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(i18n.t("battery.service_name_label")).strong());
+            ui.monospace(format!("{}  (LocalSystem · AutoStart)", svc.service_name));
+        });
 
-                ui.label(i18n.t("battery.service_exe_path"));
-                ui.horizontal_wrapped(|ui| {
-                    ui.add(egui::Label::new(RichText::new(exe_display).monospace()).wrap());
-                    if svc.exe_exists
-                        && ui
-                            .small_button(i18n.t("battery.service_open_folder"))
-                            .clicked()
-                    {
-                        if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
-                            open_folder_in_explorer(dir);
-                        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(i18n.t("battery.service_exe_path")).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if svc.exe_exists
+                    && ui
+                        .push_id("open_svc_exe_dir", |ui| {
+                            ui.small_button(i18n.t("battery.service_open_folder"))
+                        })
+                        .inner
+                        .clicked()
+                {
+                    if let Some(dir) = Path::new(&svc.installed_exe_path).parent() {
+                        open_folder_in_explorer(dir);
                     }
-                });
-                ui.end_row();
-
-                ui.label(i18n.t("battery.service_data_path"));
-                ui.horizontal_wrapped(|ui| {
-                    ui.add(egui::Label::new(RichText::new(&svc.data_dir_path).monospace()).wrap());
-                    if svc.data_dir_exists
-                        && ui
-                            .small_button(i18n.t("battery.service_open_folder"))
-                            .clicked()
-                    {
-                        open_folder_in_explorer(Path::new(&svc.data_dir_path));
-                    }
-                });
-                ui.end_row();
+                }
             });
+        });
+        ui.add(
+            egui::Label::new(
+                RichText::new(exe_display)
+                    .monospace()
+                    .size(11.5)
+                    .color(muted_text(t)),
+            )
+            .wrap(),
+        );
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(i18n.t("battery.service_data_path")).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if svc.data_dir_exists
+                    && ui
+                        .push_id("open_svc_data_dir", |ui| {
+                            ui.small_button(i18n.t("battery.service_open_folder"))
+                        })
+                        .inner
+                        .clicked()
+                {
+                    open_folder_in_explorer(Path::new(&svc.data_dir_path));
+                }
+            });
+        });
+        ui.add(
+            egui::Label::new(
+                RichText::new(&svc.data_dir_path)
+                    .monospace()
+                    .size(11.5)
+                    .color(muted_text(t)),
+            )
+            .wrap(),
+        );
 
         ui.add_space(8.0);
         if cfg.battery.enabled

@@ -14,7 +14,7 @@ const SIGN_SECU: [u8; 4] = [0x53, 0x45, 0x43, 0x55]; // "SECU"
 static LOGGED_CONNECT: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    static BIOS_CACHE_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static BIOS_CACHE_DEPTH: Cell<usize> = const { Cell::new(0) };
     static BIOS_CACHE: RefCell<Option<HpWmiBios>> = const { RefCell::new(None) };
 }
 
@@ -24,10 +24,18 @@ pub struct ThreadWmiSessionGuard;
 
 impl Drop for ThreadWmiSessionGuard {
     fn drop(&mut self) {
-        BIOS_CACHE_ENABLED.with(|c| c.set(false));
-        BIOS_CACHE.with(|cell| {
-            *cell.borrow_mut() = None;
+        let next_depth = BIOS_CACHE_DEPTH.with(|c| {
+            let next = c.get().saturating_sub(1);
+            c.set(next);
+            next
         });
+        if next_depth == 0 {
+            BIOS_CACHE.with(|cell| {
+                if let Ok(mut slot) = cell.try_borrow_mut() {
+                    *slot = None;
+                }
+            });
+        }
         set_root_wmi_cache_enabled(false);
     }
 }
@@ -82,7 +90,7 @@ pub struct HpWmiBios {
 impl HpWmiBios {
     /// Enables persistent per-thread WMI BIOS & `root\WMI` session caching until the guard drops.
     pub fn enable_thread_cache() -> ThreadWmiSessionGuard {
-        BIOS_CACHE_ENABLED.with(|c| c.set(true));
+        BIOS_CACHE_DEPTH.with(|c| c.set(c.get().saturating_add(1)));
         set_root_wmi_cache_enabled(true);
         ThreadWmiSessionGuard
     }
@@ -90,14 +98,17 @@ impl HpWmiBios {
     /// Runs `f` against the thread's cached `HpWmiBios` session when caching is active,
     /// or connects once for ad-hoc callers. Automatically invalidates cache on transport failures.
     pub fn with_cached<T>(f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        let enabled = BIOS_CACHE_ENABLED.with(|c| c.get());
+        let enabled = BIOS_CACHE_DEPTH.with(|c| c.get() > 0);
         if !enabled {
             let bios = Self::connect()?;
             return f(&bios);
         }
 
         BIOS_CACHE.with(|cell| {
-            let mut slot = cell.borrow_mut();
+            let Ok(mut slot) = cell.try_borrow_mut() else {
+                let bios = Self::connect()?;
+                return f(&bios);
+            };
             if slot.is_none() {
                 *slot = Some(Self::connect()?);
             }

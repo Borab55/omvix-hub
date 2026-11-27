@@ -164,7 +164,10 @@ impl BatteryServiceConfig {
         }
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, raw)?;
-        fs::rename(&tmp, path)?;
+        if let Err(err) = while_in_use(|| fs::rename(&tmp, path)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err.into());
+        }
         Ok(())
     }
 }
@@ -211,11 +214,7 @@ pub fn evaluate_service_tick(
     ac_connected: bool,
     now_utc: i64,
 ) -> (BatteryChargeMode, bool) {
-    let target = if bat_cfg.enabled {
-        engine.evaluate_at(bat_cfg, charge_pct, ac_connected, now_utc)
-    } else {
-        BatteryChargeMode::Auto
-    };
+    let target = engine.evaluate_at(bat_cfg, charge_pct, ac_connected, now_utc);
     let travel_changed = svc_cfg.one_time_full_charge != bat_cfg.one_time_full_charge
         || svc_cfg.travel_charge_until_utc != bat_cfg.travel_charge_until_utc;
     if travel_changed {
@@ -422,7 +421,9 @@ fn wait_until_running(svc: SC_HANDLE) -> Result<()> {
             )));
         }
         if Instant::now() >= deadline {
-            return Ok(());
+            return Err(OmvixError::WmiUnavailable(format!(
+                "Timed out waiting for {SERVICE_NAME} to enter SERVICE_RUNNING"
+            )));
         }
         thread::sleep(Duration::from_millis(200));
     }
@@ -647,7 +648,6 @@ pub fn uninstall_service_zero_trace() -> Result<String> {
             .is_some_and(|cur| same_file(cur, &exe_path));
         if is_self {
             if schedule_delete_on_reboot(&exe_path) {
-                let _ = schedule_delete_on_reboot(&i_dir);
                 deferred_reboot = true;
             }
         } else if while_in_use(|| fs::remove_file(&exe_path)).is_err()
@@ -851,10 +851,11 @@ fn run_daemon_loop(rx: &Receiver<DaemonEvent>) -> u32 {
         // Reload config promptly when updated from the Omvix Hub UI
         let cur_mtime = fs::metadata(&cfg_path).and_then(|m| m.modified()).ok();
         if cur_mtime.is_some() && cur_mtime != last_cfg_mtime {
-            last_cfg_mtime = cur_mtime;
             if is_reparse_point(&cfg_path) {
+                last_cfg_mtime = cur_mtime;
                 daemon_log("Refusing config reload: target path is a reparse point");
             } else if let Ok(reloaded) = BatteryServiceConfig::load_from_path(&cfg_path) {
+                last_cfg_mtime = cur_mtime;
                 svc_cfg = reloaded;
                 bat_cfg = svc_cfg.to_battery_config();
                 last_applied = None;

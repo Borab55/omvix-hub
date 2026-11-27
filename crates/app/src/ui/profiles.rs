@@ -36,7 +36,6 @@ impl Default for ProfilesDraftState {
 
 fn perf_label(i18n: &I18n, mode: PerformanceMode) -> String {
     match mode {
-        PerformanceMode::Eco => i18n.t("thermal.mode_eco"),
         PerformanceMode::Quiet => i18n.t("thermal.mode_quiet"),
         PerformanceMode::Balanced => i18n.t("thermal.mode_balanced"),
         PerformanceMode::Performance => i18n.t("thermal.mode_performance"),
@@ -92,7 +91,6 @@ fn render_power_source_profile(
             .selected_text(perf_label(i18n, *perf_mode))
             .show_ui(ui, |ui| {
                 for m in [
-                    PerformanceMode::Eco,
                     PerformanceMode::Quiet,
                     PerformanceMode::Balanced,
                     PerformanceMode::Performance,
@@ -417,7 +415,6 @@ pub fn render(
                     .selected_text(perf_label(i18n, draft.new_perf_mode))
                     .show_ui(ui, |ui| {
                         for m in [
-                            PerformanceMode::Eco,
                             PerformanceMode::Quiet,
                             PerformanceMode::Balanced,
                             PerformanceMode::Performance,

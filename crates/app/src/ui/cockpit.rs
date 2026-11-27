@@ -1,9 +1,9 @@
 use crate::theme::{
     accent_color, clickable_status_badge, clickable_warning_badge, compact_card,
-    compact_toggle_pill, detail_dial_button, fixed_color_picker_button, lighting_profile_button,
-    lighting_swatch_button, mode_tile_button, muted_text, pill_button, section_title,
-    section_toggle_button, status_badge, status_err, status_ok, status_warn, tile_button,
-    undo_button, ColorButtonStyle, TileIcon,
+    compact_toggle_pill, detail_dial_button, fixed_color_picker_button, footer_text_button,
+    lighting_profile_chip, lighting_swatch_button, mode_tile_button, muted_text, pill_button,
+    saved_pill_chip, section_title, section_toggle_button, status_badge, status_err, status_ok,
+    status_warn, tile_button, undo_text_button, ColorButtonStyle, SavedChipAction, TileIcon,
 };
 use crate::ui::lighting_display::{apply_lighting_profile, is_lighting_profile_active};
 use crate::ui::{control_committed, Drawer, ExtraSubTab, FansPowerSubTab};
@@ -22,6 +22,7 @@ pub struct CockpitActions {
     pub open_fans_power_subtab: Option<FansPowerSubTab>,
     pub open_extra_subtab: Option<ExtraSubTab>,
     pub open_profiles: bool,
+    pub open_updates: bool,
     pub restart_admin: bool,
     pub hide_to_tray: bool,
     pub quit_app: bool,
@@ -29,7 +30,6 @@ pub struct CockpitActions {
 
 fn perf_mode_name(i18n: &I18n, mode: PerformanceMode) -> String {
     match mode {
-        PerformanceMode::Eco => i18n.t("thermal.mode_eco"),
         PerformanceMode::Quiet => i18n.t("thermal.mode_quiet"),
         PerformanceMode::Balanced => i18n.t("thermal.mode_balanced"),
         PerformanceMode::Performance => i18n.t("thermal.mode_performance"),
@@ -145,7 +145,7 @@ pub fn render(
                     .on_hover_text(i18n.t("updates.cockpit_tooltip"))
                     .clicked()
                 {
-                    actions.open_extra_subtab = Some(ExtraSubTab::Settings);
+                    actions.open_updates = true;
                 }
             }
         });
@@ -280,10 +280,17 @@ pub fn render(
             } else {
                 cfg.thermal_fan.performance_mode
             };
-            let effective_fan = if st.active_app_profile.is_some() {
+            let effective_cpu_fan = if st.active_app_profile.is_some() {
                 st.effective_fan_mode
             } else {
                 cfg.thermal_fan.fan_mode
+            };
+            let effective_gpu_fan = if st.active_app_profile.is_some() {
+                st.effective_gpu_fan_mode
+            } else if cfg.thermal_fan.link_cpu_gpu_fans {
+                cfg.thermal_fan.fan_mode
+            } else {
+                cfg.thermal_fan.gpu_fan_mode
             };
 
             // Card A: Performance Mode (`Mod: <Mode> · 25W`  |  `CPU: 37°C  Fan: 2000 RPM`)
@@ -367,12 +374,6 @@ pub fn render(
                 ui.add_space(4.0);
                 let items = [
                     (
-                        PerformanceMode::Eco,
-                        TileIcon::Leaf,
-                        i18n.t("thermal.mode_eco"),
-                        Color32::from_rgb(74, 222, 128),
-                    ),
-                    (
                         PerformanceMode::Quiet,
                         TileIcon::Feather,
                         i18n.t("thermal.mode_quiet"),
@@ -415,11 +416,20 @@ pub fn render(
                 ui.set_max_width(card_inner_w);
 
                 ui.horizontal(|ui| {
-                    let fan_title = format!(
-                        "{}: {}",
-                        i18n.t("cockpit.fan_prefix"),
-                        fan_mode_name(i18n, effective_fan)
-                    );
+                    let fan_title = if effective_cpu_fan == effective_gpu_fan {
+                        format!(
+                            "{}: {}",
+                            i18n.t("cockpit.fan_prefix"),
+                            fan_mode_name(i18n, effective_cpu_fan)
+                        )
+                    } else {
+                        format!(
+                            "{}: CPU {} / GPU {}",
+                            i18n.t("cockpit.fan_prefix"),
+                            fan_mode_name(i18n, effective_cpu_fan),
+                            fan_mode_name(i18n, effective_gpu_fan)
+                        )
+                    };
                     section_title(ui, fan_title, t);
                     if let Some(gpu_m) = st.gpu_mode.filter(|&m| m != GpuMode::Unknown) {
                         let mux_lbl = match gpu_m {
@@ -514,11 +524,12 @@ pub fn render(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for (mode, icon, label, border_c) in items {
-                        let selected = effective_fan == mode;
+                        let selected = effective_cpu_fan == mode && effective_gpu_fan == mode;
                         if mode_tile_button(ui, icon, &label, selected, Some(border_c), w, 46.0, t)
                             .clicked()
                         {
                             cfg.thermal_fan.fan_mode = mode;
+                            cfg.thermal_fan.gpu_fan_mode = mode;
                             on_save();
                             let cpu_pct = cfg.thermal_fan.manual_speed_pct;
                             let gpu_pct = if cfg.thermal_fan.link_cpu_gpu_fans {
@@ -528,6 +539,7 @@ pub fn render(
                             };
                             on_cmd(WorkerCommand::SetFanMode {
                                 mode,
+                                gpu_mode: Some(mode),
                                 manual_speed_pct: Some(cpu_pct),
                                 gpu_manual_speed_pct: Some(gpu_pct),
                             });
@@ -535,9 +547,9 @@ pub fn render(
                     }
                 });
 
-                if effective_fan == FanMode::Manual {
+                if effective_cpu_fan == FanMode::Manual || effective_gpu_fan == FanMode::Manual {
                     ui.add_space(4.0);
-                    if cfg.thermal_fan.link_cpu_gpu_fans {
+                    if cfg.thermal_fan.link_cpu_gpu_fans && effective_cpu_fan == FanMode::Manual {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(i18n.t("fan.manual_speed")).size(12.0));
                             ui.spacing_mut().slider_width = (card_inner_w - 135.0).max(160.0);
@@ -551,48 +563,55 @@ pub fn render(
                                 on_save();
                                 on_cmd(WorkerCommand::SetFanMode {
                                     mode: FanMode::Manual,
+                                    gpu_mode: Some(FanMode::Manual),
                                     manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
                                     gpu_manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
                                 });
                             }
                         });
                     } else {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(i18n.t("fan.cpu_fan_short")).size(12.0));
-                            ui.spacing_mut().slider_width = (card_inner_w - 125.0).max(160.0);
-                            let resp = ui.add(
-                                Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100)
-                                    .suffix("%"),
-                            );
-                            if control_committed(ui, "cockpit_manual_cpu_fan", &resp) {
-                                on_save();
-                                on_cmd(WorkerCommand::SetFanMode {
-                                    mode: FanMode::Manual,
-                                    manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
-                                    gpu_manual_speed_pct: Some(
-                                        cfg.thermal_fan.gpu_manual_speed_pct,
-                                    ),
-                                });
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(i18n.t("fan.gpu_fan_short")).size(12.0));
-                            ui.spacing_mut().slider_width = (card_inner_w - 125.0).max(160.0);
-                            let resp = ui.add(
-                                Slider::new(&mut cfg.thermal_fan.gpu_manual_speed_pct, 0..=100)
-                                    .suffix("%"),
-                            );
-                            if control_committed(ui, "cockpit_manual_gpu_fan", &resp) {
-                                on_save();
-                                on_cmd(WorkerCommand::SetFanMode {
-                                    mode: FanMode::Manual,
-                                    manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
-                                    gpu_manual_speed_pct: Some(
-                                        cfg.thermal_fan.gpu_manual_speed_pct,
-                                    ),
-                                });
-                            }
-                        });
+                        if effective_cpu_fan == FanMode::Manual {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(i18n.t("fan.cpu_fan_short")).size(12.0));
+                                ui.spacing_mut().slider_width = (card_inner_w - 125.0).max(160.0);
+                                let resp = ui.add(
+                                    Slider::new(&mut cfg.thermal_fan.manual_speed_pct, 0..=100)
+                                        .suffix("%"),
+                                );
+                                if control_committed(ui, "cockpit_manual_cpu_fan", &resp) {
+                                    on_save();
+                                    on_cmd(WorkerCommand::SetFanMode {
+                                        mode: FanMode::Manual,
+                                        gpu_mode: Some(cfg.thermal_fan.gpu_fan_mode),
+                                        manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                                        gpu_manual_speed_pct: Some(
+                                            cfg.thermal_fan.gpu_manual_speed_pct,
+                                        ),
+                                    });
+                                }
+                            });
+                        }
+                        if effective_gpu_fan == FanMode::Manual {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(i18n.t("fan.gpu_fan_short")).size(12.0));
+                                ui.spacing_mut().slider_width = (card_inner_w - 125.0).max(160.0);
+                                let resp = ui.add(
+                                    Slider::new(&mut cfg.thermal_fan.gpu_manual_speed_pct, 0..=100)
+                                        .suffix("%"),
+                                );
+                                if control_committed(ui, "cockpit_manual_gpu_fan", &resp) {
+                                    on_save();
+                                    on_cmd(WorkerCommand::SetFanMode {
+                                        mode: cfg.thermal_fan.fan_mode,
+                                        gpu_mode: Some(FanMode::Manual),
+                                        manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                                        gpu_manual_speed_pct: Some(
+                                            cfg.thermal_fan.gpu_manual_speed_pct,
+                                        ),
+                                    });
+                                }
+                            });
+                        }
                     }
                 }
             });
@@ -743,20 +762,48 @@ pub fn render(
 
                 if !cfg.battery.custom_profiles.is_empty() {
                     ui.add_space(3.0);
+                    let del_tip = i18n.t("battery.delete");
+                    let mut apply_custom = None;
+                    let mut delete_idx: Option<usize> = None;
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
-                        for custom in cfg.battery.custom_profiles.clone() {
+                        for (idx, custom) in cfg.battery.custom_profiles.iter().enumerate() {
                             let selected =
                                 cfg.battery.active_profile_id.as_deref() == Some(&custom.id);
                             let label = format!("{} ({}%)", custom.name, custom.stop_threshold_pct);
-                            if pill_button(ui, &label, selected, t).clicked() {
-                                apply_battery_profile(cfg, &custom);
-                                on_save();
-                                on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                                on_cmd(WorkerCommand::ApplyBatteryNow);
+                            let tip = format!(
+                                "{}% / {}%  •  {:?}",
+                                custom.stop_threshold_pct, custom.start_threshold_pct, custom.mode
+                            );
+                            match saved_pill_chip(
+                                ui,
+                                ("cockpit_bat", &custom.id, idx),
+                                &label,
+                                selected,
+                                Some(&tip),
+                                &del_tip,
+                                t,
+                            ) {
+                                SavedChipAction::Apply => apply_custom = Some(custom.clone()),
+                                SavedChipAction::Delete => delete_idx = Some(idx),
+                                SavedChipAction::None => {}
                             }
                         }
                     });
+                    if let Some(custom) = apply_custom {
+                        apply_battery_profile(cfg, &custom);
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyBatteryNow);
+                    }
+                    if let Some(idx) = delete_idx {
+                        let removed = cfg.battery.custom_profiles.remove(idx);
+                        if cfg.battery.active_profile_id.as_deref() == Some(&removed.id) {
+                            cfg.battery.active_profile_id = None;
+                        }
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    }
                 }
             });
 
@@ -834,22 +881,40 @@ pub fn render(
                             on_cmd(WorkerCommand::ApplyLighting);
                         }
                     }
-                    for custom in cfg.lighting.custom_profiles.clone() {
-                        let selected = is_lighting_profile_active(cfg, &custom);
-                        if lighting_profile_button(
-                            ui,
-                            &custom.name,
-                            &custom.zones,
-                            selected,
-                            four_zone,
-                            t,
-                        )
-                        .clicked()
-                        {
+                    if !cfg.lighting.custom_profiles.is_empty() {
+                        let del_tip = i18n.t("lighting.delete_profile");
+                        let mut apply_prof = None;
+                        let mut delete_idx: Option<usize> = None;
+                        for (idx, custom) in cfg.lighting.custom_profiles.iter().enumerate() {
+                            let selected = is_lighting_profile_active(cfg, custom);
+                            match lighting_profile_chip(
+                                ui,
+                                ("cockpit_kbd", &custom.id, idx),
+                                &custom.name,
+                                &custom.zones,
+                                selected,
+                                four_zone,
+                                &del_tip,
+                                t,
+                            ) {
+                                SavedChipAction::Apply => apply_prof = Some(custom.clone()),
+                                SavedChipAction::Delete => delete_idx = Some(idx),
+                                SavedChipAction::None => {}
+                            }
+                        }
+                        if let Some(custom) = apply_prof {
                             apply_lighting_profile(cfg, &custom);
                             on_save();
                             on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                             on_cmd(WorkerCommand::ApplyLighting);
+                        }
+                        if let Some(idx) = delete_idx {
+                            let removed = cfg.lighting.custom_profiles.remove(idx);
+                            if cfg.lighting.active_profile_id.as_deref() == Some(&removed.id) {
+                                cfg.lighting.active_profile_id = None;
+                            }
+                            on_save();
+                            on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
                         }
                     }
                 });
@@ -877,13 +942,20 @@ pub fn render(
         ui.set_width(content_w);
         ui.set_max_width(content_w);
 
+        const FOOTER_FONT_SIZE: f32 = 12.5;
         ui.horizontal(|ui| {
-            ui.weak(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0));
+            let ver_label = format!("v{}", env!("CARGO_PKG_VERSION"));
+            if footer_text_button(ui, &ver_label, FOOTER_FONT_SIZE, muted_c, accent)
+                .on_hover_text(i18n.t("cockpit.version_tooltip"))
+                .clicked()
+            {
+                actions.open_updates = true;
+            }
             if let Some((msg, is_err, ts)) = &st.last_toast {
                 if ts.elapsed() < Duration::from_secs(6) {
                     let color = if *is_err { err_c } else { ok_c };
-                    let short = if msg.chars().count() > 28 {
-                        format!("{}...", msg.chars().take(25).collect::<String>())
+                    let short = if msg.chars().count() > 26 {
+                        format!("{}...", msg.chars().take(23).collect::<String>())
                     } else {
                         msg.clone()
                     };
@@ -893,16 +965,25 @@ pub fn render(
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.spacing_mut().button_padding = egui::vec2(9.0, 3.0);
-                if ui
-                    .small_button(RichText::new(i18n.t("cockpit.quit")).size(11.5))
-                    .clicked()
+                if footer_text_button(
+                    ui,
+                    &i18n.t("cockpit.quit"),
+                    FOOTER_FONT_SIZE,
+                    muted_c,
+                    err_c,
+                )
+                .clicked()
                 {
                     actions.quit_app = true;
                 }
-                if ui
-                    .small_button(RichText::new(i18n.t("cockpit.hide_to_tray")).size(11.5))
-                    .clicked()
+                if footer_text_button(
+                    ui,
+                    &i18n.t("cockpit.hide_to_tray"),
+                    FOOTER_FONT_SIZE,
+                    muted_c,
+                    accent,
+                )
+                .clicked()
                 {
                     actions.hide_to_tray = true;
                 }
@@ -916,9 +997,15 @@ pub fn render(
                             ("new", &latest.new_summary),
                         ],
                     );
-                    if undo_button(ui, &i18n.t("history.undo_short"), t)
-                        .on_hover_text(tip)
-                        .clicked()
+                    if undo_text_button(
+                        ui,
+                        &i18n.t("history.undo_short"),
+                        FOOTER_FONT_SIZE,
+                        muted_c,
+                        t,
+                    )
+                    .on_hover_text(tip)
+                    .clicked()
                     {
                         on_cmd(WorkerCommand::UndoLastChange);
                     }

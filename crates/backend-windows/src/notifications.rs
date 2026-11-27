@@ -318,6 +318,16 @@ pub fn show_mode_osd(title: &str, subtitle: &str, accent_rgb: [u8; 3]) {
     }
 
     thread::spawn(move || {
+        struct SpawningGuard;
+        impl Drop for SpawningGuard {
+            fn drop(&mut self) {
+                if let Ok(mut st) = osd_state().lock() {
+                    st.spawning = false;
+                }
+            }
+        }
+        let _spawning_guard = SpawningGuard;
+
         let class_name = HSTRING::from(OSD_CLASS_NAME);
         let empty = HSTRING::from("");
         OSD_CLASS_REGISTERED.get_or_init(|| {
@@ -377,7 +387,10 @@ pub fn show_mode_osd(title: &str, subtitle: &str, accent_rgb: [u8; 3]) {
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let _ = InvalidateRect(hwnd, None, true);
-            let _ = SetTimer(hwnd, OSD_TIMER_ID, 80, None);
+            if SetTimer(hwnd, OSD_TIMER_ID, 80, None) == 0 {
+                let _ = DestroyWindow(hwnd);
+                return;
+            }
         }
 
         let mut msg = MSG::default();

@@ -11,8 +11,8 @@ use windows::Win32::System::Com::{
     RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, SAFEARRAY,
 };
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayDestroy, SafeArrayGetLBound,
-    SafeArrayGetUBound, SafeArrayUnaccessData,
+    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayDestroy, SafeArrayGetDim,
+    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData,
 };
 use windows::Win32::System::Variant::{
     VariantToUInt32, VT_ARRAY, VT_I4, VT_TYPEMASK, VT_UI1, VT_UI4,
@@ -20,8 +20,10 @@ use windows::Win32::System::Variant::{
 use windows::Win32::System::Wmi::{
     IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator,
     WBEM_E_ACCESS_DENIED, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
-    WBEM_GENERIC_FLAG_TYPE, WBEM_INFINITE,
+    WBEM_GENERIC_FLAG_TYPE, WBEM_S_TIMEDOUT,
 };
+
+const WMI_QUERY_TIMEOUT_MS: i32 = 10_000;
 
 const RPC_C_AUTHN_WINNT: u32 = 10;
 const RPC_C_AUTHZ_NONE: u32 = 0;
@@ -39,15 +41,26 @@ impl Drop for ComApartmentGuard {
 }
 
 thread_local! {
-    static WMI_CONN_CACHE_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static WMI_CONN_CACHE_DEPTH: Cell<usize> = const { Cell::new(0) };
     static ROOT_WMI_CONN_CACHE: RefCell<Option<WmiConnection>> = const { RefCell::new(None) };
 }
 
 pub(crate) fn set_root_wmi_cache_enabled(enabled: bool) {
-    WMI_CONN_CACHE_ENABLED.with(|c| c.set(enabled));
-    if !enabled {
+    let next_depth = WMI_CONN_CACHE_DEPTH.with(|c| {
+        let cur = c.get();
+        let next = if enabled {
+            cur.saturating_add(1)
+        } else {
+            cur.saturating_sub(1)
+        };
+        c.set(next);
+        next
+    });
+    if next_depth == 0 {
         ROOT_WMI_CONN_CACHE.with(|cell| {
-            *cell.borrow_mut() = None;
+            if let Ok(mut slot) = cell.try_borrow_mut() {
+                *slot = None;
+            }
         });
     }
 }
@@ -63,14 +76,17 @@ pub struct WmiConnection {
 impl WmiConnection {
     /// Executes `f` using a persistent `root\WMI` connection when thread caching is enabled.
     pub(crate) fn with_cached_root_wmi<T>(f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        let enabled = WMI_CONN_CACHE_ENABLED.with(|c| c.get());
+        let enabled = WMI_CONN_CACHE_DEPTH.with(|c| c.get() > 0);
         if !enabled {
             let conn = Self::connect(r"root\WMI")?;
             return f(&conn);
         }
 
         ROOT_WMI_CONN_CACHE.with(|cell| {
-            let mut slot = cell.borrow_mut();
+            let Ok(mut slot) = cell.try_borrow_mut() else {
+                let conn = Self::connect(r"root\WMI")?;
+                return f(&conn);
+            };
             if slot.is_none() {
                 *slot = Some(Self::connect(r"root\WMI")?);
             }
@@ -171,10 +187,17 @@ impl WmiConnection {
             loop {
                 let mut row: [Option<IWbemClassObject>; 1] = [None];
                 let mut returned = 0u32;
-                let hr: HRESULT = enumerator.Next(WBEM_INFINITE, &mut row, &mut returned);
+                let hr: HRESULT = enumerator.Next(WMI_QUERY_TIMEOUT_MS, &mut row, &mut returned);
                 if hr.0 == WBEM_E_ACCESS_DENIED.0 {
                     return Err(OmvixError::PermissionDenied(format!(
                         "Access denied querying `{wql}` in `{}`",
+                        self.namespace
+                    )));
+                }
+                if hr.0 == WBEM_S_TIMEDOUT.0 {
+                    return Err(OmvixError::WmiUnavailable(format!(
+                        "WMI query `{wql}` timed out after {}s in `{}`",
+                        WMI_QUERY_TIMEOUT_MS / 1000,
                         self.namespace
                     )));
                 }
@@ -305,15 +328,18 @@ pub fn get_u32_array(obj: &IWbemClassObject, name: &str) -> Option<Vec<u32>> {
             return None;
         }
         let psa = val.as_raw().Anonymous.Anonymous.Anonymous.parray as *const SAFEARRAY;
-        if psa.is_null() {
+        if psa.is_null() || SafeArrayGetDim(psa) != 1 {
             return None;
         }
         let lbound = SafeArrayGetLBound(psa, 1).ok()?;
         let ubound = SafeArrayGetUBound(psa, 1).ok()?;
-        if ubound < lbound {
+        let span = i64::from(ubound) - i64::from(lbound) + 1;
+        if span <= 0 {
             return Some(Vec::new());
         }
-        let count = (ubound - lbound + 1) as usize;
+        let Ok(count) = usize::try_from(span) else {
+            return None;
+        };
         let mut data_ptr: *mut c_void = ptr::null_mut();
         SafeArrayAccessData(psa, &mut data_ptr).ok()?;
         let out = if data_ptr.is_null() {
@@ -334,15 +360,18 @@ pub fn get_u8_array(obj: &IWbemClassObject, name: &str) -> Option<Vec<u8>> {
             return None;
         }
         let psa = val.as_raw().Anonymous.Anonymous.Anonymous.parray as *const SAFEARRAY;
-        if psa.is_null() {
+        if psa.is_null() || SafeArrayGetDim(psa) != 1 {
             return None;
         }
         let lbound = SafeArrayGetLBound(psa, 1).ok()?;
         let ubound = SafeArrayGetUBound(psa, 1).ok()?;
-        if ubound < lbound {
+        let span = i64::from(ubound) - i64::from(lbound) + 1;
+        if span <= 0 {
             return Some(Vec::new());
         }
-        let count = (ubound - lbound + 1) as usize;
+        let Ok(count) = usize::try_from(span) else {
+            return None;
+        };
         let mut data_ptr: *mut c_void = ptr::null_mut();
         SafeArrayAccessData(psa, &mut data_ptr).ok()?;
         let out = if data_ptr.is_null() {

@@ -1,6 +1,7 @@
 use crate::theme::{
-    accent_color, card_frame, fixed_color_picker_button, lighting_profile_button, section_title,
-    section_toggle_button, status_badge, ColorButtonStyle,
+    accent_color, card_frame, fixed_color_picker_button, lighting_profile_button,
+    lighting_profile_chip, section_title, section_toggle_button, status_badge, ColorButtonStyle,
+    SavedChipAction,
 };
 use crate::ui::{control_committed, unique_profile_slug};
 use crate::worker::{SharedState, WorkerCommand};
@@ -29,6 +30,9 @@ pub fn render(
 
     // Keyboard Backlight & RGB Card
     card_frame(t).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         ui.horizontal_wrapped(|ui| {
             if section_toggle_button(
                 ui,
@@ -118,6 +122,7 @@ pub fn render(
 
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                 ui.label(i18n.t("lighting.presets"));
                 for preset in LightingProfile::builtins() {
                     let selected = is_lighting_profile_active(cfg, &preset);
@@ -137,52 +142,45 @@ pub fn render(
                         on_cmd(WorkerCommand::ApplyLighting);
                     }
                 }
-            });
-
-            ui.separator();
-            section_title(ui, i18n.t("lighting.profiles_title"), t);
-            ui.add_space(4.0);
-
-            if cfg.lighting.custom_profiles.is_empty() {
-                ui.weak(i18n.t("lighting.no_custom_profiles"));
-            } else {
-                let mut apply_prof: Option<LightingProfile> = None;
-                let mut delete_idx: Option<usize> = None;
-                for (idx, prof) in cfg.lighting.custom_profiles.iter().enumerate() {
-                    let is_active = is_lighting_profile_active(cfg, prof);
-                    ui.horizontal_wrapped(|ui| {
-                        if lighting_profile_button(
+                if !cfg.lighting.custom_profiles.is_empty() {
+                    let mut apply_prof: Option<LightingProfile> = None;
+                    let mut delete_idx: Option<usize> = None;
+                    let del_tip = i18n.t("lighting.delete_profile");
+                    for (idx, prof) in cfg.lighting.custom_profiles.iter().enumerate() {
+                        let is_active = is_lighting_profile_active(cfg, prof);
+                        match lighting_profile_chip(
                             ui,
+                            (&prof.id, idx),
                             &format!("{} ({}%)", prof.name, prof.brightness_pct),
                             &prof.zones,
                             is_active,
                             four_zone,
+                            &del_tip,
                             t,
-                        )
-                        .clicked()
-                        {
-                            apply_prof = Some(prof.clone());
+                        ) {
+                            SavedChipAction::Apply => apply_prof = Some(prof.clone()),
+                            SavedChipAction::Delete => delete_idx = Some(idx),
+                            SavedChipAction::None => {}
                         }
-                        if ui.button(i18n.t("lighting.delete_profile")).clicked() {
-                            delete_idx = Some(idx);
-                        }
-                    });
-                }
-                if let Some(p) = apply_prof {
-                    apply_lighting_profile(cfg, &p);
-                    on_save();
-                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
-                    on_cmd(WorkerCommand::ApplyLighting);
-                }
-                if let Some(idx) = delete_idx {
-                    let removed = cfg.lighting.custom_profiles.remove(idx);
-                    if cfg.lighting.active_profile_id.as_deref() == Some(&removed.id) {
-                        cfg.lighting.active_profile_id = None;
                     }
-                    on_save();
-                    on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    if let Some(p) = apply_prof {
+                        apply_lighting_profile(cfg, &p);
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                        on_cmd(WorkerCommand::ApplyLighting);
+                    }
+                    if let Some(idx) = delete_idx {
+                        let removed = cfg.lighting.custom_profiles.remove(idx);
+                        if cfg.lighting.active_profile_id.as_deref() == Some(&removed.id) {
+                            cfg.lighting.active_profile_id = None;
+                        }
+                        on_save();
+                        on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    }
                 }
-            }
+            });
+
+            ui.separator();
 
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
@@ -239,6 +237,9 @@ pub fn render(
 
     // Display Refresh Rate Card
     card_frame(t).show(ui, |ui| {
+        let card_w = ui.available_width().max(260.0);
+        ui.set_width(card_w);
+        ui.set_max_width(card_w);
         section_title(ui, i18n.t("display.refresh_rate"), t);
         if let Some(disp) = &st.display_mode {
             ui.label(format!(

@@ -56,7 +56,9 @@ impl BatteryCareEngine {
         }
 
         let stop = cfg.stop_threshold_pct.clamp(50, 100);
-        let start = cfg.start_threshold_pct.clamp(40, stop.saturating_sub(2));
+        let start = cfg
+            .start_threshold_pct
+            .clamp(40, stop.saturating_sub(2).max(40));
 
         let resolve_limit_mode = || match cfg.mode {
             BatteryChargeMode::Hold => BatteryChargeMode::Hold,

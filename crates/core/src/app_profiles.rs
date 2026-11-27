@@ -83,6 +83,13 @@ pub fn normalize_exe_name(raw: &str) -> Option<String> {
     }
 
     let mut lower = basename.to_ascii_lowercase();
+    if lower.ends_with(' ')
+        || lower
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
+        return None;
+    }
     if !lower.contains('.') {
         lower.push_str(".exe");
     }
@@ -97,8 +104,12 @@ pub fn normalize_exe_name(raw: &str) -> Option<String> {
 pub struct ProfileBaseline {
     pub performance_mode: PerformanceMode,
     pub fan_mode: FanMode,
+    pub gpu_fan_mode: FanMode,
     pub manual_speed_pct: u8,
+    pub gpu_manual_speed_pct: u8,
     pub custom_curve: FanCurve,
+    pub gpu_custom_curve: FanCurve,
+    pub link_cpu_gpu_fans: bool,
     pub refresh_hz: Option<u32>,
     pub cpu_boost_mode: Option<CpuBoostMode>,
 }
@@ -130,6 +141,10 @@ impl AppProfileEngine {
         self.active_rule.as_ref()
     }
 
+    pub fn saved_baseline(&self) -> Option<&ProfileBaseline> {
+        self.saved_baseline.as_ref()
+    }
+
     pub fn reset(&mut self) {
         self.active_rule = None;
         self.saved_baseline = None;
@@ -141,9 +156,12 @@ impl AppProfileEngine {
             baseline.performance_mode = action.performance_mode;
             if let Some(fm) = action.fan_mode {
                 baseline.fan_mode = fm;
+                baseline.gpu_fan_mode = fm;
             }
             if let Some(preset) = action.curve_preset {
-                baseline.custom_curve = preset.to_curve();
+                let curve = preset.to_curve();
+                baseline.custom_curve = curve.clone();
+                baseline.gpu_custom_curve = curve;
             }
             if action.refresh_hz.is_some() {
                 baseline.refresh_hz = action.refresh_hz;
@@ -210,8 +228,12 @@ mod tests {
         ProfileBaseline {
             performance_mode: PerformanceMode::Balanced,
             fan_mode: FanMode::Auto,
+            gpu_fan_mode: FanMode::Auto,
             manual_speed_pct: 50,
+            gpu_manual_speed_pct: 50,
             custom_curve: FanCurve::default(),
+            gpu_custom_curve: FanCurve::default(),
+            link_cpu_gpu_fans: false,
             refresh_hz: Some(165),
             cpu_boost_mode: Some(CpuBoostMode::Aggressive),
         }
@@ -243,6 +265,9 @@ mod tests {
         assert_eq!(normalize_exe_name("bad."), None);
         assert_eq!(normalize_exe_name("game\n.exe"), None);
         assert_eq!(normalize_exe_name("game\0.exe"), None);
+        assert_eq!(normalize_exe_name("bad:name.exe"), None);
+        assert_eq!(normalize_exe_name("bad*.exe"), None);
+        assert_eq!(normalize_exe_name("bad?.exe"), None);
     }
 
     #[test]
@@ -311,7 +336,7 @@ mod tests {
             id: "low".into(),
             name: "Browser".into(),
             exe_name: "browser.exe".into(),
-            performance_mode: PerformanceMode::Eco,
+            performance_mode: PerformanceMode::Quiet,
             ..Default::default()
         };
         let cfg = AppProfilesConfig {
@@ -371,7 +396,7 @@ mod tests {
 
         let _ = engine.evaluate(&cfg, &set_of(&["app.exe"]), sample_baseline);
         engine.update_baseline_for_ac_dc(&AutoProfileAction {
-            performance_mode: PerformanceMode::Eco,
+            performance_mode: PerformanceMode::Quiet,
             fan_mode: Some(FanMode::CustomCurve),
             curve_preset: Some(FanCurvePreset::Quiet),
             refresh_hz: Some(60),
@@ -382,7 +407,7 @@ mod tests {
         let restored = engine.evaluate(&cfg, &set_of(&[]), sample_baseline);
         match restored {
             AppProfileTransition::Restore(b) => {
-                assert_eq!(b.performance_mode, PerformanceMode::Eco);
+                assert_eq!(b.performance_mode, PerformanceMode::Quiet);
                 assert_eq!(b.fan_mode, FanMode::CustomCurve);
                 assert_eq!(b.custom_curve, FanCurve::preset_quiet());
                 assert_eq!(b.refresh_hz, Some(60));

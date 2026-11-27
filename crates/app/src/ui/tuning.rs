@@ -25,10 +25,12 @@ pub fn render(
     let warn_c = status_warn(t);
     let err_c = status_err(t);
     let muted_c = muted_text(t);
-    let effective_fan = if st.active_app_profile.is_some() {
-        st.effective_fan_mode
-    } else {
+    let effective_gpu_fan = if st.active_app_profile.is_some() {
+        st.effective_gpu_fan_mode
+    } else if cfg.thermal_fan.link_cpu_gpu_fans {
         cfg.thermal_fan.fan_mode
+    } else {
+        cfg.thermal_fan.gpu_fan_mode
     };
 
     ui.horizontal_wrapped(|ui| {
@@ -134,10 +136,19 @@ pub fn render(
                 .changed()
                 {
                     if cfg.thermal_fan.link_cpu_gpu_fans {
+                        cfg.thermal_fan.gpu_fan_mode = cfg.thermal_fan.fan_mode;
                         cfg.thermal_fan.gpu_manual_speed_pct = cfg.thermal_fan.manual_speed_pct;
                     }
                     on_save();
                     on_cmd(WorkerCommand::UpdateConfig(cfg.clone()));
+                    if cfg.thermal_fan.link_cpu_gpu_fans {
+                        on_cmd(WorkerCommand::SetFanMode {
+                            mode: cfg.thermal_fan.fan_mode,
+                            gpu_mode: Some(cfg.thermal_fan.fan_mode),
+                            manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                            gpu_manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
+                        });
+                    }
                 }
             });
         });
@@ -146,10 +157,17 @@ pub fn render(
         if cfg.thermal_fan.link_cpu_gpu_fans {
             ui.weak(i18n.t("fan.gpu_linked_notice"));
         } else {
-            render_fan_mode_selector(ui, cfg, effective_fan, i18n, t, on_cmd, on_save);
+            render_fan_mode_selector(ui, cfg, effective_gpu_fan, true, i18n, t, on_cmd, on_save);
             ui.add_space(6.0);
 
-            if cfg.thermal_fan.fan_mode == FanMode::Manual {
+            if cfg.thermal_fan.gpu_fan_mode == FanMode::Auto
+                && cfg.thermal_fan.fan_mode != FanMode::Auto
+            {
+                ui.weak(RichText::new(i18n.t("fan.mixed_auto_note")).size(11.0));
+                ui.add_space(4.0);
+            }
+
+            if cfg.thermal_fan.gpu_fan_mode == FanMode::Manual {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(i18n.t("fan.gpu_manual_speed"));
                     let resp = ui.add(
@@ -158,7 +176,8 @@ pub fn render(
                     if control_committed(ui, "perf_gpu_manual_fan", &resp) {
                         on_save();
                         on_cmd(WorkerCommand::SetFanMode {
-                            mode: FanMode::Manual,
+                            mode: cfg.thermal_fan.fan_mode,
+                            gpu_mode: Some(FanMode::Manual),
                             manual_speed_pct: Some(cfg.thermal_fan.manual_speed_pct),
                             gpu_manual_speed_pct: Some(cfg.thermal_fan.gpu_manual_speed_pct),
                         });
@@ -166,7 +185,7 @@ pub fn render(
                 });
             }
 
-            if cfg.thermal_fan.fan_mode == FanMode::CustomCurve {
+            if cfg.thermal_fan.gpu_fan_mode == FanMode::CustomCurve {
                 ui.add_space(4.0);
                 let live_gpu_temp = if st.telemetry.gpu_sleeping {
                     st.telemetry.chassis_temp_c
@@ -216,7 +235,11 @@ pub fn render(
             ] {
                 let selected = draft.pending_gpu_mode.unwrap_or(cur) == mode;
                 if pill_button(ui, &i18n.t(key), selected, t).clicked() {
-                    draft.pending_gpu_mode = Some(mode);
+                    if cur == mode {
+                        draft.pending_gpu_mode = None;
+                    } else {
+                        draft.pending_gpu_mode = Some(mode);
+                    }
                 }
             }
         });

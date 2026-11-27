@@ -28,7 +28,7 @@ const DRAWER_SIZE: [f32; 2] = [632.0, 668.0];
 
 #[cfg(windows)]
 use omvix_windows::hotkeys::{
-    spawn_global_hotkey_listener, spawn_omen_key_listener, HotkeyBindError, ListenerHandle,
+    spawn_global_hotkey_listener, spawn_hp_wmi_event_listener, HotkeyBindError, ListenerHandle,
 };
 #[cfg(windows)]
 use omvix_windows::power_events::{spawn_power_event_listener, PowerEventHandle, SystemPowerEvent};
@@ -51,7 +51,6 @@ enum AppSignal {
 
 fn perf_mode_label(i18n: &I18n, mode: PerformanceMode) -> String {
     match mode {
-        PerformanceMode::Eco => i18n.t("thermal.mode_eco"),
         PerformanceMode::Quiet => i18n.t("thermal.mode_quiet"),
         PerformanceMode::Balanced => i18n.t("thermal.mode_balanced"),
         PerformanceMode::Performance => i18n.t("thermal.mode_performance"),
@@ -933,6 +932,7 @@ struct OmvixApp {
     drawer_dock_locked: Option<bool>,
     pending_dock_frames: u8,
     pending_hide_frames: u8,
+    last_applied_main_theme: Option<(CustomThemeConfig, u8)>,
     last_applied_drawer_theme: Option<(CustomThemeConfig, u8)>,
     last_shown_at: Instant,
     prev_focused: bool,
@@ -944,6 +944,7 @@ struct OmvixApp {
     profiles_draft: ui::profiles::ProfilesDraftState,
     battery_draft: ui::battery::BatteryDraftState,
     lighting_draft: ui::lighting_display::LightingDisplayDraftState,
+    appearance_draft: ui::appearance::AppearanceDraftState,
     hotkeys_draft: ui::hotkeys::HotkeysDraftState,
     settings_draft: ui::settings::SettingsThemeDraft,
     hotkey_bind_status: ui::hotkeys::HotkeyBindStatus,
@@ -957,6 +958,8 @@ struct OmvixApp {
     omen_action_code: Arc<AtomicU8>,
     quitting: bool,
     tray: Option<TrayController>,
+    tray_retry_last: Option<Instant>,
+    tray_retry_attempts: u8,
     worker: Option<BackgroundWorker>,
     state: Arc<Mutex<SharedState>>,
     signal_tx: Sender<AppSignal>,
@@ -1063,6 +1066,7 @@ impl OmvixApp {
                     TrayAction::SetFan(mode) => {
                         let _ = _worker_clone_for_tray.send(WorkerCommand::SetFanMode {
                             mode,
+                            gpu_mode: Some(mode),
                             manual_speed_pct: None,
                             gpu_manual_speed_pct: None,
                         });
@@ -1098,9 +1102,9 @@ impl OmvixApp {
                                 win32_set_visible(hwnd_raw, true);
                                 win32_post_close(hwnd_raw);
                                 wake_again.request_repaint();
-                                thread::sleep(Duration::from_millis(1500));
+                                thread::sleep(Duration::from_millis(4500));
                             } else {
-                                thread::sleep(Duration::from_millis(1500));
+                                thread::sleep(Duration::from_millis(4500));
                             }
                             tracing::warn!("Tray quit watchdog forcing clean process termination");
                             std::process::exit(0);
@@ -1117,6 +1121,7 @@ impl OmvixApp {
         } else {
             0
         };
+        let initial_main_theme = (cfg.general.custom_theme.clone(), cfg.general.font_scale_pct);
         let mut app = Self {
             cfg,
             cfg_path,
@@ -1133,6 +1138,7 @@ impl OmvixApp {
             drawer_dock_locked: None,
             pending_dock_frames: dock_initial,
             pending_hide_frames: 0,
+            last_applied_main_theme: Some(initial_main_theme),
             last_applied_drawer_theme: None,
             last_shown_at: Instant::now(),
             prev_focused: true,
@@ -1144,6 +1150,7 @@ impl OmvixApp {
             profiles_draft: ui::profiles::ProfilesDraftState::default(),
             battery_draft: ui::battery::BatteryDraftState::default(),
             lighting_draft: ui::lighting_display::LightingDisplayDraftState::default(),
+            appearance_draft: ui::appearance::AppearanceDraftState::default(),
             hotkeys_draft: ui::hotkeys::HotkeysDraftState::default(),
             settings_draft: ui::settings::SettingsThemeDraft::default(),
             hotkey_bind_status: ui::hotkeys::HotkeyBindStatus::Disabled,
@@ -1157,6 +1164,8 @@ impl OmvixApp {
             omen_action_code,
             quitting: false,
             tray,
+            tray_retry_last: None,
+            tray_retry_attempts: 0,
             worker: Some(worker),
             state,
             signal_tx,
@@ -1341,14 +1350,19 @@ impl OmvixApp {
         {
             self.stop_hotkeys();
 
-            if self.cfg.hotkeys.capture_omen_key {
-                let tx = self.signal_tx.clone();
-                let c = ctx.clone();
-                let vis = Arc::clone(&self.window_visible);
-                let hwnd = Arc::clone(&self.hwnd_atomic);
-                let d_hwnd = Arc::clone(&self.drawer_hwnd_atomic);
-                let action_code = Arc::clone(&self.omen_action_code);
-                self.omen_listener = Some(spawn_omen_key_listener(move || {
+            let capture_omen = self.cfg.hotkeys.capture_omen_key;
+            let tx = self.signal_tx.clone();
+            let c = ctx.clone();
+            let vis = Arc::clone(&self.window_visible);
+            let hwnd = Arc::clone(&self.hwnd_atomic);
+            let d_hwnd = Arc::clone(&self.drawer_hwnd_atomic);
+            let action_code = Arc::clone(&self.omen_action_code);
+            let worker_tx = self.worker.as_ref().map(|w| w.sender_clone());
+            self.omen_listener = Some(spawn_hp_wmi_event_listener(
+                move || {
+                    if !capture_omen {
+                        return;
+                    }
                     if action_code.load(Ordering::Relaxed) == 0 {
                         if vis.load(Ordering::SeqCst) {
                             vis.store(false, Ordering::SeqCst);
@@ -1366,8 +1380,13 @@ impl OmvixApp {
                         let _ = tx.send(AppSignal::OmenKeyNonToggle);
                     }
                     c.request_repaint();
-                }));
-            }
+                },
+                move |_event_id, _event_data| {
+                    if let Some(ref wtx) = worker_tx {
+                        let _ = wtx.send(WorkerCommand::PollExternalHardwareState);
+                    }
+                },
+            ));
 
             if !self.hotkey_capture_active.load(Ordering::Relaxed)
                 && !self.cfg.hotkeys.global_toggle_shortcut.trim().is_empty()
@@ -1516,10 +1535,9 @@ impl OmvixApp {
             return;
         }
         let next = match self.cfg.thermal_fan.performance_mode {
-            PerformanceMode::Eco => PerformanceMode::Quiet,
             PerformanceMode::Quiet => PerformanceMode::Balanced,
             PerformanceMode::Balanced => PerformanceMode::Performance,
-            PerformanceMode::Performance => PerformanceMode::Eco,
+            PerformanceMode::Performance => PerformanceMode::Quiet,
         };
         self.cfg.thermal_fan.performance_mode = next;
         self.save_config();
@@ -1596,7 +1614,13 @@ impl OmvixApp {
                     self.request_hide(ctx);
                 }
                 AppSignal::TrayPerfChanged(mode) => {
-                    if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
+                    let allow = self
+                        .state
+                        .lock()
+                        .ok()
+                        .map(|s| s.safe_mode.is_none() && s.bios_writes_allowed)
+                        .unwrap_or(false);
+                    if allow {
                         self.cfg.thermal_fan.performance_mode = mode;
                         self.save_config();
                         show_mode_change_osd(
@@ -1609,8 +1633,20 @@ impl OmvixApp {
                     }
                 }
                 AppSignal::TrayFanChanged(mode) => {
-                    if self.state.lock().ok().and_then(|s| s.safe_mode).is_none() {
+                    let allow = self
+                        .state
+                        .lock()
+                        .ok()
+                        .map(|s| {
+                            s.safe_mode.is_none()
+                                && s.bios_writes_allowed
+                                && !s.thermal_guard_active
+                                && !s.sensor_loss_active
+                        })
+                        .unwrap_or(false);
+                    if allow {
                         self.cfg.thermal_fan.fan_mode = mode;
+                        self.cfg.thermal_fan.gpu_fan_mode = mode;
                         self.save_config();
                         show_mode_change_osd(
                             &self.i18n.t("osd.fan_mode_title"),
@@ -1734,6 +1770,7 @@ fn worker_command_proxy(worker: &BackgroundWorker) -> Sender<WorkerCommand> {
 fn merge_worker_synced_config(dst: &mut AppConfig, synced: &AppConfig) {
     dst.thermal_fan.performance_mode = synced.thermal_fan.performance_mode;
     dst.thermal_fan.fan_mode = synced.thermal_fan.fan_mode;
+    dst.thermal_fan.gpu_fan_mode = synced.thermal_fan.gpu_fan_mode;
     dst.thermal_fan.manual_speed_pct = synced.thermal_fan.manual_speed_pct;
     dst.thermal_fan.gpu_manual_speed_pct = synced.thermal_fan.gpu_manual_speed_pct;
     dst.thermal_fan.custom_curve = synced.thermal_fan.custom_curve.clone();
@@ -1858,6 +1895,15 @@ impl eframe::App for OmvixApp {
             }
         }
 
+        let main_theme_key = (
+            self.cfg.general.custom_theme.clone(),
+            self.cfg.general.font_scale_pct,
+        );
+        if self.last_applied_main_theme.as_ref() != Some(&main_theme_key) {
+            theme::apply_theme(ctx, &main_theme_key.0, main_theme_key.1);
+            self.last_applied_main_theme = Some(main_theme_key);
+        }
+
         let mut pending_cmds: Vec<WorkerCommand> = Vec::new();
         let mut should_save = false;
         if snapshot_state.synced_config_rev != self.last_seen_config_sync_rev {
@@ -1873,7 +1919,32 @@ impl eframe::App for OmvixApp {
             if snapshot_state.active_app_profile.is_none() {
                 self.cfg.thermal_fan.performance_mode = snapshot_state.effective_performance_mode;
                 self.cfg.thermal_fan.fan_mode = snapshot_state.effective_fan_mode;
+                self.cfg.thermal_fan.gpu_fan_mode = snapshot_state.effective_gpu_fan_mode;
                 should_save = true;
+            }
+        }
+
+        if self.tray.is_none()
+            && self.tray_retry_attempts < 15
+            && self
+                .tray_retry_last
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+        {
+            self.tray_retry_last = Some(Instant::now());
+            self.tray_retry_attempts = self.tray_retry_attempts.saturating_add(1);
+            match TrayController::new(&self.i18n) {
+                Ok(mut t) => {
+                    t.update_labels(&self.i18n, self.window_visible.load(Ordering::Relaxed));
+                    self.tray = Some(t);
+                    tracing::info!(
+                        attempt = self.tray_retry_attempts,
+                        "Initialized system tray icon on startup retry"
+                    );
+                }
+                Err(err) if self.tray_retry_attempts == 15 => {
+                    tracing::warn!("System tray retry exhausted after 15 attempts: {err}");
+                }
+                Err(_) => {}
             }
         }
 
@@ -1883,16 +1954,29 @@ impl eframe::App for OmvixApp {
                 .as_ref()
                 .map(|b| b.current_mode)
                 .unwrap_or(omvix_core::BatteryChargeMode::Unknown);
-            let (tray_perf, tray_fan) = if snapshot_state.active_app_profile.is_some() {
-                (
-                    snapshot_state.effective_performance_mode,
-                    snapshot_state.effective_fan_mode,
-                )
+            let (tray_perf, tray_cpu_fan, tray_gpu_fan) =
+                if snapshot_state.active_app_profile.is_some() {
+                    (
+                        snapshot_state.effective_performance_mode,
+                        snapshot_state.effective_fan_mode,
+                        snapshot_state.effective_gpu_fan_mode,
+                    )
+                } else {
+                    let gpu_eff = if self.cfg.thermal_fan.link_cpu_gpu_fans {
+                        self.cfg.thermal_fan.fan_mode
+                    } else {
+                        self.cfg.thermal_fan.gpu_fan_mode
+                    };
+                    (
+                        self.cfg.thermal_fan.performance_mode,
+                        self.cfg.thermal_fan.fan_mode,
+                        gpu_eff,
+                    )
+                };
+            let tray_fan = if tray_cpu_fan == tray_gpu_fan {
+                Some(tray_cpu_fan)
             } else {
-                (
-                    self.cfg.thermal_fan.performance_mode,
-                    self.cfg.thermal_fan.fan_mode,
-                )
+                None
             };
             tray.update_visual_state(
                 tray_perf,
@@ -2008,6 +2092,16 @@ impl eframe::App for OmvixApp {
                     open_extra = res.open_extra_subtab;
                     if res.open_profiles {
                         open_profiles = true;
+                    }
+                    if res.open_updates {
+                        open_extra = Some(ExtraSubTab::Settings);
+                        self.settings_draft.scroll_to_updates = true;
+                        if matches!(
+                            snapshot_state.update_status,
+                            omvix_core::UpdateUiStatus::Idle
+                        ) {
+                            pending_cmds.push(WorkerCommand::CheckForUpdates { silent: false });
+                        }
                     }
                     if res.restart_admin {
                         should_restart_admin = true;
@@ -2166,6 +2260,7 @@ impl eframe::App for OmvixApp {
                                                 ExtraSubTab::LightingDisplay,
                                                 "drawer.sub_lighting_display",
                                             ),
+                                            (ExtraSubTab::Appearance, "drawer.sub_appearance"),
                                             (ExtraSubTab::Hotkeys, "drawer.sub_hotkeys"),
                                             (ExtraSubTab::Diagnostics, "drawer.sub_diagnostics"),
                                             (ExtraSubTab::Settings, "drawer.sub_settings"),
@@ -2280,6 +2375,35 @@ impl eframe::App for OmvixApp {
                                                     &mut mark_save,
                                                 )
                                             }
+                                            ExtraSubTab::Appearance => {
+                                                let res = ui::appearance::render(
+                                                    ui,
+                                                    &mut self.cfg,
+                                                    &self.i18n,
+                                                    &mut self.appearance_draft,
+                                                    &mut mark_save,
+                                                );
+                                                if res.theme_changed {
+                                                    theme::apply_theme(
+                                                        drawer_ctx,
+                                                        &self.cfg.general.custom_theme,
+                                                        self.cfg.general.font_scale_pct,
+                                                    );
+                                                    self.last_applied_drawer_theme = Some((
+                                                        self.cfg.general.custom_theme.clone(),
+                                                        self.cfg.general.font_scale_pct,
+                                                    ));
+                                                    theme::apply_theme(
+                                                        ctx,
+                                                        &self.cfg.general.custom_theme,
+                                                        self.cfg.general.font_scale_pct,
+                                                    );
+                                                    self.last_applied_main_theme = Some((
+                                                        self.cfg.general.custom_theme.clone(),
+                                                        self.cfg.general.font_scale_pct,
+                                                    ));
+                                                }
+                                            }
                                             ExtraSubTab::Hotkeys => ui::hotkeys::render(
                                                 ui,
                                                 &mut self.cfg,
@@ -2316,17 +2440,6 @@ impl eframe::App for OmvixApp {
                                                                 .load(Ordering::Relaxed),
                                                         );
                                                     }
-                                                }
-                                                if res.theme_changed {
-                                                    theme::apply_theme(
-                                                        drawer_ctx,
-                                                        &self.cfg.general.custom_theme,
-                                                        self.cfg.general.font_scale_pct,
-                                                    );
-                                                    self.last_applied_drawer_theme = Some((
-                                                        self.cfg.general.custom_theme.clone(),
-                                                        self.cfg.general.font_scale_pct,
-                                                    ));
                                                 }
                                                 if res.dock_changed
                                                     && self.cfg.general.dock_bottom_right
@@ -2419,6 +2532,7 @@ impl eframe::App for OmvixApp {
             self.profiles_draft = ui::profiles::ProfilesDraftState::default();
             self.battery_draft = ui::battery::BatteryDraftState::default();
             self.lighting_draft = ui::lighting_display::LightingDisplayDraftState::default();
+            self.appearance_draft = ui::appearance::AppearanceDraftState::default();
             self.hotkeys_draft = ui::hotkeys::HotkeysDraftState::default();
             self.settings_draft = ui::settings::SettingsThemeDraft::default();
             self.last_seen_config_sync_rev = snapshot_state.synced_config_rev;

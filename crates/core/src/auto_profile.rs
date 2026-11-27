@@ -73,7 +73,7 @@ mod tests {
         let cfg = AutoProfileConfig {
             enabled: true,
             ac_performance_mode: PerformanceMode::Performance,
-            dc_performance_mode: PerformanceMode::Eco,
+            dc_performance_mode: PerformanceMode::Quiet,
             ac_fan_mode: Some(FanMode::CustomCurve),
             dc_fan_mode: Some(FanMode::Auto),
             ac_curve_preset: Some(FanCurvePreset::Aggressive),
@@ -98,7 +98,7 @@ mod tests {
 
         // Transition to battery -> DC action
         let dc_action = engine.evaluate(&cfg, false, false).expect("DC transition");
-        assert_eq!(dc_action.performance_mode, PerformanceMode::Eco);
+        assert_eq!(dc_action.performance_mode, PerformanceMode::Quiet);
         assert_eq!(dc_action.fan_mode, Some(FanMode::Auto));
         assert_eq!(dc_action.curve_preset, None);
         assert_eq!(dc_action.refresh_hz, Some(60));

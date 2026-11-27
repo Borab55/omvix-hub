@@ -173,7 +173,7 @@ pub fn install_pawnio_and_module() -> Result<String> {
     let script = r#"
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor 12288 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }
 $dir = $env:OMVIX_PAWNIO_DIR
 $staging = Join-Path $dir '.staging'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -185,7 +185,7 @@ $reboot = $false
 try {
     if ($env:OMVIX_SKIP_DRIVER -ne '1') {
         $exe = Join-Path $staging 'PawnIO_setup.exe'
-        Invoke-WebRequest -Uri $env:OMVIX_SETUP_URL -OutFile $exe -Headers $headers -TimeoutSec 60
+        Invoke-WebRequest -Uri $env:OMVIX_SETUP_URL -OutFile $exe -Headers $headers -TimeoutSec 60 -UseBasicParsing
         $actualSetupSha = (Get-FileHash -Algorithm SHA256 -Path $exe).Hash.ToLowerInvariant()
         if ($actualSetupSha -ne $env:OMVIX_SETUP_SHA256) {
             throw ('PawnIO_setup.exe SHA-256 mismatch: ' + $actualSetupSha)
@@ -217,7 +217,7 @@ try {
 
     $zip = Join-Path $staging 'modules.zip'
     $ext = Join-Path $staging 'ext'
-    Invoke-WebRequest -Uri $env:OMVIX_MODULES_URL -OutFile $zip -Headers $headers -TimeoutSec 60
+    Invoke-WebRequest -Uri $env:OMVIX_MODULES_URL -OutFile $zip -Headers $headers -TimeoutSec 60 -UseBasicParsing
     $actualZipSha = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
     if ($actualZipSha -ne $env:OMVIX_MODULES_ZIP_SHA256) {
         throw ('PawnIO.Modules zip SHA-256 mismatch: ' + $actualZipSha)
@@ -242,7 +242,7 @@ try {
 "#;
 
     let out = Command::new(crate::paths::system_tool("powershell.exe"))
-        .args(["-NoProfile", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("OMVIX_PAWNIO_DIR", &dir)
         .env("OMVIX_SKIP_DRIVER", if skip_driver { "1" } else { "0" })
         .env("OMVIX_SETUP_URL", PAWNIO_SETUP_URL)
@@ -421,6 +421,15 @@ impl PawnIoCpuTempReader {
             tracing::warn!(
                 path = %module_path.display(),
                 "Refusing to load IntelMSR.bin from reparse point"
+            );
+            return None;
+        }
+        let meta = fs::metadata(&module_path).ok()?;
+        if meta.len() == 0 || meta.len() > 4 * 1024 * 1024 {
+            tracing::warn!(
+                path = %module_path.display(),
+                len = meta.len(),
+                "Refusing to load IntelMSR.bin with invalid size"
             );
             return None;
         }
